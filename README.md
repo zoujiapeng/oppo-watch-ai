@@ -1,14 +1,14 @@
 <div align="center">
 
-# siri-glsl
+# glsl-playground
 
 **一组 WebGL / GLSL shader 实验：声波、液态玻璃、流体融合**
 
 A set of WebGL / GLSL shader experiments — voice waves, liquid glass, and fluid metaball morphing
 
-[**在线预览 / Live Demo**](https://aaaa-zhen.github.io/siri-glsl/)
+[**在线预览 / Live Demo**](https://aaaa-zhen.github.io/glsl-playground/)
 
-[![Live Demo](https://img.shields.io/badge/demo-online-4cd9c0?style=flat-square)](https://aaaa-zhen.github.io/siri-glsl/)
+[![Live Demo](https://img.shields.io/badge/demo-online-4cd9c0?style=flat-square)](https://aaaa-zhen.github.io/glsl-playground/)
 [![WebGL](https://img.shields.io/badge/WebGL-GLSL-5b7cfa?style=flat-square)](https://www.khronos.org/webgl/)
 [![No Dependencies](https://img.shields.io/badge/dependencies-none-ff5fa2?style=flat-square)](#)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](#license)
@@ -24,11 +24,11 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 
 | Demo | 说明 | 交互 |
 |---|---|---|
-| **[Siri Wave](https://aaaa-zhen.github.io/siri-glsl/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 语音声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
-| **[Liquid Glass](https://aaaa-zhen.github.io/siri-glsl/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | 液态玻璃材质：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
-| **[Metaball → Search](https://aaaa-zhen.github.io/siri-glsl/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | 从屏幕边缘拖出液滴唤起搜索框：梯度感知 smooth-min（液滴渗出时起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
+| **[Siri Wave](https://aaaa-zhen.github.io/glsl-playground/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 语音声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
+| **[Liquid Glass](https://aaaa-zhen.github.io/glsl-playground/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | 液态玻璃材质：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
+| **[Metaball → Search](https://aaaa-zhen.github.io/glsl-playground/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | 从屏幕边缘拖出液滴唤起搜索框：梯度感知 smooth-min（液滴渗出时起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
 
-> 三个 demo 也可以从首页 [aaaa-zhen.github.io/siri-glsl](https://aaaa-zhen.github.io/siri-glsl/) 统一进入。
+> 三个 demo 也可以从首页 [aaaa-zhen.github.io/glsl-playground](https://aaaa-zhen.github.io/glsl-playground/) 统一进入。
 
 ## 技术点 / Techniques
 
@@ -50,8 +50,8 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 ## 本地运行 / Run Locally
 
 ```bash
-git clone https://github.com/aaaa-zhen/siri-glsl.git
-cd siri-glsl
+git clone https://github.com/aaaa-zhen/glsl-playground.git
+cd glsl-playground
 open index.html          # macOS，或直接把 html 拖进浏览器
 ```
 
