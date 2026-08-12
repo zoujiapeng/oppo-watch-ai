@@ -2,9 +2,9 @@
 
 # siri-glsl
 
-**用 WebGL / GLSL 逆向复刻 Apple 新版 Siri 动画与 Liquid Glass 效果**
+**一组 WebGL / GLSL shader 实验：声波、液态玻璃、流体融合**
 
-A GLSL study recreating Apple's new Siri animation and the Liquid Glass effect
+A set of WebGL / GLSL shader experiments — voice waves, liquid glass, and fluid metaball morphing
 
 [**在线预览 / Live Demo**](https://aaaa-zhen.github.io/siri-glsl/)
 
@@ -24,9 +24,9 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 
 | Demo | 说明 | 交互 |
 |---|---|---|
-| **[Siri Wave](https://aaaa-zhen.github.io/siri-glsl/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 新版 Siri 声波 `siriWaveCore` 与流体圆点 `siriFluidDotsCore`：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
-| **[Liquid Glass](https://aaaa-zhen.github.io/siri-glsl/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | QuartzCore `glass_background` 重建：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
-| **[Metaball → Search](https://aaaa-zhen.github.io/siri-glsl/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | iPadOS 从边缘拖拽唤醒搜索的复刻：梯度感知 smooth-min（液滴从黑边渗出起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
+| **[Siri Wave](https://aaaa-zhen.github.io/siri-glsl/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 语音声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
+| **[Liquid Glass](https://aaaa-zhen.github.io/siri-glsl/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | 液态玻璃材质：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
+| **[Metaball → Search](https://aaaa-zhen.github.io/siri-glsl/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | 从屏幕边缘拖出液滴唤起搜索框：梯度感知 smooth-min（液滴渗出时起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
 
 > 三个 demo 也可以从首页 [aaaa-zhen.github.io/siri-glsl](https://aaaa-zhen.github.io/siri-glsl/) 统一进入。
 
