@@ -3,3 +3,4 @@
 *.mov
 ipadwallpaper.jpg
 siri-shader-reverse/
+.build/

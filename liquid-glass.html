@@ -2,14 +2,14 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Liquid Glass (QuartzCore RE)</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:#000;color:#1d1d1f;font:13px/1.5 -apple-system,system-ui,sans-serif;
     display:flex;min-height:100vh;overflow:hidden}
   #stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative}
-  #gl{display:block;border-radius:0;background:#000}
+  #gl{display:block;border-radius:0;background:#000;touch-action:none;cursor:grab}
   #panel{width:280px;background:#fff;border-left:1px solid #e2e2e6;padding:18px;
     overflow-y:auto;height:100vh}
   #panel h2{font-size:13px;font-weight:600;color:#1d1d1f;margin-bottom:4px;letter-spacing:.02em}
@@ -30,11 +30,31 @@
   .bglabel{display:inline-block;font:11px/1 inherit;font-weight:600;padding:7px 11px;
     border-radius:7px;border:1px solid #d2d2d7;background:#fff;color:#1d1d1f;cursor:pointer}
   .hint{font-size:10px;color:#86868b;margin-top:6px;line-height:1.5}
+  #panelToggle{display:none}
+  #sheetHandle{display:none}
+  @media (max-width:768px){
+    body{display:block}
+    #stage{position:fixed;inset:0}
+    #panelToggle{display:block;position:fixed;top:max(12px,env(safe-area-inset-top));
+      right:12px;z-index:8;font:600 11px/1 -apple-system,system-ui,sans-serif;color:#1d1d1f;
+      background:rgba(255,255,255,.82);border:1px solid rgba(0,0,0,.12);border-radius:9px;
+      padding:9px 12px;backdrop-filter:blur(8px);cursor:pointer}
+    #panel{position:fixed;left:0;right:0;bottom:0;width:100%;height:auto;max-height:72vh;
+      border-left:none;border-top:1px solid #e2e2e6;border-radius:18px 18px 0 0;
+      padding:8px 16px calc(18px + env(safe-area-inset-bottom));
+      transform:translateY(100%);transition:transform .28s ease;z-index:7;
+      box-shadow:0 -12px 44px rgba(0,0,0,.35)}
+    body.panel-open #panel{transform:translateY(0)}
+    #sheetHandle{display:block;width:38px;height:4px;border-radius:2px;
+      background:#c7c7cc;margin:4px auto 12px}
+  }
 </style>
 </head>
 <body>
+<button id="panelToggle">调参 ⚙</button>
 <div id="stage"><canvas id="gl"></canvas></div>
 <div id="panel">
+  <div id="sheetHandle"></div>
   <h2>Liquid Glass</h2>
   <div class="sub">QuartzCore glass_background 重建 · 反汇编算法</div>
 
@@ -54,6 +74,7 @@
     <div class="gh">形状</div>
     <div class="row"><label>整体 scale <span class="v" id="vSC">1.00</span></label><input id="SC" type="range" min="30" max="160" value="100"></div>
     <div class="row"><label>整体 y 位置 <span class="v" id="vPY">0.50</span></label><input id="PY" type="range" min="8" max="92" value="50"></div>
+    <div class="row"><label>整体 x 位置 <span class="v" id="vPX">0.50</span></label><input id="PX" type="range" min="8" max="92" value="50"></div>
     <div class="row"><label>宽 halfX <span class="v" id="vHX">.37</span></label><input id="HX" type="range" min="15" max="48" value="37"></div>
     <div class="row"><label>高 halfY <span class="v" id="vHY">.25</span></label><input id="HY" type="range" min="15" max="45" value="25"></div>
     <div class="row"><label>圆角 corner <span class="v" id="vCR">1.0</span></label><input id="CR" type="range" min="0" max="100" value="100"></div>
@@ -270,6 +291,7 @@ void main(){
 
 
 <script>
+const stage=document.getElementById('stage');
 const cv=document.getElementById('gl'), gl=cv.getContext('webgl');
 function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
   if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o;}
@@ -304,13 +326,12 @@ let fboA, fboB, fboH, fboQ, fboQ2;
 const AR = 1120/2420;                 // 玻璃画布宽高比
 let BW, BH;
 function computeSize(){
-  const dpr = window.devicePixelRatio || 1;          // 不再 cap，用真实 dpr 保证锐利
-  // 以视口高度的 88% 为显示高度，宽按比例
-  const cssH = Math.round(window.innerHeight * 0.88);
-  const cssW = Math.round(cssH * AR);
-  // CSS 显示尺寸（逻辑像素）
-  cv.style.height = cssH + 'px';
-  cv.style.width  = cssW + 'px';
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);   // 全屏像素多，封顶 2 省算力
+  // 画布铺满 stage（手机=整屏，桌面=面板左侧区域），背景无边界
+  const cssW = stage.clientWidth  || window.innerWidth;
+  const cssH = stage.clientHeight || window.innerHeight;
+  cv.style.width  = '100%';
+  cv.style.height = '100%';
   // drawingBuffer 尺寸 = 显示尺寸 × dpr（物理像素，1:1 不缩放 → 不糊）
   BW = Math.round(cssW * dpr);
   BH = Math.round(cssH * dpr);
@@ -365,6 +386,8 @@ function coverCrop(img){
   x.drawImage(img,(img.width-cw)/2,(img.height-ch)/2,cw,ch,0,0,cw,ch);
   return c;
 }
+document.getElementById('panelToggle').addEventListener('click',()=>{
+  document.body.classList.toggle('panel-open'); });
 computeSize();
 loadDefault();
 document.querySelectorAll('.bgmode').forEach(b=>b.onclick=()=>{
@@ -380,6 +403,7 @@ const P={};
 function bind(id,key,scale,fmt){const s=document.getElementById(id),v=document.getElementById('v'+id);
   function up(){P[key]=s.value*scale;v.textContent=fmt?fmt(P[key]):P[key].toFixed(0); if(typeof requestRender!=="undefined")requestRender();}s.oninput=up;up();}
 bind('SC','master',0.01,x=>x.toFixed(2)); bind('PY','posY',0.01,x=>x.toFixed(2));
+bind('PX','posX',0.01,x=>x.toFixed(2));
 bind('HX','halfX',0.01,x=>x.toFixed(2)); bind('HY','halfY',0.01,x=>x.toFixed(2));
 bind('CR','corner',0.01,x=>x.toFixed(2));
 bind('RF','refraction',1); bind('BD','band',1); bind('ZM','zoom',0.01,x=>x.toFixed(2));
@@ -389,6 +413,24 @@ bind('TD','topDarken',0.01,x=>x.toFixed(2)); bind('B0','black0',0.01,x=>x.toFixe
 bind('B1','black1',0.01,x=>x.toFixed(2)); P.spec=0;
 bind('EB','edgeBleed',0.01,x=>x.toFixed(2));
 bind('WV','waveAmp',0.01,x=>x.toFixed(2)); bind('WS','waveScale',0.01,x=>x.toFixed(2));
+
+// ── 拖拽水晶球：把指针位移映射到 整体 x/y 位置 ──
+function setSlider(id,val){ const el=document.getElementById(id);
+  el.value=Math.round(val*100); el.dispatchEvent(new Event('input')); }
+function toNorm(e){ const r=cv.getBoundingClientRect();
+  return { x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height }; }
+let dragging=false, dragStart=null;
+function endDrag(e){ if(!dragging)return; dragging=false; cv.style.cursor='grab';
+  if(e && e.pointerId!=null && cv.hasPointerCapture(e.pointerId)) cv.releasePointerCapture(e.pointerId); }
+cv.addEventListener('pointerdown',e=>{ dragging=true; cv.style.cursor='grabbing';
+  try{ cv.setPointerCapture(e.pointerId); }catch(_){}
+  const p=toNorm(e); dragStart={px:P.posX, py:P.posY, x:p.x, y:p.y}; });
+cv.addEventListener('pointermove',e=>{ if(!dragging)return; const p=toNorm(e);
+  const nx=Math.min(0.92,Math.max(0.08, dragStart.px + (p.x-dragStart.x)));
+  const ny=Math.min(0.92,Math.max(0.08, dragStart.py + (p.y-dragStart.y)));
+  setSlider('PX',nx); setSlider('PY',ny); });
+cv.addEventListener('pointerup',endDrag);
+cv.addEventListener('pointercancel',endDrag);
 
 // ── Siri Wave 动画开关 ──
 let waveOn=false; const waveT0=performance.now();
@@ -407,8 +449,9 @@ function render(){
   if(!fboA){ fboA=makeFBO(BW,BH); fboB=makeFBO(BW,BH);
     fboH=makeFBO(BW>>1,BH>>1); fboQ=makeFBO(BW>>2,BH>>2); fboQ2=makeFBO(BW>>2,BH>>2);
     blurKey=''; }
-  const half=[BW*P.halfX*P.master, BW*P.halfY*P.master], center=[BW/2, BH*(1.0-P.posY)];
-  const corner=BW*P.halfY*P.corner*P.master;
+  const base=Math.min(BW, BH*0.9);   // 满屏后按较短边定基准，宽屏不失控、竖屏同原来
+  const half=[base*P.halfX*P.master, base*P.halfY*P.master], center=[BW*P.posX, BH*(1.0-P.posY)];
+  const corner=base*P.halfY*P.corner*P.master;
 
   const k = P.blur+'|'+BW+'x'+BH+'|'+bgVer;
   if(k !== blurKey){ blurKey = k;

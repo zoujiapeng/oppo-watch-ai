@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>设置</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{min-height:100vh;background:#0a0a0c;color:#f5f5f7;
+    font:14px/1.5 -apple-system,system-ui,sans-serif;
+    padding:calc(14px + env(safe-area-inset-top)) 14px calc(24px + env(safe-area-inset-bottom));}
+  .top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .top a{color:#5b9dff;text-decoration:none;font-size:15px;padding:4px 2px}
+  h1{font-size:18px;font-weight:700}
+  .grp{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);
+    border-radius:14px;padding:14px;margin-bottom:12px}
+  .gh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#86868b;margin-bottom:10px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+  .row:last-child{margin-bottom:0}
+  .row label{font-size:13px;color:#ddd}
+  .v{color:#5b9dff;font-variant-numeric:tabular-nums;font-size:12px}
+  input[type=range]{width:100%;accent-color:#5b9dff;height:4px}
+  button{font:600 13px/1 inherit;padding:11px 14px;border-radius:10px;
+    border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#f5f5f7;cursor:pointer}
+  button:active{background:rgba(255,255,255,.16)}
+  button.on{background:#5b9dff;border-color:#5b9dff;color:#fff}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  .muted{color:#8a8a92;font-size:12px;line-height:1.7;word-break:break-all}
+  .kv{display:flex;justify-content:space-between;font-size:12px;color:#c8c8cf;margin-bottom:6px}
+  .kv b{color:#fff;font-weight:600}
+  .switch{position:relative;width:46px;height:26px;border-radius:13px;background:#3a3a40;
+    transition:background .2s;flex:none}
+  .switch.on{background:#34c759}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;
+    background:#fff;transition:transform .2s}
+  .switch.on::after{transform:translateX(20px)}
+  input[type=text]{width:100%;padding:11px;border-radius:10px;border:1px solid rgba(255,255,255,.15);
+    background:rgba(255,255,255,.06);color:#fff;font-size:13px;margin-bottom:8px}
+  code{font-size:11px;background:rgba(255,255,255,.1);padding:2px 5px;border-radius:5px}
+  @media (max-height:520px){
+    body{padding-top:calc(8px + env(safe-area-inset-top))}
+    .grp{padding:12px;margin-bottom:10px}
+    button{padding:9px 12px}
+  }
+</style>
+</head>
+<body>
+  <div class="top"><a href="index.html">‹ 返回</a><h1>设置</h1></div>
+
+  <div class="grp" id="grpDevice" style="display:none">
+    <div class="gh">设备</div>
+    <div class="kv"><span>型号</span><b id="dModel">-</b></div>
+    <div class="kv"><span>Android</span><b id="dVer">-</b></div>
+    <div class="kv"><span>电量</span><b id="dBat">-</b></div>
+    <div class="kv"><span>设备所有者</span><b id="dAdmin">-</b></div>
+  </div>
+
+  <div class="grp" id="grpScreen" style="display:none">
+    <div class="gh">屏幕</div>
+    <div class="row"><label>亮度</label><span class="v" id="vBright">100%</span></div>
+    <input type="range" id="bright" min="5" max="100" value="100">
+    <div class="row" style="margin-top:12px"><label>屏幕常亮</label><div class="switch on" id="swKeep"></div></div>
+  </div>
+
+  <div class="grp" id="grpKiosk" style="display:none">
+    <div class="gh">桌面 / 锁定</div>
+    <div class="row"><label>开机自动锁定 (Kiosk)</label><div class="switch" id="swAuto"></div></div>
+    <div class="btns">
+      <button id="btnLock">🔒 锁定</button>
+      <button id="btnUnlock">🔓 解锁</button>
+    </div>
+    <div class="muted" id="kioskHint" style="margin-top:10px"></div>
+  </div>
+
+  <div class="grp" id="grpMore" style="display:none">
+    <div class="gh">测试 / 扩展</div>
+    <div class="btns" style="margin-bottom:12px">
+      <button id="btnVib">震动</button>
+      <button id="btnToast">Toast</button>
+    </div>
+    <input type="text" id="url" placeholder="https://…">
+    <div class="btns"><button id="btnOpen">打开网址</button></div>
+  </div>
+
+  <div class="grp" id="grpNone">
+    <div class="gh">未连接系统</div>
+    <div class="muted">当前在普通浏览器中打开，<b>window.Watch</b> 不存在。<br>请在手表 App 内查看这些设置。</div>
+  </div>
+
+<script>
+(function () {
+  var W = window.Watch;
+  if (!W) return;
+  document.getElementById('grpNone').style.display = 'none';
+  ['grpDevice','grpScreen','grpKiosk','grpMore'].forEach(function (id) {
+    document.getElementById(id).style.display = 'block';
+  });
+
+  function info() {
+    try {
+      var i = JSON.parse(W.getInfo());
+      document.getElementById('dModel').textContent = i.model;
+      document.getElementById('dVer').textContent = 'API ' + i.android;
+      document.getElementById('dBat').textContent = Math.round(i.battery) + '%' + (i.charging ? ' ⚡' : '');
+      document.getElementById('dAdmin').textContent = W.isAdmin() ? '是' : '否';
+    } catch (e) {}
+  }
+  info();
+
+  var bright = document.getElementById('bright'), vBright = document.getElementById('vBright');
+  function applyBright() {
+    W.setBrightness(bright.value / 100);
+    vBright.textContent = Math.round(bright.value) + '%';
+  }
+  bright.addEventListener('input', applyBright);
+  applyBright();
+
+  var swKeep = document.getElementById('swKeep');
+  try { swKeep.classList.toggle('on', W.getKeepScreenOn()); } catch (e) {}
+  swKeep.addEventListener('click', function () {
+    var on = !swKeep.classList.contains('on');
+    swKeep.classList.toggle('on', on);
+    W.setKeepScreenOn(on);
+  });
+
+  var swAuto = document.getElementById('swAuto');
+  try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}
+  swAuto.addEventListener('click', function () {
+    var on = !swAuto.classList.contains('on');
+    swAuto.classList.toggle('on', on);
+    W.setAutoKiosk(on);
+    hint();
+  });
+
+  document.getElementById('btnLock').addEventListener('click', function () {
+    W.startKiosk(); W.vibrate(60);
+  });
+  document.getElementById('btnUnlock').addEventListener('click', function () {
+    W.stopKiosk();
+  });
+
+  function hint() {
+    var k = document.getElementById('kioskHint');
+    if (!W.isAdmin()) {
+      k.innerHTML = '未设为设备所有者：锁定会走系统「屏幕固定」，需手动确认且可退出。<br>执行：'
+        + '<br><code>adb shell dpm set-device-owner com.glslplayground.app/.AdminReceiver</code>';
+    } else {
+      k.innerHTML = '已是设备所有者，锁定后无法退出。长按首页标题 1.2s 可应急解锁。';
+    }
+  }
+  hint();
+
+  document.getElementById('btnVib').addEventListener('click', function () { W.vibrate(120); });
+  document.getElementById('btnToast').addEventListener('click', function () { W.toast('来自网页的问候'); });
+  document.getElementById('btnOpen').addEventListener('click', function () {
+    var u = document.getElementById('url').value.trim();
+    if (u) W.openUrl(u);
+  });
+})();
+</script>
+</body>
+</html>

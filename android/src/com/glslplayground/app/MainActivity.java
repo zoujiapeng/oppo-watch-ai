@@ -1,0 +1,211 @@
+package com.glslplayground.app;
+
+import android.app.Activity;
+import android.app.admin.DevicePolicyManager;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.KeyEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+
+public class MainActivity extends Activity {
+
+    private static final int FILE_CHOOSER_REQUEST = 1001;
+
+    private WebView webView;
+    private ValueCallback<Uri[]> filePathCallback;
+    private boolean kiosk = false;
+    private static boolean autoKioskDone = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (isKeepScreenOn()) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        goImmersive();
+
+        webView = new WebView(this);
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowContentAccess(true);
+        s.setLoadWithOverviewMode(true);
+        s.setUseWideViewPort(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+
+        webView.setBackgroundColor(0xFF0A0A0C);
+        webView.setWebViewClient(new WebViewClient());
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(null);
+                }
+                filePathCallback = callback;
+                try {
+                    Intent intent = params.createIntent();
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                } catch (Exception e) {
+                    filePathCallback = null;
+                    return false;
+                }
+                return true;
+            }
+        });
+
+        // 网页里通过 window.Watch.xxx() 调用系统能力
+        webView.addJavascriptInterface(new WatchBridge(this), "Watch");
+
+        ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT);
+        setContentView(webView, lp);
+
+        if (savedInstanceState == null) {
+            webView.loadUrl("file:///android_asset/index.html");
+        } else {
+            webView.restoreState(savedInstanceState);
+        }
+    }
+
+    private void goImmersive() {
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) goImmersive();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        goImmersive();
+        if (!autoKioskDone && isAutoKiosk() && isDeviceOwner()) {
+            autoKioskDone = true;
+            enableKiosk();
+        }
+    }
+
+    // ---------- 偏好设置（供 JS 桥读写）----------
+    private SharedPreferences prefs() {
+        return getSharedPreferences("watch", MODE_PRIVATE);
+    }
+
+    public boolean isAutoKiosk() {
+        return prefs().getBoolean("autoKiosk", false);
+    }
+
+    public void setAutoKiosk(boolean v) {
+        prefs().edit().putBoolean("autoKiosk", v).apply();
+    }
+
+    public boolean isKeepScreenOn() {
+        return prefs().getBoolean("keepScreenOn", true);
+    }
+
+    public void setKeepScreenOn(boolean v) {
+        prefs().edit().putBoolean("keepScreenOn", v).apply();
+        if (v) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    // ---------- Kiosk（锁定任务）----------
+    public boolean isDeviceOwner() {
+        try {
+            DevicePolicyManager d =
+                    (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+            return d != null && d.isDeviceOwnerApp(getPackageName());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void enableKiosk() {
+        try {
+            DevicePolicyManager d =
+                    (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+            ComponentName admin = new ComponentName(this, AdminReceiver.class);
+            if (d != null && d.isDeviceOwnerApp(getPackageName())) {
+                d.setLockTaskPackages(admin, new String[]{getPackageName()});
+                if (Build.VERSION.SDK_INT >= 28) {
+                    d.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE);
+                }
+            }
+            startLockTask();
+            kiosk = true;
+        } catch (Exception ignored) { }
+    }
+
+    public void disableKiosk() {
+        try {
+            stopLockTask();
+        } catch (Exception ignored) { }
+        kiosk = false;
+    }
+
+    public boolean isKiosk() {
+        return kiosk;
+    }
+
+    // ---------- WebView / 生命周期 ----------
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            if (filePathCallback != null) {
+                filePathCallback.onReceiveValue(
+                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                filePathCallback = null;
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (webView != null) {
+            webView.saveState(outState);
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (webView != null && webView.canGoBack()) {
+                webView.goBack();
+                return true;
+            }
+            if (kiosk) return true;   // 锁定状态吞掉返回键
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+}
