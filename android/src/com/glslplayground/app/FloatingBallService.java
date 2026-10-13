@@ -146,9 +146,11 @@ public class FloatingBallService extends Service {
                 if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
                 minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
             }
-            float b0 = winSize * 0.9f;
-            updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+            // 初始形态必须是“原来的水晶球”，避免用默认值(0.30/0.30 → 圆形)一闪
+            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
+            aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner;
             if (siriText == null) setupSiriText();
+            measureSiriTargets(siriStr);
             main.removeCallbacks(siriTick);
             siriTickLast = 0;
             main.post(siriTick);
