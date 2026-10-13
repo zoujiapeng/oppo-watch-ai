@@ -216,8 +216,23 @@ public class FloatingBallService extends Service {
         if (siriTextPx <= 0) siriTextPx = dp(34);
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
-        float padX = dp(42), padY = dp(34);
         int textMaxW = siriTextMaxW();
+
+        // 换行行数
+        int lines;
+        {
+            android.text.TextPaint lp = new android.text.TextPaint();
+            lp.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+            lp.setTextSize(siriTextPx);
+            android.text.StaticLayout sl = android.text.StaticLayout.Builder
+                    .obtain(s, 0, s.length(), lp, textMaxW)
+                    .setIncludePad(false)
+                    .build();
+            lines = sl.getLineCount();
+        }
+        // 第 3 行起内边距改大（大圆角方形，留白更足）
+        float padX = lines >= 3 ? dp(58) : dp(42);
+        float padY = lines >= 3 ? dp(44) : dp(34);
 
         float tw, th;
         if (siriText != null) {
@@ -250,11 +265,19 @@ public class FloatingBallService extends Service {
         // 文字所需半宽/半高（不小于“原来的水晶球”）
         float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
-        hypx = Math.min(hypx, maxBallH / 2f);                        // 高度上限 = 屏幕 90%
-        hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f)); // 宽 ≥ 高×1.35（且 ≤ 85%）
+        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 90%
+        if (lines >= 3) {
+            // 第 3 行起：大圆角方形（圆角半径 ≈ 短边的 38%），不再强制更宽
+            hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx));
+            float r = 0.38f * Math.min(hxpx, hypx);
+            tCorner = Math.max(0.18f, Math.min(minCorner, r / Math.max(1f, hypx)));
+        } else {
+            // 1~2 行：横向胶囊（两端半圆，宽 ≥ 高×1.35 且 ≤ 85%）
+            hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f));
+            tCorner = minCorner;
+        }
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
-        tCorner = minCorner;                 // 胶囊端 = 半圆，始终圆滑
         tMaster = 1f;
     }
 
@@ -299,7 +322,7 @@ public class FloatingBallService extends Service {
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int tw = siriText.getMeasuredWidth();
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop + dp(5));    // 贴近球顶 → 文字在水晶球顶部
+        siriParams.y = Math.round(ballTop + dp(2));    // 贴近球顶 → 文字在水晶球顶部
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
