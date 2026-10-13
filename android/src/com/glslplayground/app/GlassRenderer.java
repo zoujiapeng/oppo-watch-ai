@@ -27,6 +27,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     private final int screenW, screenH, winW, winH;
     public volatile int capW = 0, capH = 0;   // 实际抓屏分辨率（低延迟模式可小于屏幕；采样用归一化 UV，与分辨率无关）
+    public volatile int refSize = 0;          // 参考尺寸（原悬浮窗边长）：几何缩放/位置基准，与窗口实际高度解耦
 
     // ── Siri 形变模式：由服务端驱动球体几何（弹出/随文字变宽变高/圆角变小）──
     public volatile boolean siriGeom = false;
@@ -335,9 +336,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         ensureFbos();
 
         // 球体几何（抠图与合成共用）
-        float base = Math.min(winW, winH * 0.9f);
+        float ref = refSize > 0 ? refSize : winW;
+        float base = ref * 0.9f;
         float hx = base * halfX * master, hy = base * halfY * master;
-        float cx = winW * posX, cy = winH * (1.0f - posY);
+        // 位置以“参考方窗”为基准，窗口变高也不影响原球位置
+        float cx = winW * posX, cy = winH * 0.5f + ref * (0.5f - posY);
         float cr = base * halfY * corner * master;
         if (siriGeom) {
             // Siri 模式：几何完全由服务端动画驱动

@@ -75,7 +75,7 @@ public class FloatingBallService extends Service {
     private RootCapture rootCapture;
     private String rootError;
 
-    private int screenW, screenH, winSize;
+    private int screenW, screenH, winSize, winH;
     private int resultCode;
     private Intent resultData;
 
@@ -246,11 +246,12 @@ public class FloatingBallService extends Service {
         }
 
         float maxBallW = siriMaxBallW();
+        float maxBallH = Math.min(screenH * 0.90f, winH);
         // 文字所需半宽/半高（不小于“原来的水晶球”）
         float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
-        // 始终是“横着的胶囊”：宽至少为高的 1.35 倍，行数变多也只会更宽、不会变圆
-        hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f));
+        hypx = Math.min(hypx, maxBallH / 2f);                        // 高度上限 = 屏幕 90%
+        hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f)); // 宽 ≥ 高×1.35（且 ≤ 85%）
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
         tCorner = minCorner;                 // 胶囊端 = 半圆，始终圆滑
@@ -289,7 +290,7 @@ public class FloatingBallService extends Service {
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
         float sx = winXnow + winSize * 0.5f;
-        float sy = winYnow + winSize * 0.5f;
+        float sy = winYnow + winH * 0.5f;
         float hypx = base * aHalfY * aMaster;     // 当前球半高
         float ballTop = sy - hypx;
         int textMaxW = siriTextMaxW();
@@ -401,7 +402,11 @@ public class FloatingBallService extends Service {
         wm.getDefaultDisplay().getRealMetrics(dm);
         screenW = dm.widthPixels;
         screenH = dm.heightPixels;
-        winSize = (int) (Math.min(screenW, screenH) * 0.92f);
+        winSize = (int) (Math.min(screenW, screenH) * 0.92f);   // 参考边长（也是窗口宽）
+        // Siri 模式：窗口高度放宽到屏幕 90%，让球可以变高不被裁；普通模式仍用原方窗
+        winH = prefs().getBoolean("float_siri", false)
+                ? Math.min(screenH, Math.round(screenH * 0.90f))
+                : winSize;
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
@@ -409,7 +414,8 @@ public class FloatingBallService extends Service {
         glView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
-        renderer = new GlassRenderer(screenW, screenH, winSize, winSize);
+        renderer = new GlassRenderer(screenW, screenH, winSize, winH);
+        renderer.refSize = winSize;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -455,12 +461,12 @@ public class FloatingBallService extends Service {
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
         params = new WindowManager.LayoutParams(
-                winSize, winSize, type,
+                winSize, winH, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
         params.x = (screenW - winSize) / 2;
-        params.y = (screenH - winSize) / 2;
+        params.y = (screenH - winH) / 2;
         renderer.winX = params.x;
         renderer.winY = params.y;
 
@@ -477,7 +483,7 @@ public class FloatingBallService extends Service {
                         params.x = (int) (startX + (e.getRawX() - downX));
                         params.y = (int) (startY + (e.getRawY() - downY));
                         params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
-                        params.y = Math.max(-winSize / 4, Math.min(screenH - winSize * 3 / 4, params.y));
+                        params.y = Math.max(-winH / 4, Math.min(screenH - winH * 3 / 4, params.y));
                         if (wm != null) wm.updateViewLayout(glView, params);
                         glView.post(winSync);
                         return true;

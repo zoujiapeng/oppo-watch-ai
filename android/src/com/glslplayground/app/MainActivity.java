@@ -311,9 +311,8 @@ public class MainActivity extends Activity {
 
     public void setSiriEnabled(boolean v) {
         prefs().edit().putBoolean("float_siri", v).apply();
-        if (FloatingBallService.running) {
-            FloatingBallService.setSiriEnabled(v);
-        }
+        // 窗口高度需要随 Siri 模式改变 → 重启悬浮球
+        restartFloat();
     }
 
     public void sendSiriText(String text) {
