@@ -343,8 +343,19 @@ public class FloatingBallService extends Service {
         siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int tw = siriText.getMeasuredWidth();
+        // 补偿字体上方留白(ascent 空白)，让首行字形真正贴近球顶，视觉间距 ≈ 5dp
+        float topGap = 0f;
+        try {
+            android.text.TextPaint tp = new android.text.TextPaint(siriText.getPaint());
+            tp.setTextSize(siriTextPx);
+            android.graphics.Paint.FontMetricsInt fm = tp.getFontMetricsInt();
+            android.graphics.Rect rb = new android.graphics.Rect();
+            String first = (siriStr == null || siriStr.isEmpty()) ? "字" : siriStr.substring(0, 1);
+            tp.getTextBounds(first, 0, first.length(), rb);
+            topGap = -fm.ascent + rb.top;      // TextView 顶 → 首行字形顶
+        } catch (Throwable ignored) { }
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop + dp(2));    // 贴近球顶 → 文字在水晶球顶部
+        siriParams.y = Math.round(ballTop + dp(5) - Math.max(0f, topGap));
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
