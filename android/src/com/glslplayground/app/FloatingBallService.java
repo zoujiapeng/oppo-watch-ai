@@ -299,13 +299,29 @@ public class FloatingBallService extends Service {
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int tw = siriText.getMeasuredWidth();
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop + dp(8));    // 贴近球顶 → 文字在水晶球顶部
+        siriParams.y = Math.round(ballTop + dp(5));    // 贴近球顶 → 文字在水晶球顶部
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
 
     private float dp(float v) {
         return v * getResources().getDisplayMetrics().density;
+    }
+
+    /** 触摸点（视图坐标）是否落在当前水晶球形状内（圆角矩形 SDF）。 */
+    private boolean inSiriBall(float lx, float ly) {
+        if (renderer == null) return true;
+        float base = winSize * 0.9f;
+        float m = Math.max(0.01f, renderer.svMaster);
+        float hx = base * renderer.svHalfX * m;
+        float hy = base * renderer.svHalfY * m;
+        float r = base * renderer.svHalfY * renderer.svCorner * m;
+        float cx = winSize * 0.5f, cy = winH * 0.5f;
+        float dx = Math.abs(lx - cx) - Math.max(0f, hx - r);
+        float dy = Math.abs(ly - cy) - Math.max(0f, hy - r);
+        float ex = Math.max(dx, 0f), ey = Math.max(dy, 0f);
+        float sd = Math.min(Math.max(dx, dy), 0f) + (float) Math.sqrt(ex * ex + ey * ey) - r;
+        return sd <= dp(8);   // 少量边缘容差，便于点到
     }
 
     private final MediaProjection.Callback projectionCb = new MediaProjection.Callback() {
@@ -462,7 +478,8 @@ public class FloatingBallService extends Service {
                 : WindowManager.LayoutParams.TYPE_PHONE;
         params = new WindowManager.LayoutParams(
                 winSize, winH, type,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
         params.x = (screenW - winSize) / 2;
@@ -476,14 +493,30 @@ public class FloatingBallService extends Service {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        // Siri 模式：只有按在水晶球上才能拖动（不再是整个窗口都能拖）
+                        if (siriEnabled && !inSiriBall(e.getX(), e.getY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
                         startX = params.x; startY = params.y;
                         return true;
                     case MotionEvent.ACTION_MOVE:
                         params.x = (int) (startX + (e.getRawX() - downX));
                         params.y = (int) (startY + (e.getRawY() - downY));
-                        params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
-                        params.y = Math.max(-winH / 4, Math.min(screenH - winH * 3 / 4, params.y));
+                        if (siriEnabled) {
+                            // 以球为准夹取：整颗球保持可见，可拖到屏幕最顶（球顶贴屏幕顶）
+                            float base = winSize * 0.9f;
+                            float m = Math.max(0.01f, renderer.svMaster);
+                            float hx = base * renderer.svHalfX * m;
+                            float hy = base * renderer.svHalfY * m;
+                            float bcx = params.x + winSize * 0.5f;
+                            float bcy = params.y + winH * 0.5f;
+                            bcx = Math.max(hx, Math.min(screenW - hx, bcx));
+                            bcy = Math.max(hy, Math.min(screenH - hy, bcy));
+                            params.x = Math.round(bcx - winSize * 0.5f);
+                            params.y = Math.round(bcy - winH * 0.5f);
+                        } else {
+                            params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
+                            params.y = Math.max(-winSize / 4, Math.min(screenH - winSize * 3 / 4, params.y));
+                        }
                         if (wm != null) wm.updateViewLayout(glView, params);
                         glView.post(winSync);
                         return true;
