@@ -355,7 +355,10 @@ public class FloatingBallService extends Service {
             topGap = -fm.ascent + rb.top;      // TextView 顶 → 首行字形顶
         } catch (Throwable ignored) { }
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop - dp(6) - Math.max(0f, topGap));   // 负边距：字形顶贴球顶（略重叠）
+        // 系统会给悬浮窗加一个顶部 inset 偏移（=球窗口实际 top − 请求 y，≈状态栏高度）；
+        // 必须减掉它，否则文字会被整体推低约一个状态栏的高度。
+        float sysOffset = winYnow - params.y;
+        siriParams.y = Math.round(ballTop - dp(6) - Math.max(0f, topGap) - sysOffset);
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
