@@ -95,6 +95,15 @@
       <button data-scale="2">一半 1/2</button>
       <button data-scale="4">四分之一 1/4</button>
     </div>
+    <div class="row" style="margin-top:12px"><label>Siri 模式 (文字形变球)</label><div class="switch" id="swSiri"></div></div>
+    <div id="siriBox" style="display:none;margin-top:8px">
+      <input type="text" id="siriText" placeholder="输入文字，球实时变形">
+      <div class="btns">
+        <button id="btnSiriClear">清空</button>
+        <button id="btnSiriDemo">演示</button>
+      </div>
+      <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
+    </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
     <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
       <b>采集方式</b>：<b>录屏 MediaProjection</b>=需授予「屏幕录制」，有系统录制标记；<b>Root 直采</b>=root 直读合成帧，无弹窗、无标记（需设备已 root）。<br>
@@ -237,6 +246,40 @@
       syncScale();
     });
   }
+
+  var swSiri = document.getElementById('swSiri');
+  var siriBox = document.getElementById('siriBox');
+  function syncSiri() {
+    var on = false;
+    try { on = W.getSiriEnabled(); } catch (e) {}
+    swSiri.classList.toggle('on', on);
+    siriBox.style.display = on ? 'block' : 'none';
+  }
+  syncSiri();
+  swSiri.addEventListener('click', function () {
+    var on = !swSiri.classList.contains('on');
+    try { W.setSiriEnabled(on); } catch (e) {}
+    syncSiri();
+  });
+  var siriInput = document.getElementById('siriText');
+  siriInput.addEventListener('input', function () {
+    try { W.setSiriText(siriInput.value); } catch (e) {}
+  });
+  document.getElementById('btnSiriClear').addEventListener('click', function () {
+    siriInput.value = '';
+    try { W.setSiriText(''); } catch (e) {}
+  });
+  var siriDemoText = '你好，我是水晶球，会跟着文字实时变形。';
+  document.getElementById('btnSiriDemo').addEventListener('click', function () {
+    var i = 0;
+    siriInput.value = '';
+    var timer = setInterval(function () {
+      if (i > siriDemoText.length) { clearInterval(timer); return; }
+      siriInput.value = siriDemoText.slice(0, i);
+      try { W.setSiriText(siriInput.value); } catch (e) {}
+      i++;
+    }, 180);
+  });
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}

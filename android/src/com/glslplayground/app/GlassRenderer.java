@@ -27,6 +27,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     private final int screenW, screenH, winW, winH;
     public volatile int capW = 0, capH = 0;   // 实际抓屏分辨率（低延迟模式可小于屏幕；采样用归一化 UV，与分辨率无关）
+
+    // ── Siri 形变模式：由服务端驱动球体几何（弹出/随文字变宽变高/圆角变小）──
+    public volatile boolean siriGeom = false;
+    public volatile float svMaster = 1f, svHalfX = 0.37f, svHalfY = 0.25f, svCorner = 1f;
+    public volatile float svPosX = 0.5f, svPosY = 0.5f;
+
     private OnSurfaceReady readyCb;
 
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
@@ -333,6 +339,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         float hx = base * halfX * master, hy = base * halfY * master;
         float cx = winW * posX, cy = winH * (1.0f - posY);
         float cr = base * halfY * corner * master;
+        if (siriGeom) {
+            // Siri 模式：几何完全由服务端动画驱动
+            hx = base * svHalfX * svMaster;
+            hy = base * svHalfY * svMaster;
+            cx = winW * svPosX;
+            cy = winH * (1.0f - svPosY);
+            cr = base * svHalfY * svCorner * svMaster;
+        }
 
         if (captureSource == 1) {
             // root 直采：把原始帧上传进 full（行序已翻转），不经 MediaProjection

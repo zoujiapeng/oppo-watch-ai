@@ -304,6 +304,24 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Siri 模式：文字形变球
+    public boolean getSiriEnabled() {
+        return prefs().getBoolean("float_siri", false);
+    }
+
+    public void setSiriEnabled(boolean v) {
+        prefs().edit().putBoolean("float_siri", v).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.setSiriEnabled(v);
+        }
+    }
+
+    public void sendSiriText(String text) {
+        if (FloatingBallService.running) {
+            FloatingBallService.setSiriText(text);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {

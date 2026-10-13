@@ -239,4 +239,24 @@ public class WatchBridge {
             public void run() { act.setFloatCapScale(s); }
         });
     }
+
+    // ---------- Siri 模式 ----------
+    @JavascriptInterface
+    public boolean getSiriEnabled() {
+        return act.getSiriEnabled();
+    }
+
+    @JavascriptInterface
+    public void setSiriEnabled(final boolean v) {
+        ui(new Runnable() {
+            public void run() { act.setSiriEnabled(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public void setSiriText(final String text) {
+        ui(new Runnable() {
+            public void run() { act.sendSiriText(text); }
+        });
+    }
 }

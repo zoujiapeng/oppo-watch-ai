@@ -107,6 +107,160 @@ public class FloatingBallService extends Service {
         }
     };
 
+    // ── Siri 模式：球弹出、文字从球内出现、球随文字实时变宽变高、圆角变小 ──
+    private boolean siriEnabled = false;
+    private android.widget.TextView siriText;
+    private WindowManager.LayoutParams siriParams;
+    private volatile String siriStr = "";
+    private float aMaster = 1f, aHalfX = 0.30f, aHalfY = 0.30f, aCorner = 1f;
+    private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
+    private float siriTextPx;
+    private long siriTickLast = 0;
+
+    public static void setSiriEnabled(boolean en) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applySiriEnabled(en));
+    }
+
+    public static void setSiriText(String text) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applySiriText(text));
+    }
+
+    private void applySiriEnabled(boolean en) {
+        siriEnabled = en;
+        if (en) {
+            if (siriText == null) setupSiriText();
+            main.removeCallbacks(siriTick);
+            siriTickLast = 0;
+            main.post(siriTick);
+        } else {
+            main.removeCallbacks(siriTick);
+            removeSiriText();
+            if (renderer != null) renderer.siriGeom = false;
+        }
+    }
+
+    private void setupSiriText() {
+        if (siriText != null || wm == null) return;
+        if (siriTextPx <= 0) siriTextPx = dp(46);
+        android.widget.TextView tv = new android.widget.TextView(this);
+        tv.setTextColor(0xFFF4F5F7);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, siriTextPx);
+        tv.setSingleLine(true);
+        tv.setIncludeFontPadding(false);
+        tv.setGravity(Gravity.CENTER);
+        tv.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+        tv.setAlpha(0f);
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+        siriParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        siriParams.gravity = Gravity.TOP | Gravity.START;
+        try {
+            wm.addView(tv, siriParams);
+            siriText = tv;
+        } catch (Exception e) {
+            Log.w("FloatingBall", "add siri text failed: " + e);
+        }
+    }
+
+    private void removeSiriText() {
+        if (siriText != null && wm != null) {
+            try { wm.removeView(siriText); } catch (Exception ignored) { }
+        }
+        siriText = null;
+    }
+
+    private void applySiriText(String text) {
+        String prev = siriStr;
+        siriStr = text == null ? "" : text;
+        if (siriText != null) siriText.setText(siriStr);
+        measureSiriTargets(siriStr);
+        boolean prevEmpty = prev == null || prev.trim().isEmpty();
+        boolean nowEmpty = siriStr.trim().isEmpty();
+        if (prevEmpty && !nowEmpty) {           // 文字出现 → 触发弹出
+            aMaster = 0.03f;
+        }
+    }
+
+    private void measureSiriTargets(String s) {
+        float base = Math.min(winSize, winSize * 0.9f);
+        if (base <= 0) base = 1f;
+        boolean empty = s == null || s.trim().isEmpty();
+        if (empty) {                            // 空闲球
+            tMaster = 1f; tHalfX = 0.22f; tHalfY = 0.22f; tCorner = 1f;
+            return;
+        }
+        if (siriTextPx <= 0) siriTextPx = dp(46);
+        android.graphics.Paint p = new android.graphics.Paint();
+        p.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+        p.setTextSize(siriTextPx);
+        float tw = p.measureText(s);
+        android.graphics.Paint.FontMetrics fm = p.getFontMetrics();
+        float th = fm.descent - fm.ascent;
+        float padX = dp(42), padY = dp(24), minR = dp(54);
+        float hxpx = tw / 2f + padX;
+        float hypx = Math.max(th / 2f + padY, minR);
+        float maxHx = winSize / 2f - dp(4);
+        if (hxpx > maxHx) hxpx = maxHx;          // 超宽贴边（文字被截断）
+        tHalfX = hxpx / base;
+        tHalfY = hypx / base;
+        // 圆角：越宽越小（长条两端更方）
+        float radiusPx = Math.min(hypx, Math.max(dp(14), hypx * (hypx / hxpx)));
+        tCorner = Math.max(0.12f, radiusPx / hypx);
+        tMaster = 1f;
+    }
+
+    private final Runnable siriTick = new Runnable() {
+        @Override public void run() {
+            if (!siriEnabled) return;
+            long now = android.os.SystemClock.uptimeMillis();
+            float dt = siriTickLast == 0 ? 0.016f : Math.min(0.05f, (now - siriTickLast) / 1000f);
+            siriTickLast = now;
+            float k = 1f - (float) Math.exp(-dt / 0.06);
+            aMaster += (tMaster - aMaster) * k;
+            aHalfX += (tHalfX - aHalfX) * k;
+            aHalfY += (tHalfY - aHalfY) * k;
+            aCorner += (tCorner - aCorner) * k;
+            if (renderer != null) {
+                renderer.siriGeom = true;
+                renderer.svMaster = aMaster;
+                renderer.svHalfX = aHalfX;
+                renderer.svHalfY = aHalfY;
+                renderer.svCorner = aCorner;
+                renderer.svPosX = 0.5f;
+                renderer.svPosY = 0.5f;
+            }
+            updateSiriTextPos();
+            main.postDelayed(this, 16);
+        }
+    };
+
+    private void updateSiriTextPos() {
+        if (siriText == null || siriParams == null || wm == null) return;
+        float winXnow = (renderer != null) ? renderer.winX : params.x;
+        float winYnow = (renderer != null) ? renderer.winY : params.y;
+        float sx = winXnow + winSize * 0.5f;
+        float sy = winYnow + winSize * 0.5f;
+        siriText.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int tw = siriText.getMeasuredWidth(), th = siriText.getMeasuredHeight();
+        siriParams.x = Math.round(sx - tw / 2f);
+        siriParams.y = Math.round(sy - th / 2f);
+        try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
+        siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
+    }
+
+    private float dp(float v) {
+        return v * getResources().getDisplayMetrics().density;
+    }
+
     private final MediaProjection.Callback projectionCb = new MediaProjection.Callback() {
         @Override public void onStop() { stopSelf(); }
     };
@@ -296,6 +450,7 @@ public class FloatingBallService extends Service {
         main.postDelayed(winSyncLoop, 500);
         applySavedParams();
         renderer.bgMode = prefs().getInt("float_mode", 0);
+        if (prefs().getBoolean("float_siri", false)) applySiriEnabled(true);
     }
 
     // 抓屏映射必须用窗口的真实屏幕位置（params.x/y 是请求值，会被系统 inset 修正）
@@ -420,6 +575,8 @@ public class FloatingBallService extends Service {
         INSTANCE = null;
         main.removeCallbacks(winSyncLoop);
         main.removeCallbacks(renderTick);
+        main.removeCallbacks(siriTick);
+        removeSiriText();
         if (rootCapture != null) { rootCapture.stop(); rootCapture = null; }
         try { glView.onPause(); } catch (Exception ignored) { }
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay = null; }
