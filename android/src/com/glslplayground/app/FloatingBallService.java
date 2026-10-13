@@ -355,7 +355,7 @@ public class FloatingBallService extends Service {
             topGap = -fm.ascent + rb.top;      // TextView 顶 → 首行字形顶
         } catch (Throwable ignored) { }
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop - dp(5) - Math.max(0f, topGap));   // 负边距：字形顶略高于球顶，真正贴顶
+        siriParams.y = Math.round(ballTop - dp(6) - Math.max(0f, topGap));   // 负边距：字形顶贴球顶（略重叠）
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
