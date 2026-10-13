@@ -106,6 +106,8 @@
       </div>
       <div class="row" style="margin-top:8px"><label>文字距球顶 (px)</label><span class="v" id="vSiriDy">10</span></div>
       <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
+      <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
+      <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
@@ -173,6 +175,17 @@
     <div class="muted" style="margin-top:8px">实时作用于悬浮水晶球；<b>Siri 模式</b>下形状由文字决定，但折射 / 黑顶 / 亮线 / 波光仍实时生效。</div>
   </div>
 
+  <div class="grp" id="grpPreset" style="display:none">
+    <div class="gh">预设</div>
+    <input type="text" id="presetName" placeholder="预设名称">
+    <div class="btns">
+      <button id="btnPresetSave">保存当前</button>
+      <button id="btnPresetReload">刷新列表</button>
+    </div>
+    <div class="btns" id="presetList" style="margin-top:8px"></div>
+    <div class="muted" style="margin-top:8px">保存当前「液态玻璃」全部参数 + Siri 字号。点击预设即应用，长按预设删除。</div>
+  </div>
+
   <div class="grp" id="grpMore" style="display:none">
     <div class="gh">测试 / 扩展</div>
     <div class="btns" style="margin-bottom:12px">
@@ -194,7 +207,7 @@
   if (!W) return;
   document.getElementById('grpNone').style.display = 'none';
   ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',
-   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave'].forEach(function (id) {
+   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave','grpPreset'].forEach(function (id) {
     document.getElementById(id).style.display = 'block';
   });
 
@@ -351,6 +364,14 @@
     try { W.setSiriTextDy(parseInt(siriDy.value, 10)); } catch (e) {}
   });
 
+  var siriSz = document.getElementById('siriSz'), vSiriSz = document.getElementById('vSiriSz');
+  try { var curSz = W.getSiriTextSp(); if (curSz) siriSz.value = curSz; } catch (e) {}
+  vSiriSz.textContent = siriSz.value;
+  siriSz.addEventListener('input', function () {
+    vSiriSz.textContent = siriSz.value;
+    try { W.setSiriTextSp(parseInt(siriSz.value, 10)); } catch (e) {}
+  });
+
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──
   var GP = { master:1, posX:0.5, posY:0.5, halfX:0.37, halfY:0.25, corner:1,
     refraction:200, band:170, zoom:1, dome:0.4, aberration:10, blur:0.3,
@@ -369,17 +390,23 @@
       try { W.setFloatParams(JSON.stringify(GP)); } catch (e) {}
     }, 0);
   }
+  var gBindings = [];
   function bindG(id, key, scale, fmt) {
     var s = document.getElementById(id), v = document.getElementById('v' + id);
     if (!s) return;
-    s.value = Math.round(GP[key] / scale);
-    function up() {
+    gBindings.push({ s: s, v: v, key: key, scale: scale, fmt: fmt });
+    s.addEventListener('input', function () {
       GP[key] = s.value * scale;
       if (v) v.textContent = fmt ? fmt(GP[key]) : GP[key].toFixed(0);
       pushGlass();
+    });
+  }
+  function renderGlass() {
+    for (var i = 0; i < gBindings.length; i++) {
+      var b = gBindings[i];
+      b.s.value = Math.round(GP[b.key] / b.scale);
+      if (b.v) b.v.textContent = b.fmt ? b.fmt(GP[b.key]) : GP[b.key].toFixed(0);
     }
-    s.addEventListener('input', up);
-    if (v) v.textContent = fmt ? fmt(GP[key]) : GP[key].toFixed(0);
   }
   function f2(x) { return x.toFixed(2); }
   function f1(x) { return x.toFixed(1); }
@@ -397,7 +424,59 @@
     swWave.classList.toggle('on', GP.waveOn);
     pushGlass();
   });
+  renderGlass();
   pushGlass();
+
+  // ── 预设：保存 / 加载「液态玻璃参数 + Siri 字号」组合 ──
+  var PRESET_KEY = 'glass_presets';
+  function loadPresets() { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || {}; } catch (e) { return {}; } }
+  function savePresets(o) { try { localStorage.setItem(PRESET_KEY, JSON.stringify(o)); } catch (e) {} }
+  function renderPresets() {
+    var box = document.getElementById('presetList'); if (!box) return;
+    box.innerHTML = '';
+    var o = loadPresets(), names = Object.keys(o);
+    if (!names.length) { box.innerHTML = '<span class="muted">暂无预设</span>'; return; }
+    names.forEach(function (n) {
+      var b = document.createElement('button');
+      b.textContent = n;
+      b.addEventListener('click', function () { applyPreset(n); });
+      var lt = null;
+      function startLong() { lt = setTimeout(function () {
+        var oo = loadPresets(); delete oo[n]; savePresets(oo); renderPresets();
+        try { W.toast('已删除预设：' + n); } catch (e) {}
+      }, 700); }
+      function cancelLong() { clearTimeout(lt); }
+      b.addEventListener('pointerdown', startLong);
+      b.addEventListener('pointerup', cancelLong);
+      b.addEventListener('pointerleave', cancelLong);
+      b.addEventListener('pointercancel', cancelLong);
+      box.appendChild(b);
+    });
+  }
+  function applyPreset(n) {
+    var o = loadPresets()[n]; if (!o) return;
+    if (o.p) { for (var k in o.p) if (k in GP) GP[k] = o.p[k]; }
+    renderGlass();
+    swWave.classList.toggle('on', !!GP.waveOn);
+    pushGlass();
+    if (typeof o.sp === 'number') {
+      siriSz.value = o.sp; vSiriSz.textContent = o.sp;
+      try { W.setSiriTextSp(o.sp); } catch (e) {}
+    }
+    document.getElementById('presetName').value = n;
+    try { W.toast('已应用预设：' + n); } catch (e) {}
+  }
+  document.getElementById('btnPresetSave').addEventListener('click', function () {
+    var ne = document.getElementById('presetName');
+    var n = (ne.value || '').trim();
+    if (!n) { try { W.toast('请输入预设名称'); } catch (e) {} return; }
+    var o = loadPresets();
+    o[n] = { p: JSON.parse(JSON.stringify(GP)), sp: parseInt(siriSz.value, 10) };
+    savePresets(o); renderPresets();
+    try { W.toast('已保存预设：' + n); } catch (e) {}
+  });
+  document.getElementById('btnPresetReload').addEventListener('click', renderPresets);
+  renderPresets();
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}

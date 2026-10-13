@@ -339,6 +339,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Siri 文字字号(sp)
+    public int getSiriTextSp() {
+        return prefs().getInt("float_siri_sp", 34);
+    }
+
+    public void setSiriTextSp(int sp) {
+        sp = Math.max(10, Math.min(120, sp));
+        prefs().edit().putInt("float_siri_sp", sp).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.setSiriTextSize(sp);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {

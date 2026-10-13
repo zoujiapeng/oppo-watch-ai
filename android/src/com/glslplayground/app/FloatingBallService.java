@@ -136,10 +136,26 @@ public class FloatingBallService extends Service {
         if (s != null) s.main.post(() -> s.siriTextDy = dy);
     }
 
+    /** Siri 文字字号(sp)，实时生效：重设 TextView 字号并重新测量球体尺寸。 */
+    public static void setSiriTextSize(int sp) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applySiriTextSize(sp));
+    }
+
+    private void applySiriTextSize(int sp) {
+        sp = Math.max(10, Math.min(120, sp));
+        siriTextPx = dp(sp);
+        if (siriText != null) {
+            siriText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, siriTextPx);
+        }
+        if (siriEnabled) measureSiriTargets(siriStr);
+    }
+
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
             siriTextDy = prefs().getInt("float_siri_dy", 10);
+            siriTextPx = dp(prefs().getInt("float_siri_sp", 34));
             // 记录“原来的水晶球”尺寸，作为最短形态
             if (renderer != null) {
                 if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
