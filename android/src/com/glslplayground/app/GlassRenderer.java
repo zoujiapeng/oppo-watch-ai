@@ -26,6 +26,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public interface OnSurfaceReady { void onReady(SurfaceTexture st); }
 
     private final int screenW, screenH, winW, winH;
+    public volatile int capW = 0, capH = 0;   // 实际抓屏分辨率（低延迟模式可小于屏幕；采样用归一化 UV，与分辨率无关）
     private OnSurfaceReady readyCb;
 
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
@@ -463,11 +464,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ─────────────────────────── helpers ───────────────────────────
     private void ensureFbos() {
         if (full == null) {
-            full = new Fbo(screenW, screenH);
-            half = new Fbo(Math.max(1, screenW >> 1), Math.max(1, screenH >> 1));
-            half2 = new Fbo(Math.max(1, screenW >> 1), Math.max(1, screenH >> 1));
-            bg = new Fbo(screenW, screenH);
-            bg2 = new Fbo(screenW, screenH);
+            int cw = capW > 0 ? capW : screenW;
+            int ch = capH > 0 ? capH : screenH;
+            full = new Fbo(cw, ch);
+            half = new Fbo(Math.max(1, cw >> 1), Math.max(1, ch >> 1));
+            half2 = new Fbo(Math.max(1, cw >> 1), Math.max(1, ch >> 1));
+            bg = new Fbo(cw, ch);
+            bg2 = new Fbo(cw, ch);
         }
     }
 

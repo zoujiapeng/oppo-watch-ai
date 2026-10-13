@@ -31,6 +31,9 @@ import android.view.WindowManager;
 
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.lang.reflect.Method;
 
 /** 悬浮水晶球：TYPE_APPLICATION_OVERLAY 悬浮窗 + MediaProjection 抓屏 + GLSurfaceView 渲染。 */
@@ -159,6 +162,27 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 把 assets/caplive.jar 释放到 filesDir，返回绝对路径（供 root app_process 以 CLASSPATH 加载）。 */
+    private String ensureCapJar() {
+        try {
+            File f = new File(getFilesDir(), "caplive.jar");
+            if (!f.exists() || f.length() == 0) {
+                InputStream in = getAssets().open("caplive.jar");
+                FileOutputStream out = new FileOutputStream(f);
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                out.close();
+                in.close();
+                f.setReadable(true, false);
+            }
+            return f.getAbsolutePath();
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "ensureCapJar failed: " + t);
+            return null;
+        }
+    }
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         startForegroundCompat();
         if (intent != null) {
@@ -188,6 +212,10 @@ public class FloatingBallService extends Service {
         renderer = new GlassRenderer(screenW, screenH, winSize, winSize);
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
+        boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
+        int scalePref = prefs().getInt("float_cap_scale", 2);
+        Log.i("FloatingBall", "setupOverlay src=" + src + " lowlat=" + lowlatPref
+                + " scale=" + scalePref + " fps=" + targetFps);
         renderer.captureSource = src;
         if (src == 1) {
             // root 直采：无投影、无录屏
@@ -196,8 +224,27 @@ public class FloatingBallService extends Service {
             rootCapture.setErrorListener(msg -> main.post(() -> {
                 if (rootError == null) { rootError = msg; }
             }));
+            int cw = screenW, ch = screenH;
+            if (lowlatPref) {
+                // 低延迟：常驻 CapLive 采集器 + 可降分辨率（避免每帧 fork screencap 的 ~100ms 启动）
+                int scale = Math.max(1, scalePref);
+                int tw = Math.max(2, screenW / scale);
+                int th = Math.max(2, screenH / scale);
+                String jar = ensureCapJar();
+                if (jar != null) {
+                    rootCapture.useAppProcess(jar, tw, th);
+                    cw = tw; ch = th;
+                    Log.i("FloatingBall", "low-latency capture " + cw + "x" + ch);
+                } else {
+                    Log.w("FloatingBall", "caplive.jar 提取失败，回退 screencap");
+                }
+            }
+            renderer.capW = cw;
+            renderer.capH = ch;
             renderer.setOnSurfaceReady(st -> main.post(() -> rootCapture.start(renderer)));
         } else {
+            renderer.capW = screenW;
+            renderer.capH = screenH;
             renderer.setOnSurfaceReady(st -> main.post(() -> startCapture(st)));
         }
         glView.setRenderer(renderer);

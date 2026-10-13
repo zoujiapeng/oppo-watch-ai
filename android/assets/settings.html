@@ -88,6 +88,13 @@
       <button data-fps="90">90</button>
       <button data-fps="120">120</button>
     </div>
+    <div class="row" style="margin-top:12px"><label>低延迟采集 (root 常驻)</label><div class="switch" id="swLowLat"></div></div>
+    <div class="row" style="margin-top:10px;margin-bottom:8px"><label>采集分辨率</label></div>
+    <div class="btns" id="scaleBtns">
+      <button data-scale="1">原始 1/1</button>
+      <button data-scale="2">一半 1/2</button>
+      <button data-scale="4">四分之一 1/4</button>
+    </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
     <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
       <b>采集方式</b>：<b>录屏 MediaProjection</b>=需授予「屏幕录制」，有系统录制标记；<b>Root 直采</b>=root 直读合成帧，无弹窗、无标记（需设备已 root）。<br>
@@ -206,6 +213,30 @@
     });
   }
   applyFps(fps.value);
+
+  var swLow = document.getElementById('swLowLat');
+  try { swLow.classList.toggle('on', W.getFloatLowLat()); } catch (e) {}
+  swLow.addEventListener('click', function () {
+    var on = !swLow.classList.contains('on');
+    swLow.classList.toggle('on', on);
+    W.setFloatLowLat(on);
+  });
+
+  var scaleBtns = document.querySelectorAll('#scaleBtns button');
+  function syncScale() {
+    var cur = 2;
+    try { cur = W.getFloatCapScale(); } catch (e) {}
+    for (var s = 0; s < scaleBtns.length; s++) {
+      scaleBtns[s].classList.toggle('on', +scaleBtns[s].dataset.scale === cur);
+    }
+  }
+  syncScale();
+  for (var t = 0; t < scaleBtns.length; t++) {
+    scaleBtns[t].addEventListener('click', function () {
+      W.setFloatCapScale(+this.dataset.scale);
+      syncScale();
+    });
+  }
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}

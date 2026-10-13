@@ -215,4 +215,28 @@ public class WatchBridge {
             public void run() { act.setFloatFps(fps); }
         });
     }
+
+    @JavascriptInterface
+    public boolean getFloatLowLat() {
+        return act.getFloatLowLat();
+    }
+
+    @JavascriptInterface
+    public void setFloatLowLat(final boolean v) {
+        ui(new Runnable() {
+            public void run() { act.setFloatLowLat(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public int getFloatCapScale() {
+        return act.getFloatCapScale();
+    }
+
+    @JavascriptInterface
+    public void setFloatCapScale(final int s) {
+        ui(new Runnable() {
+            public void run() { act.setFloatCapScale(s); }
+        });
+    }
 }

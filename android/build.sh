@@ -19,6 +19,18 @@ rm -rf "$B/gen" "$B/classes"
 mkdir -p "$B/gen" "$B/classes"
 mkdir -p "$HERE/assets"
 
+# 常驻采集器：tools/CapLive.java -> assets/caplive.jar（App 运行期释放后以 root 常驻采集）
+if [ -f "$HERE/tools/CapLive.java" ]; then
+  mkdir -p "$B/helper"
+  javac --release 8 -classpath "$AJAR" -d "$B/helper" "$HERE/tools/CapLive.java"
+  d8 --release --min-api 21 --lib "$AJAR" --output "$B/helper" "$B/helper/CapLive.class"
+  python3 - "$HERE/assets/caplive.jar" "$B/helper/classes.dex" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[2], 'classes.dex')
+PY
+fi
+
 aapt2 compile --dir res -o "$B/res.zip"
 aapt2 link -o "$B/app-unsigned.apk" -I "$AJAR" \
   --manifest AndroidManifest.xml -A assets \

@@ -22,6 +22,7 @@ public class RootCapture {
 
     private volatile boolean running = false;
     private volatile int targetFps = 0;   // 0=不限速
+    private volatile String cmd = CMD;    // 采集命令（可为常驻 app_process 采集器）
     private Process proc;
     private Thread thread;
     private ErrorListener listener;
@@ -30,6 +31,12 @@ public class RootCapture {
 
     /** 目标帧率（1~144）。抓屏按此节流，降低 CPU/GPU 占用。 */
     public void setTargetFps(int fps) { targetFps = fps; }
+
+    /** 低延迟模式：用常驻 CapLive（app_process）按指定分辨率采集，替代反复 fork screencap。 */
+    public void useAppProcess(String jarPath, int w, int h) {
+        cmd = "CLASSPATH=" + jarPath
+                + " /system/bin/app_process /system/bin CapLive " + w + " " + h;
+    }
 
     public boolean isRunning() { return running; }
 
@@ -56,7 +63,7 @@ public class RootCapture {
         while (running) {
             DataInputStream in = null;
             try {
-                proc = new ProcessBuilder("su", "-c", CMD).start();
+                proc = new ProcessBuilder("su", "-c", cmd).start();
                 in = new DataInputStream(new BufferedInputStream(proc.getInputStream(), 1 << 20));
 
                 while (running) {

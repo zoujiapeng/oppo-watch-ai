@@ -275,6 +275,35 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 低延迟采集（root 常驻）与抓屏缩放
+    public boolean getFloatLowLat() {
+        return prefs().getBoolean("float_lowlat", false);
+    }
+
+    public void setFloatLowLat(boolean v) {
+        prefs().edit().putBoolean("float_lowlat", v).apply();
+        restartFloat();
+    }
+
+    public int getFloatCapScale() {
+        return prefs().getInt("float_cap_scale", 2);
+    }
+
+    public void setFloatCapScale(int s) {
+        s = Math.max(1, Math.min(8, s));
+        prefs().edit().putInt("float_cap_scale", s).apply();
+        restartFloat();
+    }
+
+    private void restartFloat() {
+        if (FloatingBallService.running) {
+            stopFloat();
+            getWindow().getDecorView().postDelayed(new Runnable() {
+                public void run() { beginFloat(); }
+            }, 300);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
