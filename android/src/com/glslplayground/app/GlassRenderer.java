@@ -49,10 +49,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     private Fbo full, half, half2;
     private Fbo bg, bg2;     // 干净背景（ping-pong）：每帧用实时抓屏更新，但球体区域保留旧帧 → 无闪烁、无自采样
-    private Fbo blurTex;
+    private int blurSrcTex = 0;         // 供合成采样的背景纹理（清晰或模糊）
     private boolean bgInit = false;     // 背景是否已初始化
     public int bgMode = 0;              // 0=无缝抠图（不闪） 1=实时刷新（会闪）
     public long refreshMs = 300;        // 模式 1 的刷新间隔
+    // 抓屏已排除本悬浮窗（SurfaceControl SKIP_SCREENSHOT）→ full 即干净实时桌面，
+    // 直接作为折射源，球内实时更新、无闪烁、无自采样。
+    public volatile boolean selfExcluded = false;
     private long lastSnapMs = 0;
     private int gotFrames = 0;
 
@@ -350,7 +353,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         }
 
-        if (bgMode == 1) {
+        int bgTex;
+        if (selfExcluded) {
+            // 抓屏已排除本悬浮窗 → full 就是干净的实时桌面，直接作为折射源（球内实时、无闪、无自采样）
+            bgTex = full.tex;
+        } else if (bgMode == 1) {
             // 模式二：实时刷新 —— 隔 refreshMs 让球隐几帧去录干净桌面（会闪一下）
             boolean needRefresh = !bgInit
                     || (refreshMs > 0 && System.currentTimeMillis() - lastSnapMs >= refreshMs);
@@ -366,6 +373,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
                 lastSnapMs = System.currentTimeMillis();
                 gotFrames = 0;
             }
+            bgTex = bg.tex;
         } else if (!bgInit) {
             // 模式一（默认）：首帧窗口全透明 → full 就是干净桌面，直接作为初始背景
             useProgram(blurProg);
@@ -374,6 +382,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             blurPass(full.tex, bg, 0f, 0f, 0f);
             bgInit = true;
+            bgTex = bg.tex;
         } else {
             // 模式一：抠图 —— bg2 = 实时帧，但球体范围内用旧背景填 → 背景无球、可实时更新、且不闪烁
             useProgram(maskProg);
@@ -395,10 +404,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glUniform1f(GLES20.glGetUniformLocation(maskProg, "uMargin"), 3f);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
             Fbo tmp = bg; bg = bg2; bg2 = tmp;   // ping-pong
+            bgTex = bg.tex;
         }
 
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
-        buildBlur();
+        buildBlur(bgTex);
 
         // Pass 3: 折射 + 合成 → 窗口
         useProgram(compProg);
@@ -406,9 +416,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glViewport(0, 0, winW, winH);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bg.tex);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurTex.tex);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurSrcTex);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(compProg, "iBg"), 0);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(compProg, "iBlur"), 1);
 
@@ -461,7 +471,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         }
     }
 
-    private void buildBlur() {
+    private void buildBlur(int srcTex) {
         useProgram(blurProg);
         bindFullscreen(blurProg);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(blurProg, "iTex"), 0);
@@ -469,10 +479,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
         if (blur < 0.5f) {
             // 不模糊：直接用全分辨率背景，和网页版（fboB 全分辨率）一致
-            blurTex = bg;
+            blurSrcTex = srcTex;
         } else {
             // 半分辨率高斯；per0 按半分辨率换算，模糊力度不变
-            blurPass(bg.tex, half, 0f, 0f, 0f);
+            blurPass(srcTex, half, 0f, 0f, 0f);
             float per0 = blur / 2f;
             int n = Math.max(1, (int) Math.ceil(per0 / 2.5f));
             float per = per0 / (float) Math.sqrt(n);
@@ -480,7 +490,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
                 blurPass(half.tex, half2, 1f, 0f, per);
                 blurPass(half2.tex, half, 0f, 1f, per);
             }
-            blurTex = half;
+            blurSrcTex = half.tex;
         }
     }
 

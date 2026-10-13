@@ -203,4 +203,16 @@ public class WatchBridge {
             public void run() { act.setFloatCaptureSrc(src); }
         });
     }
+
+    @JavascriptInterface
+    public int getFloatFps() {
+        return act.getFloatFps();
+    }
+
+    @JavascriptInterface
+    public void setFloatFps(final int fps) {
+        ui(new Runnable() {
+            public void run() { act.setFloatFps(fps); }
+        });
+    }
 }

@@ -262,6 +262,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 悬浮水晶球目标帧率（1~144）
+    public int getFloatFps() {
+        return prefs().getInt("float_fps", 60);
+    }
+
+    public void setFloatFps(int fps) {
+        fps = Math.max(1, Math.min(144, fps));
+        prefs().edit().putInt("float_fps", fps).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.setFps(fps);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {

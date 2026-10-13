@@ -21,13 +21,17 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.view.Gravity;
+import android.view.SurfaceControl;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
 
 import org.json.JSONObject;
+
+import java.lang.reflect.Method;
 
 /** 悬浮水晶球：TYPE_APPLICATION_OVERLAY 悬浮窗 + MediaProjection 抓屏 + GLSurfaceView 渲染。 */
 public class FloatingBallService extends Service {
@@ -74,6 +78,32 @@ public class FloatingBallService extends Service {
 
     private final Handler main = new Handler(Looper.getMainLooper());
 
+    // ── 帧率控制：渲染与抓屏都按 targetFps 节流（1~144）──
+    private int targetFps = 60;
+
+    public static void setFps(int fps) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFps(fps));
+    }
+
+    private void applyFps(int fps) {
+        targetFps = Math.max(1, Math.min(144, fps));
+        if (rootCapture != null) rootCapture.setTargetFps(targetFps);
+        if (glView != null) {
+            main.removeCallbacks(renderTick);
+            main.post(renderTick);
+        }
+    }
+
+    private final Runnable renderTick = new Runnable() {
+        @Override public void run() {
+            if (glView == null || targetFps <= 0) return;
+            glView.requestRender();
+            main.removeCallbacks(this);
+            main.postDelayed(this, Math.max(1, 1000 / targetFps));
+        }
+    };
+
     private final MediaProjection.Callback projectionCb = new MediaProjection.Callback() {
         @Override public void onStop() { stopSelf(); }
     };
@@ -84,7 +114,49 @@ public class FloatingBallService extends Service {
         super.onCreate();
         running = true;
         INSTANCE = this;
+        exemptHiddenApis();
         createChannel();
+    }
+
+    /** 允许反射调用 @hide 的 SurfaceControl#setSkipScreenshot（抓屏排除本窗口）。
+     *  用「反射 Class.forName/getDeclaredMethod」的元反射绕过 Android 的 hidden API 限制。 */
+    private static void exemptHiddenApis() {
+        try {
+            Method forName = Class.class.getDeclaredMethod("forName", String.class);
+            Method getDeclaredMethod = Class.class.getDeclaredMethod(
+                    "getDeclaredMethod", String.class, Class[].class);
+            Class<?> vmClass = (Class<?>) forName.invoke(null, "dalvik.system.VMRuntime");
+            Method getRuntime = (Method) getDeclaredMethod.invoke(vmClass, "getRuntime", new Class[0]);
+            Method setExempt = (Method) getDeclaredMethod.invoke(
+                    vmClass, "setHiddenApiExemptions", new Class[]{String[].class});
+            Object vm = getRuntime.invoke(null);
+            setExempt.invoke(vm, (Object) new String[]{"L"});
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "exemptHiddenApis failed: " + t);
+        }
+    }
+
+    /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
+    private boolean applySkipScreenshot() {
+        if (Build.VERSION.SDK_INT < 29 || glView == null) return false;
+        try {
+            SurfaceControl sc = glView.getSurfaceControl();
+            if (sc == null) return false;
+            Class<?> txClass = Class.forName("android.view.SurfaceControl$Transaction");
+            Object tx = txClass.getDeclaredConstructor().newInstance();
+            try {
+                Method m = txClass.getMethod("setSkipScreenshot", SurfaceControl.class, boolean.class);
+                m.invoke(tx, sc, true);
+            } catch (NoSuchMethodException e) {
+                Method m = txClass.getMethod("setSkipScreenshot", boolean.class);
+                m.invoke(tx, true);
+            }
+            txClass.getMethod("apply").invoke(tx);
+            return true;
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "setSkipScreenshot failed: " + t);
+            return false;
+        }
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -114,11 +186,13 @@ public class FloatingBallService extends Service {
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winSize, winSize);
+        targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         renderer.captureSource = src;
         if (src == 1) {
             // root 直采：无投影、无录屏
             rootCapture = new RootCapture();
+            rootCapture.setTargetFps(targetFps);
             rootCapture.setErrorListener(msg -> main.post(() -> {
                 if (rootError == null) { rootError = msg; }
             }));
@@ -127,7 +201,7 @@ public class FloatingBallService extends Service {
             renderer.setOnSurfaceReady(st -> main.post(() -> startCapture(st)));
         }
         glView.setRenderer(renderer);
-        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);   // 由 renderTick 按目标帧率驱动
         glView.setFocusable(false);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -171,6 +245,7 @@ public class FloatingBallService extends Service {
         glView.addOnLayoutChangeListener(
                 (v, l, t, r, b, ol, ot, or, ob) -> syncWinPos());
         glView.post(winSync);
+        main.post(renderTick);
         main.postDelayed(winSyncLoop, 500);
         applySavedParams();
         renderer.bgMode = prefs().getInt("float_mode", 0);
@@ -188,6 +263,10 @@ public class FloatingBallService extends Service {
         glView.getLocationOnScreen(loc);
         renderer.winX = loc[0];
         renderer.winY = loc[1];
+        // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
+        if (!renderer.selfExcluded && applySkipScreenshot()) {
+            renderer.selfExcluded = true;
+        }
     }
 
     // ───────────────────────── 参数同步（来自 liquid-glass 页面）─────────────────────────
@@ -293,6 +372,7 @@ public class FloatingBallService extends Service {
         running = false;
         INSTANCE = null;
         main.removeCallbacks(winSyncLoop);
+        main.removeCallbacks(renderTick);
         if (rootCapture != null) { rootCapture.stop(); rootCapture = null; }
         try { glView.onPause(); } catch (Exception ignored) { }
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay = null; }

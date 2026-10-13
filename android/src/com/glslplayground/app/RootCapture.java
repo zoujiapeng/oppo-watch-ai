@@ -21,11 +21,15 @@ public class RootCapture {
     public interface ErrorListener { void onError(String msg); }
 
     private volatile boolean running = false;
+    private volatile int targetFps = 0;   // 0=不限速
     private Process proc;
     private Thread thread;
     private ErrorListener listener;
 
     public void setErrorListener(ErrorListener l) { listener = l; }
+
+    /** 目标帧率（1~144）。抓屏按此节流，降低 CPU/GPU 占用。 */
+    public void setTargetFps(int fps) { targetFps = fps; }
 
     public boolean isRunning() { return running; }
 
@@ -67,6 +71,8 @@ public class RootCapture {
                     byte[] buf = renderer.takeFrameBuffer(need);
                     readFully(in, buf, 0, need);   // screencap 已是自上而下，行序与纹理 v=0=顶部一致，无需翻转
                     renderer.submitFrame(buf, w, h);
+                    int fps = targetFps;           // 按目标帧率节流：管道写满后 screencap 自然随之阻塞
+                    if (fps > 0) sleep(Math.max(0, 1000 / fps));
                 }
             } catch (Exception e) {
                 if (!running) break;
