@@ -116,6 +116,8 @@ public class FloatingBallService extends Service {
     private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
     private long siriTickLast = 0;
+    // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
+    private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
 
     public static void setSiriEnabled(boolean en) {
         FloatingBallService s = INSTANCE;
@@ -130,6 +132,12 @@ public class FloatingBallService extends Service {
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
+            // 记录“原来的水晶球”尺寸，作为最短形态
+            if (renderer != null) {
+                if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
+                if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
+                minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
+            }
             if (siriText == null) setupSiriText();
             main.removeCallbacks(siriTick);
             siriTickLast = 0;
@@ -200,20 +208,20 @@ public class FloatingBallService extends Service {
     }
 
     private void measureSiriTargets(String s) {
-        boolean empty = s == null || s.trim().isEmpty();
-        if (empty) {                            // 空闲球
-            tMaster = 1f; tHalfX = 0.22f; tHalfY = 0.22f; tCorner = 1f;
+        int n = s == null ? 0 : s.trim().length();
+        if (n <= 1) {                           // 0/1 个字：最短形态 = 原来的水晶球
+            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             return;
         }
         if (siriTextPx <= 0) siriTextPx = dp(34);
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
-        float padX = dp(42), padY = dp(34), minR = dp(54);
+        float padX = dp(42), padY = dp(34);
         int textMaxW = siriTextMaxW();
 
         float tw, th;
         if (siriText != null) {
-            // 直接用真实 TextView 的换行结果测试，保证球与文字完全匹配
+            // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配
             siriText.setText(s);
             siriText.setMaxWidth(textMaxW);
             siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
@@ -238,13 +246,15 @@ public class FloatingBallService extends Service {
         }
 
         float maxBallW = siriMaxBallW();
-        float hxpx = Math.min(maxBallW / 2f, tw / 2f + padX);
-        float hypx = Math.max(th / 2f + padY, minR);
+        // 绝不小于“原来的水晶球”
+        float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
+        float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16)); // 底部留更多 → 文字偏上
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
-        // 圆角：随宽度变小，但保留下限（≥0.45 倍高度）→ 始终保持圆滑
-        float frac = Math.max(0.45f, Math.min(1f, hypx / Math.max(1f, hxpx)));
-        tCorner = frac;
+        // 圆角：以“原球”为基准随变宽而变小，但保留下限（≥0.45）→ 始终圆滑
+        float baseRatio = minHalfY / Math.max(0.01f, minHalfX);
+        float frac = minCorner * ((hypx / Math.max(1f, hxpx)) / baseRatio);
+        tCorner = Math.max(0.45f, Math.min(minCorner, frac));
         tMaster = 1f;
     }
 
@@ -277,15 +287,19 @@ public class FloatingBallService extends Service {
         if (siriText == null || siriParams == null || wm == null) return;
         float winXnow = (renderer != null) ? renderer.winX : params.x;
         float winYnow = (renderer != null) ? renderer.winY : params.y;
+        float base = winSize * 0.9f;
+        if (base <= 0) base = 1f;
         float sx = winXnow + winSize * 0.5f;
         float sy = winYnow + winSize * 0.5f;
+        float hypx = base * aHalfY * aMaster;     // 当前球半高
+        float ballTop = sy - hypx;
         int textMaxW = siriTextMaxW();
         siriText.setMaxWidth(textMaxW);
         siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int tw = siriText.getMeasuredWidth(), th = siriText.getMeasuredHeight();
+        int tw = siriText.getMeasuredWidth();
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(sy - th / 2f);
+        siriParams.y = Math.round(ballTop + dp(34));   // 顶部内边距 → 文字在球内“上方”
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
