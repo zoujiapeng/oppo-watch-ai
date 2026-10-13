@@ -143,11 +143,11 @@ public class FloatingBallService extends Service {
 
     private void setupSiriText() {
         if (siriText != null || wm == null) return;
-        if (siriTextPx <= 0) siriTextPx = dp(46);
+        if (siriTextPx <= 0) siriTextPx = dp(34);
         android.widget.TextView tv = new android.widget.TextView(this);
         tv.setTextColor(0xFFF4F5F7);
         tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, siriTextPx);
-        tv.setSingleLine(true);
+        tv.setSingleLine(false);
         tv.setIncludeFontPadding(false);
         tv.setGravity(Gravity.CENTER);
         tv.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
@@ -189,31 +189,62 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 球宽上限：屏幕宽度的 85%（且不超过悬浮窗）。 */
+    private float siriMaxBallW() {
+        return Math.min(screenW * 0.85f, winSize);
+    }
+
+    /** 文字可换行的最大宽度。 */
+    private int siriTextMaxW() {
+        return (int) Math.max(dp(60), siriMaxBallW() - 2 * dp(42));
+    }
+
     private void measureSiriTargets(String s) {
-        float base = Math.min(winSize, winSize * 0.9f);
-        if (base <= 0) base = 1f;
         boolean empty = s == null || s.trim().isEmpty();
         if (empty) {                            // 空闲球
             tMaster = 1f; tHalfX = 0.22f; tHalfY = 0.22f; tCorner = 1f;
             return;
         }
-        if (siriTextPx <= 0) siriTextPx = dp(46);
-        android.graphics.Paint p = new android.graphics.Paint();
-        p.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-        p.setTextSize(siriTextPx);
-        float tw = p.measureText(s);
-        android.graphics.Paint.FontMetrics fm = p.getFontMetrics();
-        float th = fm.descent - fm.ascent;
-        float padX = dp(42), padY = dp(24), minR = dp(54);
-        float hxpx = tw / 2f + padX;
+        if (siriTextPx <= 0) siriTextPx = dp(34);
+        float base = winSize * 0.9f;
+        if (base <= 0) base = 1f;
+        float padX = dp(42), padY = dp(34), minR = dp(54);
+        int textMaxW = siriTextMaxW();
+
+        float tw, th;
+        if (siriText != null) {
+            // 直接用真实 TextView 的换行结果测试，保证球与文字完全匹配
+            siriText.setText(s);
+            siriText.setMaxWidth(textMaxW);
+            siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            tw = siriText.getMeasuredWidth();
+            th = siriText.getMeasuredHeight();
+        } else {
+            android.text.TextPaint p = new android.text.TextPaint();
+            p.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+            p.setTextSize(siriTextPx);
+            android.text.StaticLayout layout = android.text.StaticLayout.Builder
+                    .obtain(s, 0, s.length(), p, textMaxW)
+                    .setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
+                    .setIncludePad(false)
+                    .build();
+            float maxLineW = 0;
+            for (int i = 0; i < layout.getLineCount(); i++) {
+                maxLineW = Math.max(maxLineW, layout.getLineWidth(i));
+            }
+            tw = maxLineW;
+            th = layout.getHeight();
+        }
+
+        float maxBallW = siriMaxBallW();
+        float hxpx = Math.min(maxBallW / 2f, tw / 2f + padX);
         float hypx = Math.max(th / 2f + padY, minR);
-        float maxHx = winSize / 2f - dp(4);
-        if (hxpx > maxHx) hxpx = maxHx;          // 超宽贴边（文字被截断）
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
-        // 圆角：越宽越小（长条两端更方）
-        float radiusPx = Math.min(hypx, Math.max(dp(14), hypx * (hypx / hxpx)));
-        tCorner = Math.max(0.12f, radiusPx / hypx);
+        // 圆角：随宽度变小，但保留下限（≥0.45 倍高度）→ 始终保持圆滑
+        float frac = Math.max(0.45f, Math.min(1f, hypx / Math.max(1f, hxpx)));
+        tCorner = frac;
         tMaster = 1f;
     }
 
@@ -248,7 +279,9 @@ public class FloatingBallService extends Service {
         float winYnow = (renderer != null) ? renderer.winY : params.y;
         float sx = winXnow + winSize * 0.5f;
         float sy = winYnow + winSize * 0.5f;
-        siriText.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        int textMaxW = siriTextMaxW();
+        siriText.setMaxWidth(textMaxW);
+        siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int tw = siriText.getMeasuredWidth(), th = siriText.getMeasuredHeight();
         siriParams.x = Math.round(sx - tw / 2f);
