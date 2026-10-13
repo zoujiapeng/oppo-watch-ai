@@ -116,6 +116,7 @@ public class FloatingBallService extends Service {
     private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
     private long siriTickLast = 0;
+    private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
 
@@ -129,9 +130,16 @@ public class FloatingBallService extends Service {
         if (s != null) s.main.post(() -> s.applySiriText(text));
     }
 
+    /** 文字相对球顶的上下偏移(px)，实时生效。 */
+    public static void setSiriTextDy(int dy) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.siriTextDy = dy);
+    }
+
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
+            siriTextDy = prefs().getInt("float_siri_dy", 10);
             // 记录“原来的水晶球”尺寸，作为最短形态
             if (renderer != null) {
                 if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
@@ -358,7 +366,7 @@ public class FloatingBallService extends Service {
         // 系统会给悬浮窗加一个顶部 inset 偏移（=球窗口实际 top − 请求 y，≈状态栏高度）；
         // 必须减掉它，否则文字会被整体推低约一个状态栏的高度。
         float sysOffset = winYnow - params.y;
-        siriParams.y = Math.round(ballTop + 5 - Math.max(0f, topGap) - sysOffset);   // 字形顶比球顶低 5px
+        siriParams.y = Math.round(ballTop + siriTextDy - Math.max(0f, topGap) - sysOffset);   // 字形顶相对球顶的偏移
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }

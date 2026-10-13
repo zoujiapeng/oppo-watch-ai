@@ -259,4 +259,16 @@ public class WatchBridge {
             public void run() { act.sendSiriText(text); }
         });
     }
+
+    @JavascriptInterface
+    public int getSiriTextDy() {
+        return act.getSiriTextDy();
+    }
+
+    @JavascriptInterface
+    public void setSiriTextDy(final int dy) {
+        ui(new Runnable() {
+            public void run() { act.setSiriTextDy(dy); }
+        });
+    }
 }

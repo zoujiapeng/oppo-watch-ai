@@ -102,6 +102,8 @@
         <button id="btnSiriClear">清空</button>
         <button id="btnSiriDemo">演示</button>
       </div>
+      <div class="row" style="margin-top:8px"><label>文字距球顶 (px)</label><span class="v" id="vSiriDy">10</span></div>
+      <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
@@ -279,6 +281,13 @@
       try { W.setSiriText(siriInput.value); } catch (e) {}
       i++;
     }, 180);
+  });
+
+  var siriDy = document.getElementById('siriDy'), vSiriDy = document.getElementById('vSiriDy');
+  try { var curDy = W.getSiriTextDy(); siriDy.value = curDy; vSiriDy.textContent = curDy; } catch (e) {}
+  siriDy.addEventListener('input', function () {
+    vSiriDy.textContent = siriDy.value;
+    try { W.setSiriTextDy(parseInt(siriDy.value, 10)); } catch (e) {}
   });
 
   var swAuto = document.getElementById('swAuto');

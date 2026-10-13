@@ -321,6 +321,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 文字相对球顶的上下偏移(px)，正=更低
+    public int getSiriTextDy() {
+        return prefs().getInt("float_siri_dy", 10);
+    }
+
+    public void setSiriTextDy(int dy) {
+        dy = Math.max(-120, Math.min(240, dy));
+        prefs().edit().putInt("float_siri_dy", dy).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.setSiriTextDy(dy);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
