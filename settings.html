@@ -72,6 +72,20 @@
     <div class="muted" id="kioskHint" style="margin-top:10px"></div>
   </div>
 
+  <div class="grp" id="grpFloat" style="display:none">
+    <div class="gh">悬浮水晶球</div>
+    <div class="row"><label>悬浮于桌面</label><div class="switch" id="swFloat"></div></div>
+    <div class="row" style="margin-top:12px;margin-bottom:8px"><label>采集方式</label></div>
+    <div class="btns" id="srcBtns">
+      <button data-src="0">录屏 MediaProjection</button>
+      <button data-src="1">Root 直采</button>
+    </div>
+    <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
+    <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
+      <b>采集方式</b>：<b>录屏 MediaProjection</b>=需授予「屏幕录制」，有系统录制标记；<b>Root 直采</b>=root 直读合成帧，无弹窗、无标记（需设备已 root）。<br>
+      <b>背景模式</b>：<b>关</b>=无缝抠图（不闪，球正下方略滞后）；<b>开</b>=定时刷新（更实时，但球会闪）。</div>
+  </div>
+
   <div class="grp" id="grpMore" style="display:none">
     <div class="gh">测试 / 扩展</div>
     <div class="btns" style="margin-bottom:12px">
@@ -92,7 +106,7 @@
   var W = window.Watch;
   if (!W) return;
   document.getElementById('grpNone').style.display = 'none';
-  ['grpDevice','grpScreen','grpKiosk','grpMore'].forEach(function (id) {
+  ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore'].forEach(function (id) {
     document.getElementById(id).style.display = 'block';
   });
 
@@ -122,6 +136,42 @@
     swKeep.classList.toggle('on', on);
     W.setKeepScreenOn(on);
   });
+
+  var swFloat = document.getElementById('swFloat');
+  function syncFloat() {
+    try { swFloat.classList.toggle('on', !!W.isFloating()); } catch (e) {}
+  }
+  syncFloat();
+  setInterval(syncFloat, 1500);
+  swFloat.addEventListener('click', function () {
+    var on = !swFloat.classList.contains('on');
+    if (on) { W.startFloat(); } else { W.stopFloat(); }
+    swFloat.classList.toggle('on', on);
+  });
+
+  var swMode = document.getElementById('swMode');
+  try { swMode.classList.toggle('on', W.getFloatMode() === 1); } catch (e) {}
+  swMode.addEventListener('click', function () {
+    var on = !swMode.classList.contains('on');
+    swMode.classList.toggle('on', on);
+    W.setFloatMode(on ? 1 : 0);
+  });
+
+  var srcBtns = document.querySelectorAll('#srcBtns button');
+  function syncSrc() {
+    var cur = 0;
+    try { cur = W.getFloatCaptureSrc(); } catch (e) {}
+    for (var i = 0; i < srcBtns.length; i++) {
+      srcBtns[i].classList.toggle('on', +srcBtns[i].dataset.src === cur);
+    }
+  }
+  syncSrc();
+  for (var i = 0; i < srcBtns.length; i++) {
+    srcBtns[i].addEventListener('click', function () {
+      W.setFloatCaptureSrc(+this.dataset.src);
+      syncSrc();
+    });
+  }
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}

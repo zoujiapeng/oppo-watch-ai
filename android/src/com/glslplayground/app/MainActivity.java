@@ -6,9 +6,11 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,6 +25,8 @@ import android.webkit.WebViewClient;
 public class MainActivity extends Activity {
 
     private static final int FILE_CHOOSER_REQUEST = 1001;
+    private static final int MEDIA_PROJECTION_REQUEST = 1002;
+    private static final int OVERLAY_REQUEST = 1003;
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
@@ -175,6 +179,89 @@ public class MainActivity extends Activity {
         return kiosk;
     }
 
+    // ---------- 悬浮水晶球 ----------
+    public void requestFloat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            try {
+                Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName()));
+                startActivityForResult(i, OVERLAY_REQUEST);
+            } catch (Exception e) {
+                // 部分 ROM 无此页面，直接按当前采集源启动
+                beginFloat();
+            }
+            return;
+        }
+        beginFloat();
+    }
+
+    // 采集源：1=root 直采（直接启动，无录屏授权）；0=MediaProjection（需授权）
+    private void beginFloat() {
+        if (getFloatCaptureSrc() == 1) {
+            startFloatServiceDirect();
+        } else {
+            startMediaProjection();
+        }
+    }
+
+    private void startFloatServiceDirect() {
+        Intent i = new Intent(this, FloatingBallService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(i);
+        } else {
+            startService(i);
+        }
+    }
+
+    private void startMediaProjection() {
+        MediaProjectionManager mpm =
+                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        if (mpm == null) return;
+        try {
+            startActivityForResult(mpm.createScreenCaptureIntent(), MEDIA_PROJECTION_REQUEST);
+        } catch (Exception ignored) { }
+    }
+
+    public void stopFloat() {
+        stopService(new Intent(this, FloatingBallService.class));
+    }
+
+    public boolean isFloating() {
+        return FloatingBallService.running;
+    }
+
+    public void applyFloatParams(String json) {
+        if (json == null) return;
+        prefs().edit().putString("float_params", json).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.updateParams(json);
+        }
+    }
+
+    public void setFloatMode(int mode) {
+        prefs().edit().putInt("float_mode", mode).apply();
+        if (FloatingBallService.running) FloatingBallService.setMode(mode);
+    }
+
+    public int getFloatMode() {
+        return prefs().getInt("float_mode", 0);
+    }
+
+    // 采集源：0=MediaProjection（录屏） 1=root 直采（无录屏）
+    public int getFloatCaptureSrc() {
+        return prefs().getInt("float_capture_src", 0);
+    }
+
+    public void setFloatCaptureSrc(int src) {
+        prefs().edit().putInt("float_capture_src", src).apply();
+        if (FloatingBallService.running) {
+            stopFloat();
+            getWindow().getDecorView().postDelayed(new Runnable() {
+                public void run() { beginFloat(); }
+            }, 300);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -183,6 +270,25 @@ public class MainActivity extends Activity {
                 filePathCallback.onReceiveValue(
                         WebChromeClient.FileChooserParams.parseResult(resultCode, data));
                 filePathCallback = null;
+            }
+            return;
+        }
+        if (requestCode == OVERLAY_REQUEST) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) {
+                beginFloat();
+            }
+            return;
+        }
+        if (requestCode == MEDIA_PROJECTION_REQUEST) {
+            if (resultCode == RESULT_OK && data != null) {
+                Intent i = new Intent(this, FloatingBallService.class);
+                i.putExtra("code", resultCode);
+                i.putExtra("data", data);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(i);
+                } else {
+                    startService(i);
+                }
             }
             return;
         }

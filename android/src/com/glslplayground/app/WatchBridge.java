@@ -152,4 +152,55 @@ public class WatchBridge {
             }
         });
     }
+
+    // ---------- 悬浮水晶球 ----------
+    @JavascriptInterface
+    public void startFloat() {
+        ui(new Runnable() {
+            public void run() { act.requestFloat(); }
+        });
+    }
+
+    @JavascriptInterface
+    public void stopFloat() {
+        ui(new Runnable() {
+            public void run() { act.stopFloat(); }
+        });
+    }
+
+    @JavascriptInterface
+    public boolean isFloating() {
+        return act.isFloating();
+    }
+
+    @JavascriptInterface
+    public void setFloatParams(final String json) {
+        ui(new Runnable() {
+            public void run() { act.applyFloatParams(json); }
+        });
+    }
+
+    @JavascriptInterface
+    public void setFloatMode(final int mode) {
+        ui(new Runnable() {
+            public void run() { act.setFloatMode(mode); }
+        });
+    }
+
+    @JavascriptInterface
+    public int getFloatMode() {
+        return act.getFloatMode();
+    }
+
+    @JavascriptInterface
+    public int getFloatCaptureSrc() {
+        return act.getFloatCaptureSrc();
+    }
+
+    @JavascriptInterface
+    public void setFloatCaptureSrc(final int src) {
+        ui(new Runnable() {
+            public void run() { act.setFloatCaptureSrc(src); }
+        });
+    }
 }

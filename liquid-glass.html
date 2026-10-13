@@ -400,8 +400,21 @@ document.getElementById('bgfile').onchange=e=>{
 
 // ── 滑块 ──
 const P={};
+// 把当前参数同步给原生悬浮球（App 内 window.Watch 存在时）
+let floatPushPending=false;
+function pushFloatParams(){ if(floatPushPending)return; floatPushPending=true;
+  setTimeout(sendFloatParams,0); }
+function sendFloatParams(){ floatPushPending=false;
+  if(!(window.Watch && window.Watch.setFloatParams))return;
+  try{ window.Watch.setFloatParams(JSON.stringify({
+    master:P.master, posX:P.posX, posY:P.posY, halfX:P.halfX, halfY:P.halfY,
+    corner:P.corner, refraction:P.refraction, band:P.band, zoom:P.zoom,
+    dome:P.dome, aberration:P.aberration, blur:P.blur, topDarken:P.topDarken,
+    black0:P.black0, black1:P.black1, edgeBleed:P.edgeBleed,
+    waveAmp:P.waveAmp, waveScale:P.waveScale, waveOn:waveOn })); }catch(e){}
+}
 function bind(id,key,scale,fmt){const s=document.getElementById(id),v=document.getElementById('v'+id);
-  function up(){P[key]=s.value*scale;v.textContent=fmt?fmt(P[key]):P[key].toFixed(0); if(typeof requestRender!=="undefined")requestRender();}s.oninput=up;up();}
+  function up(){P[key]=s.value*scale;v.textContent=fmt?fmt(P[key]):P[key].toFixed(0); if(typeof requestRender!=="undefined")requestRender(); pushFloatParams();}s.oninput=up;up();}
 bind('SC','master',0.01,x=>x.toFixed(2)); bind('PY','posY',0.01,x=>x.toFixed(2));
 bind('PX','posX',0.01,x=>x.toFixed(2));
 bind('HX','halfX',0.01,x=>x.toFixed(2)); bind('HY','halfY',0.01,x=>x.toFixed(2));
@@ -439,7 +452,7 @@ function waveLoop(){ if(!waveOn) return; render(); requestAnimationFrame(waveLoo
 waveBtn.onclick=()=>{ waveOn=!waveOn;
   waveBtn.classList.toggle('on',waveOn);
   waveBtn.textContent=waveOn?'停止':'播放';
-  if(waveOn) waveLoop(); else requestRender(); };
+  if(waveOn) waveLoop(); else requestRender(); pushFloatParams(); };
 addEventListener('load',()=>waveBtn.onclick());   // 默认自动播放
 
 // ── 渲染（正确顺序：先模糊背景，再透镜折射采样它）──
