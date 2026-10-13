@@ -108,6 +108,9 @@
       <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
       <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
       <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
+      <div class="row" style="margin-top:8px"><label>每多一行黑区下移</label><span class="v" id="vSiriBlack">0.35</span></div>
+      <input type="range" id="siriBlack" min="0" max="150" step="1" value="35">
+      <div class="muted" style="margin-top:6px">文字行数越多，黑区整体自动越往下（每多一行下移该值），起点/终点同步。</div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
@@ -154,9 +157,9 @@
     <div class="row"><label>黑区强度</label><span class="v" id="vTD">0.93</span></div>
     <input type="range" id="TD" min="0" max="100" value="93">
     <div class="row"><label>黑区起点</label><span class="v" id="vB0">-1.00</span></div>
-    <input type="range" id="B0" min="-100" max="80" value="-100">
+    <input type="range" id="B0" min="-300" max="80" value="-100">
     <div class="row"><label>黑区终点</label><span class="v" id="vB1">-0.01</span></div>
-    <input type="range" id="B1" min="-50" max="120" value="-1">
+    <input type="range" id="B1" min="-300" max="120" value="-1">
   </div>
 
   <div class="grp gl" id="grpGlassEdge" style="display:none">
@@ -370,6 +373,14 @@
   siriSz.addEventListener('input', function () {
     vSiriSz.textContent = siriSz.value;
     try { W.setSiriTextSp(parseInt(siriSz.value, 10)); } catch (e) {}
+  });
+
+  var siriBlack = document.getElementById('siriBlack'), vSiriBlack = document.getElementById('vSiriBlack');
+  try { var curBk = W.getSiriBlackStep(); if (curBk != null) siriBlack.value = curBk; } catch (e) {}
+  vSiriBlack.textContent = (siriBlack.value / 100).toFixed(2);
+  siriBlack.addEventListener('input', function () {
+    vSiriBlack.textContent = (siriBlack.value / 100).toFixed(2);
+    try { W.setSiriBlackStep(parseInt(siriBlack.value, 10)); } catch (e) {}
   });
 
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──

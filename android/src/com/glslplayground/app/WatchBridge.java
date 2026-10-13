@@ -288,4 +288,16 @@ public class WatchBridge {
             public void run() { act.setSiriTextSp(sp); }
         });
     }
+
+    @JavascriptInterface
+    public int getSiriBlackStep() {
+        return act.getSiriBlackStep();
+    }
+
+    @JavascriptInterface
+    public void setSiriBlackStep(final int v) {
+        ui(new Runnable() {
+            public void run() { act.setSiriBlackStep(v); }
+        });
+    }
 }

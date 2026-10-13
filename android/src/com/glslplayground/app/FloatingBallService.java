@@ -117,6 +117,8 @@ public class FloatingBallService extends Service {
     private float siriTextPx;
     private long siriTickLast = 0;
     private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
+    private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
+    private volatile int siriBlackStep = 35; // 每多一行黑区下移量（百分之一单位，35=0.35）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
 
@@ -151,11 +153,23 @@ public class FloatingBallService extends Service {
         if (siriEnabled) measureSiriTargets(siriStr);
     }
 
+    /** 每多一行黑区整体下移量（百分之一单位，35=0.35），实时生效。 */
+    public static void setSiriBlackStep(int v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applySiriBlackStep(v));
+    }
+
+    private void applySiriBlackStep(int v) {
+        siriBlackStep = Math.max(0, Math.min(300, v));
+        if (siriEnabled) measureSiriTargets(siriStr);
+    }
+
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
             siriTextDy = prefs().getInt("float_siri_dy", 10);
             siriTextPx = dp(prefs().getInt("float_siri_sp", 34));
+            siriBlackStep = prefs().getInt("float_siri_black", 35);
             // 记录“原来的水晶球”尺寸，作为最短形态
             if (renderer != null) {
                 if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
@@ -173,7 +187,7 @@ public class FloatingBallService extends Service {
         } else {
             main.removeCallbacks(siriTick);
             removeSiriText();
-            if (renderer != null) renderer.siriGeom = false;
+            if (renderer != null) { renderer.siriGeom = false; renderer.svBlackOffset = 0f; }
         }
     }
 
@@ -239,6 +253,7 @@ public class FloatingBallService extends Service {
         int n = s == null ? 0 : s.trim().length();
         if (n <= 1) {                           // 0/1 个字：最短形态 = 原来的水晶球
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
+            tBlack = 0f;
             float b0 = winSize * 0.9f;
             updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
             return;
@@ -260,6 +275,8 @@ public class FloatingBallService extends Service {
                     .build();
             lines = sl.getLineCount();
         }
+        // 行数越多，黑区整体越往下（黑区起点/终点同步下移）
+        tBlack = Math.max(0, lines - 1) * (siriBlackStep / 100f);
         // 第 3 行起内边距改大（大圆角方形，留白更足）
         float padX = lines >= 3 ? dp(58) : dp(42);
         float padY = lines >= 3 ? dp(44) : dp(34);
@@ -323,8 +340,10 @@ public class FloatingBallService extends Service {
             aHalfX += (tHalfX - aHalfX) * k;
             aHalfY += (tHalfY - aHalfY) * k;
             aCorner += (tCorner - aCorner) * k;
+            aBlack += (tBlack - aBlack) * k;
             if (renderer != null) {
                 renderer.siriGeom = true;
+                renderer.svBlackOffset = aBlack;
                 renderer.svMaster = aMaster;
                 renderer.svHalfX = aHalfX;
                 renderer.svHalfY = aHalfY;

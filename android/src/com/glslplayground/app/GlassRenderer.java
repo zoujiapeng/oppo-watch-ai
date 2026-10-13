@@ -34,6 +34,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile boolean siriGeom = false;
     public volatile float svMaster = 1f, svHalfX = 0.37f, svHalfY = 0.25f, svCorner = 1f;
     public volatile float svPosX = 0.5f, svPosY = 0.5f;
+    public volatile float svBlackOffset = 0f;   // 黑区整体下移量（Siri 行数越多越负）
 
     private OnSurfaceReady readyCb;
 
@@ -155,7 +156,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform sampler2D iBlur;// 模糊抓屏\n" +
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
-        "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed;\n" +
+        "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
@@ -229,13 +230,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
         "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
         "  float ny = -c.y / uHalf.y;\n" +
-        "  float blackMask = smoothstep(uBlack0, uBlack1, ny);\n" +
+        "  float b0 = uBlack0 - uBlackOffset;\n" +
+        "  float b1 = uBlack1 - uBlackOffset;\n" +
+        "  float blackMask = smoothstep(b0, b1, ny);\n" +
         "  blackMask = blackMask*blackMask*(3.0-2.0*blackMask);\n" +
         "  col = mix(col, vec3(0.012,0.015,0.025), blackMask*uTopDarken);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         "  if(uWaveAmp > 0.001){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
-        "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - uBlack1) / max(uWaveScale, 0.1);\n" +
+        "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
         "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
         "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
@@ -243,8 +246,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
         "  col *= mix(0.70,1.,innerEdge);\n" +
-        "  float mid=(uBlack0+uBlack1)*0.5;\n" +
-        "  float eqLine = smoothstep(uBlack0,mid,ny)*smoothstep(uBlack1,mid,ny);\n" +
+        "  float mid=(b0+b1)*0.5;\n" +
+        "  float eqLine = smoothstep(b0,mid,ny)*smoothstep(b1,mid,ny);\n" +
         "  float horiz = 1.0 - abs(c.x)/uHalf.x*0.3;\n" +
         "  col += vec3(0.95,0.97,1.0)*eqLine*horiz*uEdgeBleed;\n" +
         "  float bottomRim = smoothstep(-14.*uScale,-2.*uScale,sd) * smoothstep(0.0,-0.6,-ny);\n" +
@@ -456,6 +459,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"), topDarken);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"), black0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), black1);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveOn ? waveAmp : 0f);

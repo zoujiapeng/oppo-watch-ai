@@ -352,6 +352,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 每多一行黑区下移量（百分之一单位，35=0.35）
+    public int getSiriBlackStep() {
+        return prefs().getInt("float_siri_black", 35);
+    }
+
+    public void setSiriBlackStep(int v) {
+        v = Math.max(0, Math.min(300, v));
+        prefs().edit().putInt("float_siri_black", v).apply();
+        if (FloatingBallService.running) {
+            FloatingBallService.setSiriBlackStep(v);
+        }
+    }
+
     // ---------- WebView / 生命周期 ----------
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
