@@ -358,7 +358,7 @@ public class FloatingBallService extends Service {
         // 系统会给悬浮窗加一个顶部 inset 偏移（=球窗口实际 top − 请求 y，≈状态栏高度）；
         // 必须减掉它，否则文字会被整体推低约一个状态栏的高度。
         float sysOffset = winYnow - params.y;
-        siriParams.y = Math.round(ballTop - dp(6) - Math.max(0f, topGap) - sysOffset);
+        siriParams.y = Math.round(ballTop + 2 - Math.max(0f, topGap) - sysOffset);   // 字形顶比球顶低 2px
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
