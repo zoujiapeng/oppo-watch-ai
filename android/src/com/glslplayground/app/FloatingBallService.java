@@ -246,28 +246,14 @@ public class FloatingBallService extends Service {
         }
 
         float maxBallW = siriMaxBallW();
-        // 绝不小于“原来的水晶球”
+        // 文字所需半宽/半高（不小于“原来的水晶球”）
         float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
-        float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16)); // 底部留更多 → 文字偏上
+        float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
+        // 始终是“横着的胶囊”：宽至少为高的 1.35 倍，行数变多也只会更宽、不会变圆
+        hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f));
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
-        // 换行行数
-        int lines;
-        {
-            android.text.TextPaint lp = new android.text.TextPaint();
-            lp.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-            lp.setTextSize(siriTextPx);
-            android.text.StaticLayout sl = android.text.StaticLayout.Builder
-                    .obtain(s, 0, s.length(), lp, textMaxW)
-                    .setIncludePad(false)
-                    .build();
-            lines = sl.getLineCount();
-        }
-        // 圆角：以“原球”为基准随变宽而变小，但保留下限（≥0.45）→ 始终圆滑
-        float baseRatio = minHalfY / Math.max(0.01f, minHalfX);
-        float frac = minCorner * ((hypx / Math.max(1f, hxpx)) / baseRatio);
-        if (lines >= 3) frac *= Math.max(0.65f, 1f - 0.07f * (lines - 2));  // 第 3 行起圆角再小一点点
-        tCorner = Math.max(0.45f, Math.min(minCorner, frac));
+        tCorner = minCorner;                 // 胶囊端 = 半圆，始终圆滑
         tMaster = 1f;
     }
 
@@ -312,7 +298,7 @@ public class FloatingBallService extends Service {
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int tw = siriText.getMeasuredWidth();
         siriParams.x = Math.round(sx - tw / 2f);
-        siriParams.y = Math.round(ballTop + dp(34));   // 顶部内边距 → 文字在球内“上方”
+        siriParams.y = Math.round(ballTop + dp(8));    // 贴近球顶 → 文字在水晶球顶部
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
