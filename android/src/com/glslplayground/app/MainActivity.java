@@ -238,6 +238,11 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 返回已保存的液态玻璃参数（JSON），未设置时为 null
+    public String getFloatParams() {
+        return prefs().getString("float_params", null);
+    }
+
     public void setFloatMode(int mode) {
         prefs().edit().putInt("float_mode", mode).apply();
         if (FloatingBallService.running) FloatingBallService.setMode(mode);

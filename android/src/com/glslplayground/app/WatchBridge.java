@@ -181,6 +181,11 @@ public class WatchBridge {
     }
 
     @JavascriptInterface
+    public String getFloatParams() {
+        return act.getFloatParams();
+    }
+
+    @JavascriptInterface
     public void setFloatMode(final int mode) {
         ui(new Runnable() {
             public void run() { act.setFloatMode(mode); }

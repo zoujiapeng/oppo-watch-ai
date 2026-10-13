@@ -37,6 +37,8 @@
   input[type=text]{width:100%;padding:11px;border-radius:10px;border:1px solid rgba(255,255,255,.15);
     background:rgba(255,255,255,.06);color:#fff;font-size:13px;margin-bottom:8px}
   code{font-size:11px;background:rgba(255,255,255,.1);padding:2px 5px;border-radius:5px}
+  .grp.gl .row{margin-bottom:3px;margin-top:2px}
+  .grp.gl input[type=range]{display:block;margin-bottom:11px}
   @media (max-height:520px){
     body{padding-top:calc(8px + env(safe-area-inset-top))}
     .grp{padding:12px;margin-bottom:10px}
@@ -113,6 +115,64 @@
       <b>无 root / 录屏</b>时用下方开关：<b>关</b>=无缝抠图（不闪，球正下方略滞后）；<b>开</b>=定时刷新（更实时，但球会闪）。</div>
   </div>
 
+  <div class="grp gl" id="grpGlassShape" style="display:none">
+    <div class="gh">液态玻璃 · 形状</div>
+    <div class="row"><label>整体 scale</label><span class="v" id="vSC">1.00</span></div>
+    <input type="range" id="SC" min="30" max="160" value="100">
+    <div class="row"><label>整体 y 位置</label><span class="v" id="vPY">0.50</span></div>
+    <input type="range" id="PY" min="8" max="92" value="50">
+    <div class="row"><label>整体 x 位置</label><span class="v" id="vPX">0.50</span></div>
+    <input type="range" id="PX" min="8" max="92" value="50">
+    <div class="row"><label>宽 halfX</label><span class="v" id="vHX">0.37</span></div>
+    <input type="range" id="HX" min="15" max="48" value="37">
+    <div class="row"><label>高 halfY</label><span class="v" id="vHY">0.25</span></div>
+    <input type="range" id="HY" min="15" max="45" value="25">
+    <div class="row"><label>圆角 corner</label><span class="v" id="vCR">1.00</span></div>
+    <input type="range" id="CR" min="0" max="100" value="100">
+  </div>
+
+  <div class="grp gl" id="grpGlassRefr" style="display:none">
+    <div class="gh">液态玻璃 · 折射（透镜）</div>
+    <div class="row"><label>强度 refraction</label><span class="v" id="vRF">200</span></div>
+    <input type="range" id="RF" min="0" max="260" value="200">
+    <div class="row"><label>放大 zoom</label><span class="v" id="vZM">1.00</span></div>
+    <input type="range" id="ZM" min="100" max="180" value="100">
+    <div class="row"><label>带宽 band</label><span class="v" id="vBD">170</span></div>
+    <input type="range" id="BD" min="60" max="500" value="170">
+    <div class="row"><label>球面/平缓 dome</label><span class="v" id="vDM">0.40</span></div>
+    <input type="range" id="DM" min="0" max="100" value="40">
+    <div class="row"><label>色差 aberration</label><span class="v" id="vAB">10</span></div>
+    <input type="range" id="AB" min="0" max="40" value="10">
+    <div class="row"><label>模糊 blur(backdrop)</label><span class="v" id="vBL">0.3</span></div>
+    <input type="range" id="BL" min="0" max="40" value="3">
+  </div>
+
+  <div class="grp gl" id="grpGlassTop" style="display:none">
+    <div class="gh">液态玻璃 · 黑顶镜面</div>
+    <div class="row"><label>黑区强度</label><span class="v" id="vTD">0.93</span></div>
+    <input type="range" id="TD" min="0" max="100" value="93">
+    <div class="row"><label>黑区起点</label><span class="v" id="vB0">-1.00</span></div>
+    <input type="range" id="B0" min="-100" max="80" value="-100">
+    <div class="row"><label>黑区终点</label><span class="v" id="vB1">-0.01</span></div>
+    <input type="range" id="B1" min="-50" max="120" value="-1">
+  </div>
+
+  <div class="grp gl" id="grpGlassEdge" style="display:none">
+    <div class="gh">液态玻璃 · 赤道亮线</div>
+    <div class="row"><label>亮度 edgeBleed</label><span class="v" id="vEB">0.11</span></div>
+    <input type="range" id="EB" min="0" max="200" value="11">
+  </div>
+
+  <div class="grp gl" id="grpGlassWave" style="display:none">
+    <div class="gh">液态玻璃 · Siri 波</div>
+    <div class="row"><label>播放波光</label><div class="switch on" id="swWave"></div></div>
+    <div class="row" style="margin-top:10px"><label>亮度 wave</label><span class="v" id="vWV">1.90</span></div>
+    <input type="range" id="WV" min="0" max="300" value="190">
+    <div class="row"><label>缩放 scale</label><span class="v" id="vWS">0.85</span></div>
+    <input type="range" id="WS" min="20" max="150" value="85">
+    <div class="muted" style="margin-top:8px">实时作用于悬浮水晶球；<b>Siri 模式</b>下形状由文字决定，但折射 / 黑顶 / 亮线 / 波光仍实时生效。</div>
+  </div>
+
   <div class="grp" id="grpMore" style="display:none">
     <div class="gh">测试 / 扩展</div>
     <div class="btns" style="margin-bottom:12px">
@@ -133,7 +193,8 @@
   var W = window.Watch;
   if (!W) return;
   document.getElementById('grpNone').style.display = 'none';
-  ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore'].forEach(function (id) {
+  ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',
+   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave'].forEach(function (id) {
     document.getElementById(id).style.display = 'block';
   });
 
@@ -289,6 +350,54 @@
     vSiriDy.textContent = siriDy.value;
     try { W.setSiriTextDy(parseInt(siriDy.value, 10)); } catch (e) {}
   });
+
+  // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──
+  var GP = { master:1, posX:0.5, posY:0.5, halfX:0.37, halfY:0.25, corner:1,
+    refraction:200, band:170, zoom:1, dome:0.4, aberration:10, blur:0.3,
+    topDarken:0.93, black0:-1, black1:-0.01, edgeBleed:0.11,
+    waveAmp:1.9, waveScale:0.85, waveOn:true };
+  try {
+    var gs = W.getFloatParams();
+    if (gs) { var go = JSON.parse(gs); for (var gk in go) if (gk in GP) GP[gk] = go[gk]; }
+  } catch (e) {}
+
+  var glassPending = false;
+  function pushGlass() {
+    if (glassPending) return; glassPending = true;
+    setTimeout(function () {
+      glassPending = false;
+      try { W.setFloatParams(JSON.stringify(GP)); } catch (e) {}
+    }, 0);
+  }
+  function bindG(id, key, scale, fmt) {
+    var s = document.getElementById(id), v = document.getElementById('v' + id);
+    if (!s) return;
+    s.value = Math.round(GP[key] / scale);
+    function up() {
+      GP[key] = s.value * scale;
+      if (v) v.textContent = fmt ? fmt(GP[key]) : GP[key].toFixed(0);
+      pushGlass();
+    }
+    s.addEventListener('input', up);
+    if (v) v.textContent = fmt ? fmt(GP[key]) : GP[key].toFixed(0);
+  }
+  function f2(x) { return x.toFixed(2); }
+  function f1(x) { return x.toFixed(1); }
+  bindG('SC','master',0.01,f2); bindG('PY','posY',0.01,f2); bindG('PX','posX',0.01,f2);
+  bindG('HX','halfX',0.01,f2); bindG('HY','halfY',0.01,f2); bindG('CR','corner',0.01,f2);
+  bindG('RF','refraction',1); bindG('ZM','zoom',0.01,f2); bindG('BD','band',1);
+  bindG('DM','dome',0.01,f2); bindG('AB','aberration',1); bindG('BL','blur',0.1,f1);
+  bindG('TD','topDarken',0.01,f2); bindG('B0','black0',0.01,f2); bindG('B1','black1',0.01,f2);
+  bindG('EB','edgeBleed',0.01,f2); bindG('WV','waveAmp',0.01,f2); bindG('WS','waveScale',0.01,f2);
+
+  var swWave = document.getElementById('swWave');
+  swWave.classList.toggle('on', !!GP.waveOn);
+  swWave.addEventListener('click', function () {
+    GP.waveOn = !GP.waveOn;
+    swWave.classList.toggle('on', GP.waveOn);
+    pushGlass();
+  });
+  pushGlass();
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}
