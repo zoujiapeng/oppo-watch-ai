@@ -251,9 +251,22 @@ public class FloatingBallService extends Service {
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16)); // 底部留更多 → 文字偏上
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
+        // 换行行数
+        int lines;
+        {
+            android.text.TextPaint lp = new android.text.TextPaint();
+            lp.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+            lp.setTextSize(siriTextPx);
+            android.text.StaticLayout sl = android.text.StaticLayout.Builder
+                    .obtain(s, 0, s.length(), lp, textMaxW)
+                    .setIncludePad(false)
+                    .build();
+            lines = sl.getLineCount();
+        }
         // 圆角：以“原球”为基准随变宽而变小，但保留下限（≥0.45）→ 始终圆滑
         float baseRatio = minHalfY / Math.max(0.01f, minHalfX);
         float frac = minCorner * ((hypx / Math.max(1f, hxpx)) / baseRatio);
+        if (lines >= 3) frac *= Math.max(0.65f, 1f - 0.07f * (lines - 2));  // 第 3 行起圆角再小一点点
         tCorner = Math.max(0.45f, Math.min(minCorner, frac));
         tMaster = 1f;
     }
