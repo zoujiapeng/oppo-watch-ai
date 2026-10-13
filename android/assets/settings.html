@@ -170,7 +170,11 @@
 
   <div class="grp gl" id="grpGlassWave" style="display:none">
     <div class="gh">液态玻璃 · Siri 波</div>
-    <div class="row"><label>播放波光</label><div class="switch on" id="swWave"></div></div>
+    <div class="btns" id="waveModeBtns">
+      <button data-mode="0">关闭</button>
+      <button data-mode="1">Siri 波</button>
+      <button data-mode="2">Fluid Dots</button>
+    </div>
     <div class="row" style="margin-top:10px"><label>亮度 wave</label><span class="v" id="vWV">1.90</span></div>
     <input type="range" id="WV" min="0" max="300" value="190">
     <div class="row"><label>缩放 scale</label><span class="v" id="vWS">0.85</span></div>
@@ -387,7 +391,7 @@
   var GP = { master:1, posX:0.5, posY:0.5, halfX:0.37, halfY:0.25, corner:1,
     refraction:200, band:170, zoom:1, dome:0.4, aberration:10, blur:0.3,
     topDarken:0.93, black0:-1, black1:-0.01, edgeBleed:0.11,
-    waveAmp:1.9, waveScale:0.85, waveOn:true };
+    waveAmp:1.9, waveScale:0.85, waveOn:true, waveMode:1 };
   try {
     var gs = W.getFloatParams();
     if (gs) { var go = JSON.parse(gs); for (var gk in go) if (gk in GP) GP[gk] = go[gk]; }
@@ -428,13 +432,22 @@
   bindG('TD','topDarken',0.01,f2); bindG('B0','black0',0.01,f2); bindG('B1','black1',0.01,f2);
   bindG('EB','edgeBleed',0.01,f2); bindG('WV','waveAmp',0.01,f2); bindG('WS','waveScale',0.01,f2);
 
-  var swWave = document.getElementById('swWave');
-  swWave.classList.toggle('on', !!GP.waveOn);
-  swWave.addEventListener('click', function () {
-    GP.waveOn = !GP.waveOn;
-    swWave.classList.toggle('on', GP.waveOn);
-    pushGlass();
-  });
+  var waveModeBtns = document.querySelectorAll('#waveModeBtns button');
+  function syncWaveMode() {
+    var m = GP.waveOn ? GP.waveMode : 0;
+    for (var wi = 0; wi < waveModeBtns.length; wi++) {
+      waveModeBtns[wi].classList.toggle('on', +waveModeBtns[wi].dataset.mode === m);
+    }
+  }
+  for (var wj = 0; wj < waveModeBtns.length; wj++) {
+    waveModeBtns[wj].addEventListener('click', function () {
+      var m = +this.dataset.mode;
+      if (m === 0) { GP.waveOn = false; }
+      else { GP.waveOn = true; GP.waveMode = m; }
+      syncWaveMode(); pushGlass();
+    });
+  }
+  syncWaveMode();
   renderGlass();
   pushGlass();
 
@@ -468,7 +481,7 @@
     var o = loadPresets()[n]; if (!o) return;
     if (o.p) { for (var k in o.p) if (k in GP) GP[k] = o.p[k]; }
     renderGlass();
-    swWave.classList.toggle('on', !!GP.waveOn);
+    syncWaveMode();
     pushGlass();
     if (typeof o.sp === 'number') {
       siriSz.value = o.sp; vSiriSz.textContent = o.sp;

@@ -701,6 +701,7 @@ public class FloatingBallService extends Service {
                 renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
                 renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
                 renderer.waveOn     = o.optBoolean("waveOn", renderer.waveOn);
+                renderer.waveMode   = o.optInt("waveMode", renderer.waveMode);
             }
         });
     }

@@ -46,6 +46,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
+    public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
 
     public volatile float winX, winY;
 
@@ -157,7 +158,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
-        "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale;\n" +
+        "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uWaveMode;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
         "  float outside = length(max(cc,0.0)) - r;\n" +
@@ -201,6 +202,62 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col=pow(max(col,0.0),vec3(1.5));\n" +
         "  return col*exp(-pow(p.x*1.2,2.0));\n" +
         "}\n" +
+        "// ── Fluid Dots: siriFluidDotsCore (metaball + smin) ──\n" +
+        "float hash11(float n){ return fract(sin(n*127.1 + 311.7)*43758.5453); }\n" +
+        "float settleWL(float tau, float w, float l){ if(tau<=0.0) return 0.0; return 1.0 - exp(-l*tau)*cos(w*tau); }\n" +
+        "float settleOrb(float tau){ return settleWL(tau, 4.6, 3.2); }\n" +
+        "float settleCrit(float tau, float l){ if(tau<=0.0) return 0.0; return 1.0 - exp(-l*tau)*(1.0 + l*tau); }\n" +
+        "float smin(float a, float b, float k){ float h=max(k-abs(a-b),0.0)/k; return min(a,b) - h*h*k*0.25; }\n" +
+        "vec3 hue2rgb(float h){ h=fract(h);\n" +
+        "  float r=clamp(abs(h*6.0-3.0)-1.0,0.0,1.0);\n" +
+        "  float g=clamp(2.0-abs(h*6.0-2.0),0.0,1.0);\n" +
+        "  float b=clamp(2.0-abs(h*6.0-4.0),0.0,1.0);\n" +
+        "  return vec3(r,g,b); }\n" +
+        "float orbDotR(float fi, float seed, float t){ return 0.036 + 0.010*sin(t*1.3+seed*6.2831853) + 0.005*sin(t*2.4+fi*1.3); }\n" +
+        "float orbDotSD(vec2 p, vec2 pos, float r, float t, float fi, float shapeDamp){\n" +
+        "  vec2 dd = p - pos;\n" +
+        "  float sq = 0.075*(0.5+0.5*sin(t*0.9+fi*2.0))*shapeDamp;\n" +
+        "  float ca=cos(t*0.35+fi), sa=sin(t*0.35+fi);\n" +
+        "  dd = mat2(ca,-sa,sa,ca)*dd; dd *= vec2(1.0+sq,1.0-sq);\n" +
+        "  return length(dd) - r; }\n" +
+        "vec3 orbScene(vec2 p, float t){\n" +
+        "  float k=floor(t/6.0); float te=fract(t/6.0)*6.0;\n" +
+        "  float tg=mod(t,12.0);\n" +
+        "  float g=settleCrit((tg-9.2)*1.8,7.5)-settleWL(tg-10.0,6.5,4.0);\n" +
+        "  float gC=clamp(g,0.0,1.0);\n" +
+        "  float tb=tg-10.0;\n" +
+        "  float charge=smoothstep(-0.30,0.0,min(tb,0.0))*gC;\n" +
+        "  float flash=tb>0.0?exp(-tb*7.0):0.0;\n" +
+        "  float gBright=mix(1.0,0.85,gC)*(1.0+0.35*charge+1.2*flash);\n" +
+        "  vec3 spc=vec3(0.0,0.5,1.0)*0.005;\n" +
+        "  vec3 total3=vec3(1e5); vec3 cAcc=vec3(0.0); float wAcc=1e-6;\n" +
+        "  for(int i=0;i<6;i++){\n" +
+        "    float fi=float(i); float seed=hash11(fi);\n" +
+        "    float ang=fi/6.0*6.2831853 + t*0.35;\n" +
+        "    vec2 dir=vec2(cos(ang),sin(ang));\n" +
+        "    float R=0.17+0.010*sin(t*1.0)+0.007*sin(t*1.3+seed*6.2831853);\n" +
+        "    float pairId=mod(fi,3.0); float moverLow=mod(k+pairId,2.0);\n" +
+        "    float isMover=(fi<2.5)?step(moverLow,0.5):step(0.5,moverLow);\n" +
+        "    float goStart=pairId*0.33; float retStart=0.99+pairId*0.33;\n" +
+        "    float m=(settleOrb(te-goStart)-settleOrb(te-retStart))*isMover;\n" +
+        "    float rec=(settleOrb(te-goStart-0.11)-settleOrb(te-retStart-0.11))*(1.0-isMover);\n" +
+        "    float rSelf=orbDotR(fi,seed,t); rSelf=mix(rSelf,0.036,gC); rSelf*=1.0-0.18*charge;\n" +
+        "    float fj=mod(fi+3.0,6.0); float rPart=orbDotR(fj,hash11(fj),t);\n" +
+        "    float deep=-(R+0.035)-0.12*rPart;\n" +
+        "    float radial=mix(R,deep,m)+0.035*rec; radial=mix(radial,0.008,g);\n" +
+        "    vec2 pos=radial*dir;\n" +
+        "    float sdR=orbDotSD(p-spc.r*dir,pos,rSelf,t,fi,1.0-gC);\n" +
+        "    float sdG=orbDotSD(p-spc.g*dir,pos,rSelf,t,fi,1.0-gC);\n" +
+        "    float sdB=orbDotSD(p-spc.b*dir,pos,rSelf,t,fi,1.0-gC);\n" +
+        "    total3=vec3(smin(total3.r,sdR,0.08),smin(total3.g,sdG,0.08),smin(total3.b,sdB,0.08));\n" +
+        "    float hue=fract(fi/6.0+t*0.06)*0.667;\n" +
+        "    vec3 dotCol=mix(vec3(1.0),hue2rgb(hue),0.01);\n" +
+        "    float w=exp(-sdG*0.5); cAcc+=w*dotCol; wAcc+=w;\n" +
+        "  }\n" +
+        "  vec3 sd3=max(total3,vec3(0.0))+1e-4;\n" +
+        "  vec3 core3=clamp(0.0025/pow(sd3,vec3(1.35)),0.0,1.0);\n" +
+        "  vec3 edge3=1.0-smoothstep(vec3(0.02),vec3(0.56),sd3);\n" +
+        "  return core3*edge3*gBright*(cAcc/wAcc); }\n" +
         "vec2 screenUv(vec2 fc){\n" +
         "  vec2 top = vec2(fc.x, iRes.y - fc.y);\n" +
         "  return (uWinPos + top) / uScreen;\n" +
@@ -240,9 +297,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
         "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
-        "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
-        "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
-        "    col += (waveCol(wp, iTime, 1.0) + wglow*(0.25 + 0.6*below)) * uWaveAmp * waveVis;\n" +
+        "    if(uWaveMode < 1.5){\n" +
+        "      wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
+        "      float below = smoothstep(0.7, -0.5, wp.y);\n" +
+        "      col += (waveCol(wp, iTime, 1.0) + wglow*(0.25 + 0.6*below)) * uWaveAmp * waveVis;\n" +
+        "    } else {\n" +
+        "      vec3 oc = orbScene(wp * 0.42, iTime);\n" +
+        "      oc = pow(max(oc, 0.0), vec3(1.0/1.2));\n" +
+        "      wglow = vec3(0.80,0.95,1.25);\n" +
+        "      col += oc * uWaveAmp * waveVis;\n" +
+        "    }\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
         "  col *= mix(0.70,1.,innerEdge);\n" +
@@ -464,6 +528,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveOn ? waveAmp : 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveMode"), waveMode);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
