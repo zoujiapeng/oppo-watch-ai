@@ -75,7 +75,7 @@ public class FloatingBallService extends Service {
     private RootCapture rootCapture;
     private String rootError;
 
-    private int screenW, screenH, winSize, winH;
+    private int screenW, screenH, winSize, winW, winH;
     private int resultCode;
     private Intent resultData;
 
@@ -138,6 +138,8 @@ public class FloatingBallService extends Service {
                 if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
                 minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
             }
+            float b0 = winSize * 0.9f;
+            updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
             if (siriText == null) setupSiriText();
             main.removeCallbacks(siriTick);
             siriTickLast = 0;
@@ -197,9 +199,9 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 球宽上限：屏幕宽度的 85%（且不超过悬浮窗）。 */
+    /** 球宽上限：屏幕宽度的 85%。 */
     private float siriMaxBallW() {
-        return Math.min(screenW * 0.85f, winSize);
+        return screenW * 0.85f;
     }
 
     /** 文字可换行的最大宽度。 */
@@ -211,6 +213,8 @@ public class FloatingBallService extends Service {
         int n = s == null ? 0 : s.trim().length();
         if (n <= 1) {                           // 0/1 个字：最短形态 = 原来的水晶球
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
+            float b0 = winSize * 0.9f;
+            updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
             return;
         }
         if (siriTextPx <= 0) siriTextPx = dp(34);
@@ -276,6 +280,7 @@ public class FloatingBallService extends Service {
             hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f));
             tCorner = minCorner;
         }
+        updateSiriWindow(hxpx, hypx);
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
         tMaster = 1f;
@@ -306,13 +311,30 @@ public class FloatingBallService extends Service {
         }
     };
 
+    /** Siri：把悬浮窗尺寸调整为贴合当前球（触摸有效区域=球），并保持球心屏幕位置不变。 */
+    private void updateSiriWindow(float hxpx, float hypx) {
+        if (!siriEnabled || wm == null || glView == null) return;
+        float m = dp(24);
+        int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
+        int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
+        if (W == winW && H == winH) return;
+        float bcx = params.x + winW * 0.5f;
+        float bcy = params.y + winH * 0.5f;
+        winW = W; winH = H;
+        params.width = W; params.height = H;
+        params.x = Math.round(bcx - W * 0.5f);
+        params.y = Math.round(bcy - H * 0.5f);
+        try { wm.updateViewLayout(glView, params); } catch (Exception ignored) { }
+        glView.post(winSync);
+    }
+
     private void updateSiriTextPos() {
         if (siriText == null || siriParams == null || wm == null) return;
         float winXnow = (renderer != null) ? renderer.winX : params.x;
         float winYnow = (renderer != null) ? renderer.winY : params.y;
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
-        float sx = winXnow + winSize * 0.5f;
+        float sx = winXnow + winW * 0.5f;
         float sy = winYnow + winH * 0.5f;
         float hypx = base * aHalfY * aMaster;     // 当前球半高
         float ballTop = sy - hypx;
@@ -339,7 +361,7 @@ public class FloatingBallService extends Service {
         float hx = base * renderer.svHalfX * m;
         float hy = base * renderer.svHalfY * m;
         float r = base * renderer.svHalfY * renderer.svCorner * m;
-        float cx = winSize * 0.5f, cy = winH * 0.5f;
+        float cx = winW * 0.5f, cy = winH * 0.5f;
         float dx = Math.abs(lx - cx) - Math.max(0f, hx - r);
         float dy = Math.abs(ly - cy) - Math.max(0f, hy - r);
         float ex = Math.max(dx, 0f), ey = Math.max(dy, 0f);
@@ -441,11 +463,17 @@ public class FloatingBallService extends Service {
         wm.getDefaultDisplay().getRealMetrics(dm);
         screenW = dm.widthPixels;
         screenH = dm.heightPixels;
-        winSize = (int) (Math.min(screenW, screenH) * 0.92f);   // 参考边长（也是窗口宽）
-        // Siri 模式：窗口高度放宽到屏幕 90%，让球可以变高不被裁；普通模式仍用原方窗
-        winH = prefs().getBoolean("float_siri", false)
-                ? Math.min(screenH, Math.round(screenH * 0.90f))
-                : winSize;
+        winSize = (int) (Math.min(screenW, screenH) * 0.92f);   // 参考边长（几何缩放基准）
+        boolean siri0 = prefs().getBoolean("float_siri", false);
+        if (siri0) {
+            // Siri 模式：窗口自动贴合球的包围盒（触摸有效区域 = 球），先按“原球”尺寸初始化
+            float base0 = winSize * 0.9f;
+            winW = Math.min(screenW, Math.round(base0 * 0.37f * 2 + 2 * dp(24)));
+            winH = Math.min(screenH, Math.round(base0 * 0.25f * 2 + 2 * dp(24)));
+        } else {
+            winW = winSize;
+            winH = winSize;
+        }
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
@@ -453,7 +481,7 @@ public class FloatingBallService extends Service {
         glView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
-        renderer = new GlassRenderer(screenW, screenH, winSize, winH);
+        renderer = new GlassRenderer(screenW, screenH, winW, winH);
         renderer.refSize = winSize;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
@@ -500,12 +528,12 @@ public class FloatingBallService extends Service {
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
         params = new WindowManager.LayoutParams(
-                winSize, winH, type,
+                winW, winH, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
-        params.x = (screenW - winSize) / 2;
+        params.x = (screenW - winW) / 2;
         params.y = (screenH - winH) / 2;
         renderer.winX = params.x;
         renderer.winY = params.y;
@@ -530,11 +558,11 @@ public class FloatingBallService extends Service {
                             float m = Math.max(0.01f, renderer.svMaster);
                             float hx = base * renderer.svHalfX * m;
                             float hy = base * renderer.svHalfY * m;
-                            float bcx = params.x + winSize * 0.5f;
+                            float bcx = params.x + winW * 0.5f;
                             float bcy = params.y + winH * 0.5f;
                             bcx = Math.max(hx, Math.min(screenW - hx, bcx));
                             bcy = Math.max(hy, Math.min(screenH - hy, bcy));
-                            params.x = Math.round(bcx - winSize * 0.5f);
+                            params.x = Math.round(bcx - winW * 0.5f);
                             params.y = Math.round(bcy - winH * 0.5f);
                         } else {
                             params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));

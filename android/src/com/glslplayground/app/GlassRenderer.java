@@ -25,7 +25,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     public interface OnSurfaceReady { void onReady(SurfaceTexture st); }
 
-    private final int screenW, screenH, winW, winH;
+    private final int screenW, screenH;
+    private int winW, winH;
     public volatile int capW = 0, capH = 0;   // 实际抓屏分辨率（低延迟模式可小于屏幕；采样用归一化 UV，与分辨率无关）
     public volatile int refSize = 0;          // 参考尺寸（原悬浮窗边长）：几何缩放/位置基准，与窗口实际高度解耦
 
@@ -313,6 +314,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     @Override public void onSurfaceChanged(GL10 gl, int w, int h) {
+        winW = w; winH = h;                    // 窗口尺寸随实际情况更新（Siri 模式窗口会贴合球）
         GLES20.glViewport(0, 0, w, h);
         full = null; half = null; half2 = null;
         bg = null; bg2 = null; bgInit = false; lastSnapMs = 0; gotFrames = 0;
