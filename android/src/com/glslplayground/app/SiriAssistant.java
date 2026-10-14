@@ -195,6 +195,12 @@ public final class SiriAssistant {
     public static synchronized SiriAssistant peek() { return instance; }
 
     public State state() { return state; }
+
+    /** 当前状态名（日志与球体截图用）。 */
+    public static String stateName() {
+        SiriAssistant a = instance;
+        return a == null ? "?" : a.state.name();
+    }
     public boolean isBusy() {
         return state == State.LISTENING || state == State.TRANSCRIBING || state == State.THINKING;
     }

@@ -102,11 +102,28 @@ public class FloatingBallService extends Service {
         @Override public void run() {
             if (glView == null || targetFps <= 0) return;
             pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
+            pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
             glView.requestRender();
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
         }
     };
+
+    // ── 球体截图的外部触发：`touch /data/local/tmp/ballshot` 即可让球存一帧到 files/ball-capture.png ──
+    // 调「思考中」那类短暂状态时，光靠手点设置页按钮很难卡在正确时刻；
+    // 有这个口子就能：先 touch 文件 → 再让助手进入该状态 → 球自己把那一帧存下来。
+    private long nextShotCheck = 0;
+    private static final String SHOT_REQ = "/data/local/tmp/ballshot";
+
+    private void pumpShotRequest() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now < nextShotCheck) return;
+        nextShotCheck = now + 200;
+        java.io.File f = new java.io.File(SHOT_REQ);
+        if (!f.exists()) return;
+        if (!f.delete() && f.exists()) return;
+        try { captureBallPngNow(); } catch (Throwable t) { Log.w("FloatingBall", "shot request failed: " + t); }
+    }
 
     // ── 语音助手（安卓前端 ↔ DSH）：球体作为状态显示器 ──────────────────
     // 采集音量 → Siri 波振幅；助手状态 → 光效形态（聆听=声波，思考=流体圆点）
@@ -207,6 +224,14 @@ public class FloatingBallService extends Service {
     public static String captureBallPng() {
         FloatingBallService s = INSTANCE;
         if (s == null || s.glView == null) return "";
+        // 助手状态直接写进日志：调「思考中」的光效时，靠它确认那一刻球处于哪个形态
+        Log.i("FloatingBall", "ball capture requested (state=" + SiriAssistant.stateName()
+                + " waveMode=" + s.renderer.waveMode + " orbMix=" + s.renderer.orbMix + ")");
+        return s.captureBallPngNow();
+    }
+
+    private String captureBallPngNow() {
+        FloatingBallService s = this;
         String path = "";
         try {
             // 写内部私有目录：Termux 侧看不到 /storage/emulated/0，内部目录 root 可直接读
@@ -245,8 +270,7 @@ public class FloatingBallService extends Service {
         return path;
     }
 
-    /** 助手开始工作前确保球在 Siri 形变模式下（否则文字没有地方显示）。 */
-    public static void ensureSiriForAssistant() {
+    /** 助手开始工作前确保球在 Siri 形变模式下（否则文字没有地方显示）。 */    public static void ensureSiriForAssistant() {
         FloatingBallService s = INSTANCE;
         if (s == null || s.siriEnabled) return;
         s.main.post(new Runnable() {

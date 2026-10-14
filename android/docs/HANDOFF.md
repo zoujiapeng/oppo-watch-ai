@@ -20,6 +20,9 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 - 日志（我平时靠它验证）：`logcat -d | grep -E "DshTransport|SiriAssistant|FloatingBall"`
 - 球体**在物理屏（display 0）**上，虚拟屏（display 4）看不到它 →
   设置页有「保存球体截图」（PixelCopy 只抓悬浮窗那一帧，不含桌面）。
+  也支持外部触发：`touch /data/local/tmp/ballshot` → 球在下一个渲染帧自己存一帧并删掉该文件，
+  日志同时打出当时的助手状态（`ball capture requested (state=.. waveMode=.. orbMix=..)`）。
+  调「思考中」这类短暂状态时用这个口子，比手点设置页按钮准。
   注意：App 私有目录 Termux 读不到（挂载命名空间），要看图得让用户发过来，
   或把截图改 POST 到本机 HTTP 服务。
 
