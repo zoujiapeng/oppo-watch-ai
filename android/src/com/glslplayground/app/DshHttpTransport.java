@@ -96,39 +96,180 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         runAsync(new Runnable() {
             @Override public void run() {
                 try {
-                    String sessionId = pickSession();
-                    long baseline = cursorOf(sessionId);
-                    JSONObject args = new JSONObject();
-                    JSONObject req = new JSONObject();
-                    req.put("requestId", "android-" + System.currentTimeMillis() + "-" + (++rpcSeq));
-                    req.put("sessionId", sessionId);
-                    req.put("mode", "queue");
-                    JSONArray content = new JSONArray();
-                    content.put(new JSONObject().put("type", "text").put("text", text));
-                    req.put("content", content);
-                    args.put("request", req);
-                    rpc("session/prompt", args);
-
-                    long deadline = System.currentTimeMillis() + 180000L;
-                    String best = "";
-                    while (!cancelled && System.currentTimeMillis() < deadline) {
-                        sleep(850);
-                        if (cancelled) break;
-                        String latest = readAnswer(sessionId, baseline);
-                        if (latest != null && latest.length() > best.length()) {
-                            best = latest;
-                            cb.onDelta(best);
-                        }
-                        if (!isRunning(sessionId) && !best.isEmpty()) break;
+                    if (cookie == null) {
+                        try { authenticate(); } catch (Exception e) { Log.i(TAG, "no cookie: " + e.getMessage()); }
                     }
+                    String sessionId = pickSession();
+                    // 优先走 WebSocket：只有它给得了逐 token 的 text-delta，
+                    // 「一个字一个字弹出来」靠的就是这条流；失败再退回轮询。
+                    if (askStreaming(sessionId, text, cb)) return;
                     if (cancelled) return;
-                    if (best.isEmpty()) cb.onError("DSH 没有返回内容");
-                    else cb.onDone(best);
+                    askPolling(sessionId, text, cb);
                 } catch (Throwable t) {
                     if (!cancelled) cb.onError(message(t));
                 }
             }
         });
+    }
+
+    /**
+     * 流式路径：`ws://…/api/remote.mux` 上开一条 `session/follow`
+     * （带 `assistantStream:true` 才有增量），边收 `chunk.text-delta`
+     * 边把累积文本回调出去；durable 的 assistant/message 到达时用它的
+     * 正文覆盖累积值（权威文本），turn/end 收尾。
+     */
+    private boolean askStreaming(String sessionId, String text, final SiriAssistant.Stream cb) {
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(base);
+        } catch (Throwable t) {
+            return false;
+        }
+        final String host = uri.getHost() == null ? "127.0.0.1" : uri.getHost();
+        final int port = uri.getPort() > 0 ? uri.getPort() : 80;
+
+        final Object lock = new Object();
+        final StringBuilder buf = new StringBuilder();
+        final boolean[] done = {false};
+        final boolean[] failed = {false};
+        final String[] failMsg = {null};
+        final long[] lastPush = {0};
+        final int[] deltas = {0};
+        final DshWebSocket[] holder = new DshWebSocket[1];
+
+        DshWebSocket ws = new DshWebSocket();
+        holder[0] = ws;
+        try {
+            ws.connect(host, port, "/api/remote.mux", cookie, 6000, new DshWebSocket.Listener() {
+                @Override public void onText(String message) {
+                    try {
+                        JSONObject frame = new JSONObject(message);
+                        if (!"item".equals(frame.optString("type"))) return;
+                        JSONObject value = frame.optJSONObject("value");
+                        if (value == null) return;
+                        if ("assistant-stream".equals(value.optString("type"))) {
+                            JSONObject f = value.optJSONObject("frame");
+                            if (f == null || !"chunk".equals(f.optString("type"))) return;
+                            JSONObject chunk = f.optJSONObject("chunk");
+                            if (chunk == null || !"text-delta".equals(chunk.optString("type"))) return;
+                            synchronized (lock) {
+                                buf.append(chunk.optString("text", ""));
+                                deltas[0]++;
+                                long now = System.currentTimeMillis();
+                                if (now - lastPush[0] >= 45) {
+                                    lastPush[0] = now;
+                                    cb.onDelta(buf.toString());
+                                }
+                            }
+                            return;
+                        }
+                        JSONObject ev = value.optJSONObject("event");
+                        if (ev == null) ev = value;
+                        String type = ev.optString("type");
+                        if ("assistant/message".equals(type)) {
+                            String body = textOf(ev);
+                            if (body != null && !body.trim().isEmpty()) {
+                                synchronized (lock) {
+                                    buf.setLength(0);
+                                    buf.append(body);
+                                    cb.onDelta(buf.toString());
+                                }
+                            }
+                        } else if ("turn/end".equals(type) || "session/removed".equals(type)) {
+                            synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                        }
+                    } catch (Throwable ignored) {}
+                }
+
+                @Override public void onFailure(String message) {
+                    synchronized (lock) { failed[0] = true; failMsg[0] = message; lock.notifyAll(); }
+                }
+            });
+        } catch (Throwable t) {
+            Log.i(TAG, "ws connect failed: " + t);
+            return false;
+        }
+
+        try {
+            JSONObject open = new JSONObject();
+            open.put("type", "open");
+            open.put("streamId", "follow-" + (++rpcSeq));
+            open.put("endpoint", "session/follow");
+            JSONObject args = new JSONObject();
+            JSONObject req = new JSONObject();
+            JSONObject addr = new JSONObject();
+            addr.put("kind", "session");
+            addr.put("sessionId", sessionId);
+            req.put("address", addr);
+            req.put("assistantStream", true);
+            args.put("request", req);
+            JSONObject payload = new JSONObject();
+            payload.put("args", args);
+            open.put("payload", payload);
+            ws.sendText(open.toString());
+
+            prompt(sessionId, text);
+        } catch (Throwable t) {
+            ws.close();
+            Log.i(TAG, "ws setup/prompt failed: " + t);
+            if (cancelled) return true;
+            return false;
+        }
+
+        long deadline = System.currentTimeMillis() + 180000L;
+        synchronized (lock) {
+            while (!done[0] && !failed[0] && !cancelled && System.currentTimeMillis() < deadline) {
+                try { lock.wait(400); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+        }
+        ws.close();
+        if (cancelled) return true;
+
+        String answer;
+        synchronized (lock) { answer = buf.toString().trim(); }
+        if (answer.isEmpty()) {
+            if (done[0]) { cb.onError("DSH 没有返回内容"); return true; }
+            Log.i(TAG, "ws gave no text (" + failMsg[0] + "), falling back to polling");
+            return false;
+        }
+        cb.onDone(answer);
+        Log.i(TAG, "ws stream done: " + deltas[0] + " text-deltas, " + answer.length() + " chars");
+        return true;
+    }
+
+    /** 兜底路径：轮询 session/page。流式不可用时才走这里。 */
+    private void askPolling(String sessionId, String text, SiriAssistant.Stream cb) throws Exception {
+        long baseline = cursorOf(sessionId);
+        prompt(sessionId, text);
+        long deadline = System.currentTimeMillis() + 180000L;
+        String best = "";
+        while (!cancelled && System.currentTimeMillis() < deadline) {
+            sleep(850);
+            if (cancelled) break;
+            String latest = readAnswer(sessionId, baseline);
+            if (latest != null && latest.length() > best.length()) {
+                best = latest;
+                cb.onDelta(best);
+            }
+            if (!isRunning(sessionId) && !best.isEmpty()) break;
+        }
+        if (cancelled) return;
+        if (best.isEmpty()) cb.onError("DSH 没有返回内容");
+        else cb.onDone(best);
+    }
+
+    /** 发一条用户消息。 */
+    private void prompt(String sessionId, String text) throws Exception {
+        JSONObject args = new JSONObject();
+        JSONObject req = new JSONObject();
+        req.put("requestId", "android-" + System.currentTimeMillis() + "-" + (++rpcSeq));
+        req.put("sessionId", sessionId);
+        req.put("mode", "queue");
+        JSONArray content = new JSONArray();
+        content.put(new JSONObject().put("type", "text").put("text", text));
+        req.put("content", content);
+        args.put("request", req);
+        rpc("session/prompt", args);
     }
 
     @Override public void cancel() {

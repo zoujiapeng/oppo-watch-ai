@@ -23,7 +23,8 @@ DSH 本身不动一行代码 —— 只用它已经在给浏览器用的那套 H
 | 会话列表（`asOfSeq` 就是事件游标） | `session/list` | `{"_request":{}}` |
 | 新会话（没有可用会话时） | `session/create` | `{"request":{"cwd":…}}` |
 | 发一句话 | `session/prompt` | `{"request":{"requestId","sessionId","mode":"queue","content":[{"type":"text","text":…}]}}` |
-| 读事件页（拿回答正文） | `session/page` | `{"request":{"address":{"kind":"session","sessionId"},"throughSeq":<asOfSeq>,"maxMessages":40}}` |
+| **流式回答（主路径）** | WS `/api/remote.mux` + `session/follow` | `{"request":{"address":{…},"assistantStream":true}}` |
+| 读事件页（兜底路径） | `session/page` | `{"request":{"address":{…},"throughSeq":<asOfSeq>,"maxMessages":40}}` |
 | 语音转写 | `speech/transcribe` | `{"request":{"audioBase64":<16kHz mono PCM16 WAV>,"language":"zh"}}` |
 
 信封（`DshHttpTransport` 里逐字实现）：
@@ -36,9 +37,39 @@ content-type: application/json
 → {"type":"server-response","rpcId":"…","result":{"ok":true,"value":…}}      # 失败也是 HTTP 200
 ```
 
+流式（`DshWebSocket`，自实现的最小 RFC6455 客户端）：
+
+```
+GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
+→ {"type":"open","streamId":"s1","endpoint":"session/follow","payload":{"args":{"request":{…,"assistantStream":true}}}}
+← {"type":"item","streamId":"s1","value":{"type":"snapshot",…}}
+← {"type":"item","streamId":"s1","value":{"type":"assistant-stream","frame":{"type":"chunk","chunk":{"type":"text-delta","index":n,"text":"球"}}}}
+← {"type":"item","streamId":"s1","value":{"type":"event","event":{"type":"assistant/message",…}}}   # 权威全文
+← {"type":"item","streamId":"s1","value":{"type":"event","event":{"type":"turn/end",…}}}
+```
+
 **认证**：DSH 启动时会打印 `http://127.0.0.1:3080/?token=…`（见 `~/dsh.log`）。
-`GET /?token=` → 303 + 签名 cookie `dsh-auth-<sha256(authority)>`（30 天），之后带着它请求 `/api`。
+`GET /?token=` → 303 + 签名 cookie `dsh-auth-<sha256(authority)>`（30 天），之后带着它请求 `/api` 与 WS。
 安卓端以 root 读一次日志拿 token；cookie 失效（服务重启）会自动重换。
+
+## 球体状态与光效的对应
+
+助手只做两件事：写球里的文字、在**思考中**切一次光效。其余一律交还给用户自己的设定。
+
+| 助手状态 | 球内文字 | 光效 |
+|---|---|---|
+| LISTENING / TRANSCRIBING | `聆听中…` / `识别中…` | Siri 波（振幅跟麦克风音量走，`voiceBoost` 叠加、不改用户参数） |
+| **THINKING** | `思考中…` | **流体圆点（siriFluidDotsCore）—— 只有这个状态有** |
+| ANSWERING | 回答逐字弹出 | 还原成用户自己的设定（默认就是原本的 Siri 模式） |
+| IDLE / OFF | 保留回答 | 还原用户设定，音量增益归零 |
+
+文字排版**完全走 App 原有设定**：助手只调 `FloatingBallService.setSiriText()`，
+字号（Siri 字号 sp）、距球顶（px）、每多一行黑区下移、内边距、圆角与宽高，
+全部由 `measureSiriTargets()` 按你那套规则算，助手不碰。
+
+「一个字一个字弹出来」由两段拼成：模型侧是 WebSocket 的逐 token `text-delta`，
+客户端再用 40ms/字的打字机揭示（落后超过 80 字才略微加速，绝不跳字），
+所以无论模型吐字快慢，看到的都是逐字长大的球。
 
 ## 代码
 
@@ -79,10 +110,8 @@ content-type: application/json
 - **录音权限**：这台机器上应用不是设备所有者，所以系统会弹一次授权框；授权后一直有效。
   若能用 `adb shell dpm set-device-owner com.glslplayground.app/.AdminReceiver` 设为设备所有者，
   `SiriAssistant.ensureMicPermission()` 会静默自授权。
-- **回答是轮询到的**（`session/page`，约 850ms 一次），不是逐字流。
-  想做到逐 token，把 `DshHttpTransport.ask()` 的轮询换成 `ws://127.0.0.1:3080/api/remote.mux` 上的
-  `session/follow{assistantStream:true}`，渲染 `chunk.type=="text-delta"` 即可（协议见
-  `docs/dsh-external-client-spec.md`）。
+- **回答是逐 token 的**：走 `ws://127.0.0.1:3080/api/remote.mux` 上的 `session/follow{assistantStream:true}`，
+  渲染 `chunk.type=="text-delta"`；只有连不上 WebSocket 时才退回 `session/page` 轮询（约 850ms）。
 - 上游 DSH 的 cookie 校验在这台机器上被本地补丁关掉了；本实现走的是**上游也认的** token→cookie 流程，
   所以补丁回滚后依然能用。
 - 只在 DSH `0.2.0-rc.2` 上验证过。

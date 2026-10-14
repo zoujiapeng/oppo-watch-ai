@@ -113,6 +113,7 @@ public final class SiriAssistant {
         if (!v) {
             capture.cancel();
             if (transport != null) transport.cancel();
+            stopTyping();
             setState(State.OFF);
             FloatingBallService.setSiriText("");
         }
@@ -232,7 +233,7 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (state != State.THINKING && state != State.ANSWERING) return;
                         if (state != State.ANSWERING) setState(State.ANSWERING);
-                        say(soFar);
+                        sayTyped(soFar);
                     }
                 });
             }
@@ -240,7 +241,7 @@ public final class SiriAssistant {
                 main.post(new Runnable() {
                     @Override public void run() {
                         lastAnswer = full == null ? "" : full;
-                        if (!lastAnswer.isEmpty()) say(lastAnswer);
+                        if (!lastAnswer.isEmpty()) sayTyped(lastAnswer);   // 交给打字机把剩下的字弹完
                         setState(State.IDLE);
                         if (speakReplies && !lastAnswer.isEmpty()) speak(lastAnswer);
                     }
@@ -260,6 +261,7 @@ public final class SiriAssistant {
     private void abort(String note) {
         capture.cancel();
         if (transport != null) transport.cancel();
+        stopTyping();
         FloatingBallService.setAssistantLevel(0f);
         if (note != null && !note.isEmpty()) toast(note);
         setState(State.IDLE);
@@ -316,9 +318,60 @@ public final class SiriAssistant {
         FloatingBallService.setAssistantState(s.name());
     }
 
-    /** 写进球的 Siri 模式文字。 */
+    // ── 球内文字：一个字一个字弹出来 ────────────────────────────────────
+    // 模型是按 token 吐的（一次几个字），这里再按固定节奏逐字揭示，
+    // 于是无论模型吐得多快，看到的都是「打字机」效果；落後太多时略加速，
+    // 但绝不跳字。每次只调 setSiriText，排版/字号/黑区仍由 App 原有设定决定。
+
+    private String targetText = "";
+    private String shownText = "";
+    private boolean typing = false;
+
+    private final Runnable typist = new Runnable() {
+        @Override public void run() {
+            if (!typing) return;
+            int shown = shownText.length();
+            int target = targetText.length();
+            if (shown >= target) { typing = false; return; }
+            int lag = target - shown;
+            int step = lag > 80 ? 4 : lag > 30 ? 2 : 1;
+            shownText = targetText.substring(0, Math.min(target, shown + step));
+            FloatingBallService.setSiriText(shownText);
+            main.postDelayed(this, 40);
+        }
+    };
+
+    private void stopTyping() {
+        typing = false;
+        main.removeCallbacks(typist);
+    }
+
+    /** 立刻替换球内文字（状态提示用）。 */
+    private void sayNow(String text) {
+        String t = text == null ? "" : text;
+        stopTyping();
+        targetText = t;
+        shownText = t;
+        FloatingBallService.setSiriText(t);
+    }
+
+    /** 逐字揭示（回答用）；target 可以在揭示过程中不断变长。 */
+    private void sayTyped(String text) {
+        String t = text == null ? "" : text;
+        if (!t.startsWith(shownText)) {         // 换了一轮回答 → 从头弹
+            shownText = "";
+            stopTyping();
+        }
+        targetText = t;
+        if (!typing && shownText.length() < targetText.length()) {
+            typing = true;
+            main.post(typist);
+        }
+    }
+
+    /** 写进球的 Siri 模式文字（兼容旧调用点）。 */
     private void say(String text) {
-        FloatingBallService.setSiriText(text == null ? "" : text);
+        sayNow(text);
     }
 
     private void toast(final String msg) {

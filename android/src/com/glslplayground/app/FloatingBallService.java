@@ -117,19 +117,47 @@ public class FloatingBallService extends Service {
         s.renderer.voiceBoost = Math.max(0f, Math.min(1.6f, rms * 1.7f));
     }
 
+    /** 助手接管前的波形设置；交还时原样恢复，用户调好的参数不会被助手改掉。 */
+    private boolean waveSaved = false;
+    private boolean waveOnSaved = true;
+    private int waveModeSaved = 1;
+
+    private void saveWaveOnce() {
+        if (waveSaved || renderer == null) return;
+        waveOnSaved = renderer.waveOn;
+        waveModeSaved = renderer.waveMode;
+        waveSaved = true;
+    }
+
+    private void restoreWave() {
+        if (!waveSaved || renderer == null) return;
+        renderer.waveOn = waveOnSaved;
+        renderer.waveMode = waveModeSaved;
+        waveSaved = false;
+    }
+
     /** 助手状态：IDLE / LISTENING / TRANSCRIBING / THINKING / ANSWERING / OFF。 */
     public static void setAssistantState(String state) {
         FloatingBallService s = INSTANCE;
         if (s == null || s.renderer == null || state == null) return;
-        if ("LISTENING".equals(state)) {
-            s.renderer.waveOn = true;
-            s.renderer.waveMode = 1;            // siriWaveCore
-        } else if ("THINKING".equals(state) || "TRANSCRIBING".equals(state)) {
+        if ("THINKING".equals(state)) {
+            // 只有「思考中」才切到流体圆点
+            s.saveWaveOnce();
             s.renderer.waveOn = true;
             s.renderer.waveMode = 2;            // siriFluidDotsCore
-        } else if ("IDLE".equals(state) || "OFF".equals(state)) {
-            s.renderer.voiceBoost = 0f;
+        } else if ("LISTENING".equals(state) || "TRANSCRIBING".equals(state)) {
+            s.saveWaveOnce();
+            s.renderer.waveOn = true;
+            s.renderer.waveMode = 1;            // siriWaveCore
+        } else {
+            // 回答中 / 空闲：交还给用户自己的 Siri 模式设定 ——
+            // 回复就是「原本的 Siri 模式 + 球内文字」，不再叠任何特效
+            s.restoreWave();
+            if ("IDLE".equals(state) || "OFF".equals(state)) s.renderer.voiceBoost = 0f;
         }
+        Log.i("FloatingBall", "assistant state=" + state
+                + " waveOn=" + s.renderer.waveOn + " waveMode=" + s.renderer.waveMode
+                + " (0=关 1=Siri波 2=流体圆点)");
     }
 
     /** 球当前是否处于 Siri 形变模式（助手据此决定要不要先打开）。 */
