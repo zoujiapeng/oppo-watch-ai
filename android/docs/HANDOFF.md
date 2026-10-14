@@ -55,7 +55,11 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 - **黑区下沿按文字实际高度算**，不按行数：
   `tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5)`，
   滑块「文字与 Siri 波的安全距离」= `waveGap`（pref `float_siri_wavegap`，默认 100 → 0.10）。
-- **球高封顶屏高 70%**，封顶后按能放下的行数截断并加省略号。
+- **球高封顶屏高 70%**，封顶后按能放下的行数截断并加省略号；`measureSiriTargets` 还会再校验
+  measured 高度、超了就继续减行数（兜底，防文字糊到球外）。
+- **球内文字长度封顶 600 字**（`SiriAssistant.BALL_TEXT_MAX`，超了只留最后一段）＋
+  镜像缓存封顶 1200 字（`DshHttpTransport.MIRROR_BUF_MAX`）—— 一条长任务的输出几万字，
+  不封顶的话 TextView 会撑成一整面墙、文字堵在球外面。
 - 文字排版全部走 App 原有设定（字号/距球顶/内边距/圆角），助手只调 `setSiriText`。
 
 ## DSH 接口速查（改客户端时用）
