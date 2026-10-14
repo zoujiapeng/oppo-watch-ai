@@ -49,6 +49,10 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 - **球缩回最小形态时文字「同一刻」消失**：`measureSiriTargets` 走到「0/1 个字 → 最短形态」那一支时
   会立刻 `hideSiriTextNow()`（`setVisibility(GONE)`，不进布局）—— 只把文字设成空串不够，
   窗口/测量的更新是异步的，球收缩的半秒里旧字还会留在屏上（用户看到的「球小了、字飞出球外」）。
+- **点球内文字 = 钉住**：单击文字把它保持住（不再自动清空，文字后带 📌 提示），再单击解除；
+  长按文字也是解除；在文字上按住拖动 = 照常拖球。实现是「文字之上盖一个透明触摸层」，
+  文字层本身永远 NOT_TOUCHABLE —— 否则文字那块就没法拖球了（见 `setupSiriTouchLayer`）。
+  新一轮提问会自动解除钉住。
 - **回答结束、球变回原本状态时文字一起消失**：等打字机弹完最后一个字 → 安静 1.5s → 清空并回 IDLE
   （`SiriAssistant.IDLE_CLEAR_MS` + `quietTick`）。
   **注意清空不看 turn/end**：镜像跟的那条会话可能是一轮跑很久的长任务（几十个 step、几分钟不 end），
