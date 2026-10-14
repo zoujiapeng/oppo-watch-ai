@@ -517,10 +517,11 @@ public class FloatingBallService extends Service {
         INSTANCE = this;
         exemptHiddenApis();
         createChannel();
-        // 语音助手：轻点球体即可跟本机 DSH 说话。构造时会读设置并接上 DSH 传输层。
+        // 语音助手：轻点球体即可跟本机 DSH 说话；同时起一条常驻镜像流，
+        // DSH 里只要 AI 在回话（不管是谁问的），球就逐字出字。
         try {
             SiriAssistant a = SiriAssistant.get(this);
-            if (a.enabled() && !a.isBusy()) a.setEnabled(true);
+            if (a.enabled()) a.startMirror();
         } catch (Throwable t) {
             Log.w("FloatingBall", "siri assistant init failed: " + t);
         }

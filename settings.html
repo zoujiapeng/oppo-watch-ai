@@ -117,6 +117,7 @@
     <div class="row" style="margin-top:16px"><label>DSH 语音助手（点球说话）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
       <div class="row"><label>朗读回答</label><div class="switch" id="swAsstSpeak"></div></div>
+      <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
       <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
       <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
       <div class="btns" style="margin-top:8px">
@@ -126,9 +127,12 @@
       </div>
       <div class="muted" style="margin-top:8px">开启后：<b>轻点水晶球</b>开始录音 → 交给本机 DSH 的语音插件转写 → 作为提问发进当前 DSH 会话 →
         回答以流式写回球内的 Siri 模式文字（球随行数变形）。再点一下球结束录音；思考/回答中点击则打断。</div>
+      <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
+        只要 DSH 当前会话里 AI 在回话，球就会逐字出字；在 DSH 里切换对话后约 20 秒自动跟上。</div>
       <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返，不需要麦克风。</div>
       <div class="muted" style="margin-top:8px">球内当前文字（实时回读）：<b id="ballText">—</b></div>
       <div class="muted" style="margin-top:4px">助手状态：<b id="asstState">—</b> · 球 Siri 模式：<b id="ballSiri">—</b></div>
+      <div class="muted" style="margin-top:4px">镜像：<b id="mirrorState">—</b></div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
     <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
@@ -419,15 +423,25 @@
   document.getElementById('btnAsstClear').addEventListener('click', function () {
     try { W.setSiriText(''); } catch (e) {}
   });
+  // 镜像开关
+  var swAsstMirror = document.getElementById('swAsstMirror');
+  try { swAsstMirror.classList.toggle('on', !!W.getMirrorEnabled()); } catch (e) {}
+  swAsstMirror.addEventListener('click', function () {
+    var on = !swAsstMirror.classList.contains('on');
+    try { W.setMirrorEnabled(on); } catch (e) {}
+    swAsstMirror.classList.toggle('on', on);
+  });
   // 实时回读球内文字 / 助手状态，确认 DSH 的回答真的写进了球里
   var ballTextEl = document.getElementById('ballText');
   var asstStateEl = document.getElementById('asstState');
   var ballSiriEl = document.getElementById('ballSiri');
+  var mirrorEl = document.getElementById('mirrorState');
   setInterval(function () {
     if (!ballTextEl) return;
     try { ballTextEl.textContent = W.getBallSiriText() || '—'; } catch (e) {}
     try { asstStateEl.textContent = W.getAssistantState(); } catch (e) {}
     try { ballSiriEl.textContent = W.isBallSiriOn() ? '开' : '关'; } catch (e) {}
+    try { mirrorEl.textContent = W.getMirrorStatus() || '未连接'; } catch (e) {}
   }, 1000);
 
   var siriDy = document.getElementById('siriDy'), vSiriDy = document.getElementById('vSiriDy');

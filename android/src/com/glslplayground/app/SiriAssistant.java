@@ -37,6 +37,18 @@ public final class SiriAssistant {
         void onError(String message);
     }
 
+    /**
+     * 会话镜像：不管这条回复是谁问的，只要 DSH 当前会话产出助手文本就回调。
+     * 回调在后台线程，实现方自己 post 到主线程。
+     */
+    public interface Mirror {
+        void onAttemptStart();
+        void onText(String soFar);
+        void onFinal(String text);
+        void onTurnEnd();
+        void onStatus(String note);
+    }
+
     /** DSH 侧能力：转写 + 问答（会话的挑选由实现负责）。 */
     public interface Transport {
         void transcribe(String wavBase64, Result<String> cb);
@@ -45,6 +57,9 @@ public final class SiriAssistant {
         void shutdown();
         /** 供设置页展示：当前指向的 DSH 地址。 */
         String endpoint();
+        /** 常驻镜像：跟着当前会话，AI 一有输出就往球里打。 */
+        void startMirror(Mirror mirror);
+        void stopMirror();
     }
 
     public enum State { OFF, IDLE, LISTENING, TRANSCRIBING, THINKING, ANSWERING }
@@ -60,6 +75,12 @@ public final class SiriAssistant {
 
     private State state = State.IDLE;
     private String lastAnswer = "";
+
+    // ── 会话镜像：DSH 里只要 AI 在回话，球就出字（不管是谁问的）──
+    private boolean mirrorEnabled = true;
+    private volatile boolean askInFlight = false;
+    private final StringBuilder mirrorBuf = new StringBuilder();
+    private volatile String mirrorStatus = "";
 
     private SiriAssistant(Context c) {
         this.app = c.getApplicationContext();
@@ -81,6 +102,85 @@ public final class SiriAssistant {
         }
         // 传输层默认指向本机 DSH 服务；地址可在设置页改，存在同一个 prefs 里
         setTransport(new DshHttpTransport(app, sp.getString("endpoint", DshHttpTransport.DEFAULT_ENDPOINT)));
+        mirrorEnabled = sp.getBoolean("mirror", true);
+    }
+
+    public void setMirrorEnabled(boolean v) {
+        mirrorEnabled = v;
+        prefs().edit().putBoolean("mirror", v).apply();
+        if (v) startMirror(); else stopMirror();
+    }
+
+    public boolean mirrorEnabled() { return mirrorEnabled; }
+
+    public String mirrorStatus() { return mirrorStatus; }
+
+    /** 起一条常驻镜像流：跟着当前会话，AI 一有输出就往球里打。 */
+    public void startMirror() {
+        if (!mirrorEnabled || transport == null) return;
+        transport.startMirror(new Mirror() {
+            @Override public void onAttemptStart() {
+                if (askInFlight) return;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (askInFlight) return;
+                        mirrorBuf.setLength(0);
+                        // 模型开始生成了 —— 这一刻才算「思考中」
+                        if (state != State.LISTENING && state != State.TRANSCRIBING) {
+                            setState(State.THINKING);
+                        }
+                    }
+                });
+            }
+
+            @Override public void onText(final String delta) {
+                if (askInFlight) return;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (askInFlight) return;
+                        mirrorBuf.append(delta);
+                        if (state != State.LISTENING && state != State.TRANSCRIBING) {
+                            if (state != State.ANSWERING) setState(State.ANSWERING);
+                        }
+                        sayTyped(mirrorBuf.toString());
+                    }
+                });
+            }
+
+            @Override public void onFinal(final String text) {
+                if (askInFlight) return;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (askInFlight) return;
+                        mirrorBuf.setLength(0);
+                        mirrorBuf.append(text);
+                        lastAnswer = text;
+                        if (state != State.LISTENING && state != State.TRANSCRIBING) setState(State.ANSWERING);
+                        sayTyped(text);
+                    }
+                });
+            }
+
+            @Override public void onTurnEnd() {
+                if (askInFlight) return;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (askInFlight) return;
+                        if (state == State.THINKING || state == State.ANSWERING) setState(State.IDLE);
+                        if (speakReplies && mirrorBuf.length() > 0) speak(mirrorBuf.toString());
+                    }
+                });
+            }
+
+            @Override public void onStatus(final String note) {
+                mirrorStatus = note;
+            }
+        });
+    }
+
+    public void stopMirror() {
+        if (transport != null) transport.stopMirror();
+        mirrorStatus = "";
     }
 
     private android.content.SharedPreferences prefs() {
@@ -113,9 +213,12 @@ public final class SiriAssistant {
         if (!v) {
             capture.cancel();
             if (transport != null) transport.cancel();
+            stopMirror();
             stopTyping();
             setState(State.OFF);
             FloatingBallService.setSiriText("");
+        } else {
+            startMirror();
         }
     }
     public boolean enabled() { return enabled; }
@@ -227,6 +330,7 @@ public final class SiriAssistant {
         setState(State.THINKING);
         lastAnswer = "";
         say("思考中…");
+        askInFlight = true;          // 这一轮由本 App 自己收流，镜像先让路，避免重复打字
         transport.ask(text, new Stream() {
             @Override public void onDelta(final String soFar) {
                 main.post(new Runnable() {
@@ -240,6 +344,7 @@ public final class SiriAssistant {
             @Override public void onDone(final String full) {
                 main.post(new Runnable() {
                     @Override public void run() {
+                        askInFlight = false;
                         lastAnswer = full == null ? "" : full;
                         if (!lastAnswer.isEmpty()) sayTyped(lastAnswer);   // 交给打字机把剩下的字弹完
                         setState(State.IDLE);
@@ -250,6 +355,7 @@ public final class SiriAssistant {
             @Override public void onError(final String message) {
                 main.post(new Runnable() {
                     @Override public void run() {
+                        askInFlight = false;
                         toast("DSH 出错：" + message);
                         setState(State.IDLE);
                     }
@@ -261,6 +367,7 @@ public final class SiriAssistant {
     private void abort(String note) {
         capture.cancel();
         if (transport != null) transport.cancel();
+        askInFlight = false;
         stopTyping();
         FloatingBallService.setAssistantLevel(0f);
         if (note != null && !note.isEmpty()) toast(note);

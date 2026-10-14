@@ -280,24 +280,171 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
 
     @Override public void shutdown() {
         cancel();
+        stopMirror();
+    }
+
+    // ── 常驻镜像：跟着当前会话，AI 一有输出就往球里打 ──────────────────
+
+    private volatile boolean mirrorRunning = false;
+    private volatile DshWebSocket mirrorSocket;
+    private volatile String mirrorSession;
+    private volatile SiriAssistant.Mirror mirror;
+
+    @Override public void startMirror(SiriAssistant.Mirror cb) {
+        if (mirrorRunning) { mirror = cb; return; }
+        mirror = cb;
+        mirrorRunning = true;
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() { mirrorLoop(); }
+        }, "dsh-mirror");
+        t.setDaemon(true);
+        t.start();
+        Thread w = new Thread(new Runnable() {
+            @Override public void run() { mirrorWatch(); }
+        }, "dsh-mirror-watch");
+        w.setDaemon(true);
+        w.start();
+    }
+
+    @Override public void stopMirror() {
+        mirrorRunning = false;
+        DshWebSocket ws = mirrorSocket;
+        if (ws != null) ws.close();
+        mirrorSocket = null;
+        mirrorSession = null;
+    }
+
+    /** 断线重连；每次重连都重新解析「当前会话」，所以在 DSH 里换对话会自动跟上。 */
+    private void mirrorLoop() {
+        while (mirrorRunning) {
+            try {
+                if (cookie == null) authenticate();
+                final String session = pickSession();
+                mirrorSession = session;
+                DshWebSocket ws = new DshWebSocket();
+                mirrorSocket = ws;
+                ws.connect(hostOf(), portOf(), "/api/remote.mux", cookie, 6000, new DshWebSocket.Listener() {
+                    @Override public void onText(String message) { dispatchMirror(message); }
+                    @Override public void onFailure(String m) {
+                        if (mirror != null && mirrorRunning) mirror.onStatus("镜像断开：" + m);
+                    }
+                });
+                ws.sendText(openEnvelope(session));
+                if (mirror != null) mirror.onStatus("镜像中 · " + session);
+                Log.i(TAG, "mirror following " + session);
+                while (mirrorRunning && !ws.isClosed()) sleep(300);
+                ws.close();
+            } catch (Throwable t) {
+                if (mirror != null && mirrorRunning) mirror.onStatus("镜像连接失败：" + t.getMessage());
+            }
+            mirrorSocket = null;
+            if (mirrorRunning) sleep(2500);
+        }
+    }
+
+    /** 每 20 秒看一次当前会话有没有变（DSH 里切换对话 / 新建会话）。 */
+    private void mirrorWatch() {
+        while (mirrorRunning) {
+            sleep(20000);
+            if (!mirrorRunning) return;
+            try {
+                String current = pickSession();
+                if (mirrorSession != null && !mirrorSession.equals(current)) {
+                    DshWebSocket ws = mirrorSocket;
+                    if (ws != null) ws.close();          // 关掉旧流，外层循环会连到新会话
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 把一条 WS 消息翻译成镜像回调。 */
+    private void dispatchMirror(String message) {
+        SiriAssistant.Mirror cb = mirror;
+        if (cb == null) return;
+        try {
+            JSONObject frame = new JSONObject(message);
+            if (!"item".equals(frame.optString("type"))) return;
+            JSONObject value = frame.optJSONObject("value");
+            if (value == null) return;
+            if ("assistant-stream".equals(value.optString("type"))) {
+                JSONObject f = value.optJSONObject("frame");
+                if (f == null) return;
+                String ft = f.optString("type");
+                if ("start".equals(ft)) {
+                    cb.onAttemptStart();
+                } else if ("chunk".equals(ft)) {
+                    JSONObject chunk = f.optJSONObject("chunk");
+                    if (chunk == null || !"text-delta".equals(chunk.optString("type"))) return;
+                    cb.onText(chunk.optString("text", ""));
+                }
+                return;
+            }
+            JSONObject ev = value.optJSONObject("event");
+            if (ev == null) ev = value;
+            String type = ev.optString("type");
+            if ("assistant/message".equals(type)) {
+                String body = textOf(ev);
+                if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
+            } else if ("turn/end".equals(type)) {
+                cb.onTurnEnd();
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private String hostOf() {
+        try {
+            java.net.URI uri = java.net.URI.create(base);
+            return uri.getHost() == null ? "127.0.0.1" : uri.getHost();
+        } catch (Throwable t) {
+            return "127.0.0.1";
+        }
+    }
+
+    private int portOf() {
+        try {
+            java.net.URI uri = java.net.URI.create(base);
+            return uri.getPort() > 0 ? uri.getPort() : 80;
+        } catch (Throwable t) {
+            return 80;
+        }
+    }
+
+    private static String shortId(String id) {
+        if (id == null) return "?";
+        return id.length() > 12 ? id.substring(id.length() - 8) : id;
+    }
+
+    /** session/follow 的 open 信封。 */
+    private static String openEnvelope(String sessionId) throws Exception {
+        JSONObject open = new JSONObject();
+        open.put("type", "open");
+        open.put("streamId", "mirror-" + System.currentTimeMillis());
+        open.put("endpoint", "session/follow");
+        JSONObject args = new JSONObject();
+        JSONObject req = new JSONObject();
+        JSONObject addr = new JSONObject();
+        addr.put("kind", "session");
+        addr.put("sessionId", sessionId);
+        req.put("address", addr);
+        req.put("assistantStream", true);
+        args.put("request", req);
+        JSONObject payload = new JSONObject();
+        payload.put("args", args);
+        open.put("payload", payload);
+        return open.toString();
     }
 
     // ── DSH 会话读取 ───────────────────────────────────────────────────
 
-    /** 当前要对话的会话：优先上次用过的，其次是最近更新的那个（排除子智能体）。 */
+    /**
+     * 当前要对话的会话 = DSH 里最近在用的那条（排除子智能体）。
+     *
+     * 刻意不记住上次用的会话：镜像要跟着「你正在聊的那条」，在浏览器里
+     * 换了对话、或新开一条，球就跟着走；只有一条都没有时才新建。
+     */
     private String pickSession() throws Exception {
         JSONObject value = rpc("session/list", listArgs());
         JSONArray items = value == null ? null : value.optJSONArray("items");
-        String preferred = prefs.getString("session_id", null);
-        if (items != null) {
-            for (int i = 0; i < items.length(); i++) {
-                JSONObject it = items.getJSONObject(i);
-                if (preferred != null && preferred.equals(it.optString("sessionId"))
-                        && !"subagent".equals(it.optString("origin"))) {
-                    return preferred;
-                }
-            }
-        }
         String best = null;
         long bestAt = -1;
         if (items != null) {
@@ -308,7 +455,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 if (at > bestAt) { bestAt = at; best = it.optString("sessionId"); }
             }
         }
-        if (best == null) {
+        if (best == null || best.isEmpty()) {
             JSONObject args = new JSONObject();
             JSONObject req = new JSONObject();
             req.put("cwd", app.getFilesDir().getAbsolutePath());

@@ -376,4 +376,22 @@ public class WatchBridge {
     public boolean isBallSiriOn() {
         return FloatingBallService.isSiriOn();
     }
+
+    /** 会话镜像开关：DSH 里 AI 一有输出就往球里打字。 */
+    @JavascriptInterface
+    public boolean getMirrorEnabled() {
+        return SiriAssistant.get(act).mirrorEnabled();
+    }
+
+    @JavascriptInterface
+    public void setMirrorEnabled(final boolean v) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setMirrorEnabled(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public String getMirrorStatus() {
+        return SiriAssistant.get(act).mirrorStatus();
+    }
 }
