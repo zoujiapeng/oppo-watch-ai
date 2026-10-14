@@ -125,8 +125,11 @@
         <button id="btnAsstToggle">聆听 / 停止</button>
         <button id="btnAsstClear">清空球内文字</button>
       </div>
-      <div class="muted" style="margin-top:8px">开启后：<b>轻点水晶球</b>开始录音 → 交给本机 DSH 的语音插件转写 → 作为提问发进当前 DSH 会话 →
-        回答以流式写回球内的 Siri 模式文字（球随行数变形）。再点一下球结束录音；思考/回答中点击则打断。</div>
+      <div class="muted" style="margin-top:8px">手势：<b>双击水晶球</b>开始说话（球变回小球、波形跟着你的声音呼吸），
+        <b>再双击</b>结束并发送 —— 识别完先把你说的那句话显示在球里，随后回答逐字替换它；
+        <b>长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作。单击不响应。</div>
+      <div class="muted" style="margin-top:6px">转写交给本机 DSH 的语音插件（该接口是整段返回、没有逐字中间结果），
+        所以说话时只有波形反馈，识别完立刻把「你说了什么」显示出来。</div>
       <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
         只要 DSH 当前会话里 AI 在回话，球就会逐字出字；在 DSH 里切换对话后约 20 秒自动跟上。</div>
       <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返，不需要麦克风。</div>

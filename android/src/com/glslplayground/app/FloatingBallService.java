@@ -359,8 +359,20 @@ public class FloatingBallService extends Service {
         float padY = lines >= 3 ? dp(44) : dp(34);
 
         float tw, th;
+        // 高度上限（屏幕 70%）：先算出来，才能把文字按「装得下几行」截断
+        float maxBallH = Math.min(screenH * 0.70f, winH);
         if (siriText != null) {
-            // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配
+            // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配；
+            // 封顶后放不下的行用省略号截掉 —— 文字永远待在球里，既不溢出也不占满屏
+            float maxHalfText = Math.max(dp(20), maxBallH / 2f - padY - dp(16));
+            float lineH = siriTextPx * 1.25f;
+            try {
+                android.graphics.Paint.FontMetrics fm = siriText.getPaint().getFontMetrics();
+                if (fm != null && fm.descent - fm.ascent > 1f) lineH = fm.descent - fm.ascent;
+            } catch (Throwable ignored) { }
+            int maxLines = Math.max(1, (int) Math.floor(maxHalfText * 2f / Math.max(1f, lineH)));
+            siriText.setMaxLines(maxLines);
+            siriText.setEllipsize(android.text.TextUtils.TruncateAt.END);
             siriText.setText(s);
             siriText.setMaxWidth(textMaxW);
             siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
@@ -385,11 +397,10 @@ public class FloatingBallService extends Service {
         }
 
         float maxBallW = siriMaxBallW();
-        float maxBallH = Math.min(screenH * 0.90f, winH);
         // 文字所需半宽/半高（不小于“原来的水晶球”）
         float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
-        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 90%
+        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 70%（长回复不占满屏）
         if (lines >= 3) {
             // 第 3 行起：大圆角方形（圆角半径 ≈ 短边的 38%），不再强制更宽
             hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx));
@@ -686,30 +697,67 @@ public class FloatingBallService extends Service {
             float downX, downY;
             int startX, startY;
             long downAt;
+            long lastTapAt;
+            boolean dragging;
+            boolean longFired;
+            /** 按住不动 480ms = 长按取消（录音中或正在问答时）。 */
+            final Runnable longPress = new Runnable() {
+                @Override public void run() {
+                    if (dragging || longFired) return;
+                    longFired = true;
+                    SiriAssistant a = SiriAssistant.peek();
+                    if (a != null && a.enabled()) {
+                        a.cancelByGesture();
+                        try {
+                            android.os.Vibrator vb = (android.os.Vibrator)
+                                    getSystemService(android.content.Context.VIBRATOR_SERVICE);
+                            if (vb != null) vb.vibrate(35);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            };
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        // Siri 模式：只有按在水晶球上才能拖动（不再是整个窗口都能拖）
+                        // Siri 模式：只有按在水晶球上才响应（不再是整个窗口）
                         if (siriEnabled && !inSiriBall(e.getX(), e.getY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
                         startX = params.x; startY = params.y;
                         downAt = System.currentTimeMillis();
+                        dragging = false;
+                        longFired = false;
+                        main.removeCallbacks(longPress);
+                        main.postDelayed(longPress, 480);
                         return true;
                     case MotionEvent.ACTION_UP: {
-                        // 轻点（几乎没移动、时间短）= 跟助手说话 / 结束说话
+                        main.removeCallbacks(longPress);
+                        if (longFired) return true;
                         float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
-                        long held = System.currentTimeMillis() - downAt;
-                        if (moved < dp(14) && held < 450) {
+                        // 拖动过就只是拖动，不做任何操作
+                        if (dragging || moved >= dp(10)) return true;
+                        long now = System.currentTimeMillis();
+                        if (now - lastTapAt < 340) {                 // 双击：开始聆听 / 结束并发送
+                            lastTapAt = 0;
                             SiriAssistant a = SiriAssistant.peek();
                             if (a != null && a.enabled()) {
                                 ensureSiriForAssistant();
                                 a.toggle();
-                                return true;
                             }
+                        } else {
+                            lastTapAt = now;                          // 单击：什么都不做
                         }
                         return true;
                     }
-                    case MotionEvent.ACTION_MOVE:
+                    case MotionEvent.ACTION_CANCEL:
+                        main.removeCallbacks(longPress);
+                        return true;
+                    case MotionEvent.ACTION_MOVE: {
+                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
+                        if (!dragging) {
+                            if (moved <= dp(10)) return true;             // 还没算拖动
+                            dragging = true;
+                            main.removeCallbacks(longPress);             // 一旦拖动就不再触发长按
+                        }
                         params.x = (int) (startX + (e.getRawX() - downX));
                         params.y = (int) (startY + (e.getRawY() - downY));
                         if (siriEnabled) {
@@ -731,6 +779,7 @@ public class FloatingBallService extends Service {
                         if (wm != null) wm.updateViewLayout(glView, params);
                         glView.post(winSync);
                         return true;
+                    }
                     default:
                         return false;
                 }

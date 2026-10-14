@@ -295,7 +295,7 @@ public final class SiriAssistant {
             setState(State.IDLE);
             return;
         }
-        say("识别中…");
+        // 转写期间球里不写字（只留波形随音量呼吸），识别完直接把「你说了什么」显示出来
         final Transport t = transport;
         if (t == null) { setState(State.IDLE); return; }
         t.transcribe(VoiceCapture.toBase64(wav), new Result<String>() {
@@ -329,7 +329,8 @@ public final class SiriAssistant {
         if (transport == null) { toast("DSH 未连接"); return; }
         setState(State.THINKING);
         lastAnswer = "";
-        say("思考中…");
+        // 思考期间球里显示「你问的这句」，回答一到就逐字替换掉它
+        sayNow(text);
         askInFlight = true;          // 这一轮由本 App 自己收流，镜像先让路，避免重复打字
         transport.ask(text, new Stream() {
             @Override public void onDelta(final String soFar) {
@@ -362,6 +363,12 @@ public final class SiriAssistant {
                 });
             }
         });
+    }
+
+    /** 长按手势：取消这一轮（录音中或正在问答），并清空球内文字。 */
+    public void cancelByGesture() {
+        abort("已取消");
+        sayNow("");
     }
 
     private void abort(String note) {
