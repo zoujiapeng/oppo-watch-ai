@@ -20,6 +20,30 @@ A set of WebGL / GLSL shader experiments — voice waves, liquid glass, and flui
 每个 demo 都是**单文件 HTML、零依赖**，浏览器直接打开就能跑，源码即教程。
 Each demo is a single self-contained HTML file — no build, no dependencies, just open it in a browser.
 
+## 📱 安卓悬浮水晶球 = 本机 DSH 的前端
+
+这个仓库里还有一个**安卓端**（分支 `feat/dsh-liquid-glass-siri`）：一颗浮在桌面上的液态玻璃水晶球，
+**双击说话 → 本机 DSH 转写并回答 → 回答逐字打进这颗球里**（球随文字变形；聆听时是 Siri 波、
+思考中是流体圆点、回答完文字消散、球缩回原本那颗水晶球）。DSH 侧一行没改，
+走的是它已经在给浏览器用的 HTTP / WebSocket 接口。
+
+| 你想干什么 | 看这份 |
+|---|---|
+| **换一台手机装（给 AI 的操作清单 + 体检命令 + 踩坑表）** | [`android/docs/DEPLOY_OTHER_PHONE.md`](android/docs/DEPLOY_OTHER_PHONE.md) |
+| 它怎么接上 DSH 的（协议 / 状态表 / 黑区公式） | [`android/docs/DSH_ASSISTANT.md`](android/docs/DSH_ASSISTANT.md) |
+| 接手改代码（现状 / 关键决定 / 未做完） | [`android/docs/HANDOFF.md`](android/docs/HANDOFF.md) |
+| DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
+
+一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，但没有语音助手）。
+
+```bash
+curl -L -o glsl-playground.apk \
+  https://github.com/zoujiapeng/oppo-watch-ai/raw/feat/dsh-liquid-glass-siri/glsl-playground.apk
+pm install -r glsl-playground.apk
+# 装完进 App →「⚙ 设置」→ 打开「悬浮于桌面」，球才会出现
+# 注意：这个开关不持久 —— 重启手机 / 重装 / 被系统杀掉之后都要再点一次
+```
+
 ## Demos
 
 | Demo | 说明 | 交互 |

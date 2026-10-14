@@ -41,6 +41,7 @@ public class MainActivity extends Activity {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         goImmersive();
+        maybeRequestMic();
 
         webView = new WebView(this);
         WebSettings s = webView.getSettings();
@@ -97,6 +98,19 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    /**
+     * 语音助手要录音。设备所有者身份下 SiriAssistant 会静默自授权；
+     * 只有拿不到时才由这里弹一次系统对话框（需要前台 Activity）。
+     */
+    private void maybeRequestMic() {
+        boolean want = getIntent() != null && getIntent().getBooleanExtra("request_mic", false);
+        if (!want) return;
+        if (Build.VERSION.SDK_INT < 23) return;
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, 2001);
     }
 
     @Override
@@ -352,14 +366,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    // 每多一行黑区下移量（百分之一单位，35=0.35）
+    // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）；
+    // 黑区下沿本身由文字实际高度决定，不再按行数下移。
     public int getSiriBlackStep() {
-        return prefs().getInt("float_siri_black", 35);
+        return prefs().getInt("float_siri_wavegap", 100);
     }
 
     public void setSiriBlackStep(int v) {
-        v = Math.max(0, Math.min(300, v));
-        prefs().edit().putInt("float_siri_black", v).apply();
+        v = Math.max(0, Math.min(450, v));
+        prefs().edit().putInt("float_siri_wavegap", v).apply();
         if (FloatingBallService.running) {
             FloatingBallService.setSiriBlackStep(v);
         }

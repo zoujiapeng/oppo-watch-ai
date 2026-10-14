@@ -108,10 +108,47 @@
       <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
       <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
       <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
-      <div class="row" style="margin-top:8px"><label>每多一行黑区下移</label><span class="v" id="vSiriBlack">0.35</span></div>
-      <input type="range" id="siriBlack" min="0" max="150" step="1" value="35">
-      <div class="muted" style="margin-top:6px">文字行数越多，黑区整体自动越往下（每多一行下移该值），起点/终点同步。</div>
+      <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
+      <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
+      <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
+      <div class="row" style="margin-top:10px"><label>思考中圆点环半径 (px)</label><span class="v" id="vOrbR">90</span></div>
+      <input type="range" id="orbR" min="30" max="220" step="5" value="90">
+      <div class="row" style="margin-top:8px"><label>思考中圆点亮度</label><span class="v" id="vOrbG">1.10</span></div>
+      <input type="range" id="orbG" min="10" max="400" step="5" value="110">
+      <div class="row" style="margin-top:8px"><label>思考中边缘辉光</label><span class="v" id="vOrbRim">1.30</span></div>
+      <input type="range" id="orbRim" min="0" max="400" step="5" value="130">
+      <div class="muted" style="margin-top:6px">「思考中」的那组流体圆点：环半径按<b>屏幕像素</b>给，圆点在任何形状的球里都是等大的圆
+        （旧版把竖轴多放大了一倍多，扁球里被拉成高椭圆，又大又亮、整颗球像换了个东西）；亮度默认与 Siri 波在黑区里对齐。
+        聆听→思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。<br>
+        <b>边缘辉光</b>是圆点带起的球壳高光 / 赤道线 / 底缘亮度：波动形态用的是波自己的暗色，
+        圆点形态若用固定满值会让整圈球边亮 5 倍（就是「思考中边缘太亮、很突兀」），
+        所以这里按「圆点自身亮度 × 系数」走，默认 1.30 与 Siri 波同亮；调到 0 = 圆点完全不带边缘光。</div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
+    </div>
+
+    <div class="row" style="margin-top:16px"><label>DSH 语音助手（点球说话）</label><div class="switch" id="swAsst"></div></div>
+    <div id="asstBox" style="display:none;margin-top:8px">
+      <div class="row"><label>朗读回答</label><div class="switch" id="swAsstSpeak"></div></div>
+      <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
+      <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
+      <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
+      <div class="btns" style="margin-top:8px">
+        <button id="btnAsstTest">问一句（测试链路）</button>
+        <button id="btnAsstToggle">聆听 / 停止</button>
+        <button id="btnAsstClear">清空球内文字</button>
+        <button id="btnBallShot">保存球体截图</button>
+      </div>
+      <div class="muted" style="margin-top:8px">手势：<b>双击水晶球</b>开始说话（球变回小球、波形跟着你的声音呼吸），
+        <b>再双击</b>结束并发送 —— 识别完先把你说的那句话显示在球里，随后回答逐字替换它；
+        <b>长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作。单击不响应。</div>
+      <div class="muted" style="margin-top:6px">转写交给本机 DSH 的语音插件（该接口是整段返回、没有逐字中间结果），
+        所以说话时只有波形反馈，识别完立刻把「你说了什么」显示出来。</div>
+      <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
+        只要 DSH 当前会话里 AI 在回话，球就会逐字出字；在 DSH 里切换对话后约 20 秒自动跟上。</div>
+      <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返，不需要麦克风。</div>
+      <div class="muted" style="margin-top:8px">球内当前文字（实时回读）：<b id="ballText">—</b></div>
+      <div class="muted" style="margin-top:4px">助手状态：<b id="asstState">—</b> · 球 Siri 模式：<b id="ballSiri">—</b></div>
+      <div class="muted" style="margin-top:4px">镜像：<b id="mirrorState">—</b></div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
     <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
@@ -122,8 +159,10 @@
 
   <div class="grp gl" id="grpGlassShape" style="display:none">
     <div class="gh">液态玻璃 · 形状</div>
-    <div class="row"><label>整体 scale</label><span class="v" id="vSC">1.00</span></div>
-    <input type="range" id="SC" min="30" max="160" value="100">
+    <div class="row"><label>球体大小（整体 scale）</label><span class="v" id="vSC">1.00</span></div>
+    <input type="range" id="SC" min="20" max="200" value="100">
+    <div class="muted" style="margin:-6px 0 10px">球体整体大小：1.00 = 原始大小，0.50 = 一半。
+      实时生效、自动保存。说话/回答时球会按文字大小变形，但仍以这个倍率为基准。</div>
     <div class="row"><label>整体 y 位置</label><span class="v" id="vPY">0.50</span></div>
     <input type="range" id="PY" min="8" max="92" value="50">
     <div class="row"><label>整体 x 位置</label><span class="v" id="vPX">0.50</span></div>
@@ -364,6 +403,70 @@
     }, 180);
   });
 
+  // ── DSH 语音助手 ──────────────────────────────────────────────
+  var swAsst = document.getElementById('swAsst');
+  var asstBox = document.getElementById('asstBox');
+  var swAsstSpeak = document.getElementById('swAsstSpeak');
+  var asstUrl = document.getElementById('asstUrl');
+  function syncAsst() {
+    var on = false, speak = false, url = '';
+    try { on = W.getAssistantEnabled(); } catch (e) {}
+    try { speak = W.getAssistantSpeak(); } catch (e) {}
+    try { url = W.getAssistantEndpoint(); } catch (e) {}
+    swAsst.classList.toggle('on', !!on);
+    swAsstSpeak.classList.toggle('on', !!speak);
+    asstBox.style.display = on ? 'block' : 'none';
+    if (!asstUrl.value && url) asstUrl.value = url;
+  }
+  syncAsst();
+  swAsst.addEventListener('click', function () {
+    var on = !swAsst.classList.contains('on');
+    try { W.setAssistantEnabled(on); } catch (e) {}
+    syncAsst();
+  });
+  swAsstSpeak.addEventListener('click', function () {
+    var on = !swAsstSpeak.classList.contains('on');
+    try { W.setAssistantSpeak(on); } catch (e) {}
+    syncAsst();
+  });
+  asstUrl.addEventListener('change', function () {
+    try { W.setAssistantEndpoint(asstUrl.value); } catch (e) {}
+  });
+  document.getElementById('btnAsstTest').addEventListener('click', function () {
+    try { W.assistantAsk('只回复四个字：球内链路正常'); } catch (e) {}
+  });
+  document.getElementById('btnAsstToggle').addEventListener('click', function () {
+    try { W.assistantToggle(); } catch (e) {}
+  });
+  document.getElementById('btnAsstClear').addEventListener('click', function () {
+    try { W.setSiriText(''); } catch (e) {}
+  });
+  document.getElementById('btnBallShot').addEventListener('click', function () {
+    var p = '';
+    try { p = W.captureBall(); } catch (e) {}
+    try { W.toast(p ? ('已保存：' + p) : '截图失败'); } catch (e) {}
+  });
+  // 镜像开关
+  var swAsstMirror = document.getElementById('swAsstMirror');
+  try { swAsstMirror.classList.toggle('on', !!W.getMirrorEnabled()); } catch (e) {}
+  swAsstMirror.addEventListener('click', function () {
+    var on = !swAsstMirror.classList.contains('on');
+    try { W.setMirrorEnabled(on); } catch (e) {}
+    swAsstMirror.classList.toggle('on', on);
+  });
+  // 实时回读球内文字 / 助手状态，确认 DSH 的回答真的写进了球里
+  var ballTextEl = document.getElementById('ballText');
+  var asstStateEl = document.getElementById('asstState');
+  var ballSiriEl = document.getElementById('ballSiri');
+  var mirrorEl = document.getElementById('mirrorState');
+  setInterval(function () {
+    if (!ballTextEl) return;
+    try { ballTextEl.textContent = W.getBallSiriText() || '—'; } catch (e) {}
+    try { asstStateEl.textContent = W.getAssistantState(); } catch (e) {}
+    try { ballSiriEl.textContent = W.isBallSiriOn() ? '开' : '关'; } catch (e) {}
+    try { mirrorEl.textContent = W.getMirrorStatus() || '未连接'; } catch (e) {}
+  }, 1000);
+
   var siriDy = document.getElementById('siriDy'), vSiriDy = document.getElementById('vSiriDy');
   try { var curDy = W.getSiriTextDy(); siriDy.value = curDy; vSiriDy.textContent = curDy; } catch (e) {}
   siriDy.addEventListener('input', function () {
@@ -381,10 +484,33 @@
 
   var siriBlack = document.getElementById('siriBlack'), vSiriBlack = document.getElementById('vSiriBlack');
   try { var curBk = W.getSiriBlackStep(); if (curBk != null) siriBlack.value = curBk; } catch (e) {}
-  vSiriBlack.textContent = (siriBlack.value / 100).toFixed(2);
+  vSiriBlack.textContent = (siriBlack.value / 1000).toFixed(2);
   siriBlack.addEventListener('input', function () {
-    vSiriBlack.textContent = (siriBlack.value / 100).toFixed(2);
+    vSiriBlack.textContent = (siriBlack.value / 1000).toFixed(2);
     try { W.setSiriBlackStep(parseInt(siriBlack.value, 10)); } catch (e) {}
+  });
+
+  // 思考中的流体圆点：环半径(屏幕像素) + 亮度增益
+  var orbR = document.getElementById('orbR'), vOrbR = document.getElementById('vOrbR');
+  var orbG = document.getElementById('orbG'), vOrbG = document.getElementById('vOrbG');
+  try { var curOrbR = W.getOrbRadius(); if (curOrbR != null) orbR.value = curOrbR; } catch (e) {}
+  try { var curOrbG = W.getOrbGain(); if (curOrbG != null) orbG.value = curOrbG; } catch (e) {}
+  vOrbR.textContent = orbR.value;
+  vOrbG.textContent = (orbG.value / 100).toFixed(2);
+  orbR.addEventListener('input', function () {
+    vOrbR.textContent = orbR.value;
+    try { W.setOrbRadius(parseInt(orbR.value, 10)); } catch (e) {}
+  });
+  orbG.addEventListener('input', function () {
+    vOrbG.textContent = (orbG.value / 100).toFixed(2);
+    try { W.setOrbGain(parseInt(orbG.value, 10)); } catch (e) {}
+  });
+  var orbRim = document.getElementById('orbRim'), vOrbRim = document.getElementById('vOrbRim');
+  try { var curOrbRim = W.getOrbRim(); if (curOrbRim != null) orbRim.value = curOrbRim; } catch (e) {}
+  vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
+  orbRim.addEventListener('input', function () {
+    vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
+    try { W.setOrbRim(parseInt(orbRim.value, 10)); } catch (e) {}
   });
 
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──
