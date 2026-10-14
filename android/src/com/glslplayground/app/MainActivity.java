@@ -41,6 +41,7 @@ public class MainActivity extends Activity {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         goImmersive();
+        maybeRequestMic();
 
         webView = new WebView(this);
         WebSettings s = webView.getSettings();
@@ -97,6 +98,19 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    /**
+     * 语音助手要录音。设备所有者身份下 SiriAssistant 会静默自授权；
+     * 只有拿不到时才由这里弹一次系统对话框（需要前台 Activity）。
+     */
+    private void maybeRequestMic() {
+        boolean want = getIntent() != null && getIntent().getBooleanExtra("request_mic", false);
+        if (!want) return;
+        if (Build.VERSION.SDK_INT < 23) return;
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, 2001);
     }
 
     @Override

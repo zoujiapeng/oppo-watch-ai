@@ -300,4 +300,80 @@ public class WatchBridge {
             public void run() { act.setSiriBlackStep(v); }
         });
     }
+
+    // ─────────── DSH 语音助手（悬浮球 ↔ 本机 DSH）───────────
+
+    @JavascriptInterface
+    public boolean getAssistantEnabled() {
+        return SiriAssistant.get(act).enabled();
+    }
+
+    @JavascriptInterface
+    public void setAssistantEnabled(final boolean v) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setEnabled(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public boolean getAssistantSpeak() {
+        return SiriAssistant.get(act).speakReplies();
+    }
+
+    @JavascriptInterface
+    public void setAssistantSpeak(final boolean v) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setSpeakReplies(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public String getAssistantEndpoint() {
+        return SiriAssistant.get(act).endpoint();
+    }
+
+    @JavascriptInterface
+    public void setAssistantEndpoint(final String url) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setEndpoint(url); }
+        });
+    }
+
+    /** 「问一句」：直接把文本交给 DSH，回答出现在球的 Siri 模式里。 */
+    @JavascriptInterface
+    public void assistantAsk(final String text) {
+        ui(new Runnable() {
+            public void run() {
+                FloatingBallService.ensureSiriForAssistant();
+                SiriAssistant.get(act).ask(text);
+            }
+        });
+    }
+
+    /** 等同于点一下球：开始/结束聆听，或打断当前一轮。 */
+    @JavascriptInterface
+    public void assistantToggle() {
+        ui(new Runnable() {
+            public void run() {
+                FloatingBallService.ensureSiriForAssistant();
+                SiriAssistant.get(act).toggle();
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public String getAssistantState() {
+        return SiriAssistant.get(act).state().name();
+    }
+
+    /** 球内此刻的 Siri 文字（设置页据此确认 DSH 的回答已经写进球里）。 */
+    @JavascriptInterface
+    public String getBallSiriText() {
+        return FloatingBallService.siriTextNow();
+    }
+
+    @JavascriptInterface
+    public boolean isBallSiriOn() {
+        return FloatingBallService.isSiriOn();
+    }
 }

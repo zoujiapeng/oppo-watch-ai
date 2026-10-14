@@ -47,6 +47,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
+    /** 语音助手实时音量叠加在 waveAmp 上的增益（0 = 不影响用户设置）。 */
+    public volatile float voiceBoost = 0f;
 
     public volatile float winX, winY;
 
@@ -526,7 +528,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveOn ? waveAmp : 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),
+                waveOn ? waveAmp * (1f + voiceBoost) : 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveMode"), waveMode);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);

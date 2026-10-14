@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  语音助手只跟本机的 DSH 服务说话（http://127.0.0.1:3080），
+  targetSdk 28 起系统默认禁止明文 HTTP，这里只对本机回环地址开口子，
+  其余域名一律保持禁止。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+</network-security-config>

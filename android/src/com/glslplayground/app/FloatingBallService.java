@@ -107,6 +107,55 @@ public class FloatingBallService extends Service {
         }
     };
 
+    // ── 语音助手（安卓前端 ↔ DSH）：球体作为状态显示器 ──────────────────
+    // 采集音量 → Siri 波振幅；助手状态 → 光效形态（聆听=声波，思考=流体圆点）
+
+    /** 麦克风实时音量（0..1），驱动球内 Siri 波的呼吸。 */
+    public static void setAssistantLevel(final float rms) {
+        FloatingBallService s = INSTANCE;
+        if (s == null || s.renderer == null) return;
+        s.renderer.voiceBoost = Math.max(0f, Math.min(1.6f, rms * 1.7f));
+    }
+
+    /** 助手状态：IDLE / LISTENING / TRANSCRIBING / THINKING / ANSWERING / OFF。 */
+    public static void setAssistantState(String state) {
+        FloatingBallService s = INSTANCE;
+        if (s == null || s.renderer == null || state == null) return;
+        if ("LISTENING".equals(state)) {
+            s.renderer.waveOn = true;
+            s.renderer.waveMode = 1;            // siriWaveCore
+        } else if ("THINKING".equals(state) || "TRANSCRIBING".equals(state)) {
+            s.renderer.waveOn = true;
+            s.renderer.waveMode = 2;            // siriFluidDotsCore
+        } else if ("IDLE".equals(state) || "OFF".equals(state)) {
+            s.renderer.voiceBoost = 0f;
+        }
+    }
+
+    /** 球当前是否处于 Siri 形变模式（助手据此决定要不要先打开）。 */
+    public static boolean isSiriOn() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.siriEnabled;
+    }
+
+    /** 球内此刻显示的 Siri 文字（供设置页回读，确认回答真的写进去了）。 */
+    public static String siriTextNow() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? "" : (s.siriStr == null ? "" : s.siriStr);
+    }
+
+    /** 助手开始工作前确保球在 Siri 形变模式下（否则文字没有地方显示）。 */
+    public static void ensureSiriForAssistant() {
+        FloatingBallService s = INSTANCE;
+        if (s == null || s.siriEnabled) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                FloatingBallService s2 = INSTANCE;
+                if (s2 != null && !s2.siriEnabled) s2.applySiriEnabled(true);
+            }
+        });
+    }
+
     // ── Siri 模式：球弹出、文字从球内出现、球随文字实时变宽变高、圆角变小 ──
     private boolean siriEnabled = false;
     private android.widget.TextView siriText;
@@ -440,6 +489,13 @@ public class FloatingBallService extends Service {
         INSTANCE = this;
         exemptHiddenApis();
         createChannel();
+        // 语音助手：轻点球体即可跟本机 DSH 说话。构造时会读设置并接上 DSH 传输层。
+        try {
+            SiriAssistant a = SiriAssistant.get(this);
+            if (a.enabled() && !a.isBusy()) a.setEnabled(true);
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "siri assistant init failed: " + t);
+        }
     }
 
     /** 允许反射调用 @hide 的 SurfaceControl#setSkipScreenshot（抓屏排除本窗口）。
@@ -600,6 +656,7 @@ public class FloatingBallService extends Service {
         glView.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
+            long downAt;
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
@@ -607,7 +664,22 @@ public class FloatingBallService extends Service {
                         if (siriEnabled && !inSiriBall(e.getX(), e.getY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
                         startX = params.x; startY = params.y;
+                        downAt = System.currentTimeMillis();
                         return true;
+                    case MotionEvent.ACTION_UP: {
+                        // 轻点（几乎没移动、时间短）= 跟助手说话 / 结束说话
+                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
+                        long held = System.currentTimeMillis() - downAt;
+                        if (moved < dp(14) && held < 450) {
+                            SiriAssistant a = SiriAssistant.peek();
+                            if (a != null && a.enabled()) {
+                                ensureSiriForAssistant();
+                                a.toggle();
+                                return true;
+                            }
+                        }
+                        return true;
+                    }
                     case MotionEvent.ACTION_MOVE:
                         params.x = (int) (startX + (e.getRawX() - downX));
                         params.y = (int) (startY + (e.getRawY() - downY));
