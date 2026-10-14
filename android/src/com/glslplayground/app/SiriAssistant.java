@@ -139,6 +139,7 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (askInFlight) return;
                         mirrorBuf.append(delta);
+                        DshHttpTransport.capBuffer(mirrorBuf, 1200);   // 长任务别把几万字一起灌进球
                         if (state != State.LISTENING && state != State.TRANSCRIBING) {
                             if (state != State.ANSWERING) setState(State.ANSWERING);
                         }
@@ -153,7 +154,7 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (askInFlight) return;
                         mirrorBuf.setLength(0);
-                        mirrorBuf.append(text);
+                        mirrorBuf.append(DshHttpTransport.clip(text, 1200));
                         lastAnswer = text;
                         if (state != State.LISTENING && state != State.TRANSCRIBING) setState(State.ANSWERING);
                         sayTyped(text);
@@ -516,7 +517,7 @@ public final class SiriAssistant {
 
     /** 逐字揭示（回答用）；target 可以在揭示过程中不断变长。 */
     private void sayTyped(String text) {
-        String t = text == null ? "" : text;
+        String t = clipToBall(text);
         if (!t.startsWith(shownText)) {         // 换了一轮回答 → 从头弹
             shownText = "";
             stopTyping();
@@ -528,6 +529,21 @@ public final class SiriAssistant {
             typing = true;
             main.post(typist);
         }
+    }
+
+    /**
+     * 球内文字的硬上限：超了就只留最后一段（前面加省略号）。
+     *
+     * 一条会话里的助手输出可以长到几万字（实测镜像跟到长任务时就是几千字一起灌进来），
+     * 全塞进球里的话 TextView 会撑成一整面墙、文字糊在球外面 —— 球是「当前这句话」的显示器，
+     * 不是日志窗口。封顶后：球里永远只有能装下的最后一段，超出部分自动消失。
+     */
+    private static final int BALL_TEXT_MAX = 600;
+
+    private static String clipToBall(String text) {
+        String t = text == null ? "" : text;
+        if (t.length() <= BALL_TEXT_MAX) return t;
+        return "…" + t.substring(t.length() - BALL_TEXT_MAX);
     }
 
     /** 写进球的 Siri 模式文字（兼容旧调用点）。 */

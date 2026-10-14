@@ -391,6 +391,25 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         } catch (Throwable ignored) {}
     }
 
+    /**
+     * 镜像累计文本的硬上限：一有新的 text-delta 就把最老的内容丢掉。
+     * 一轮长任务的助手输出可以到几万字，原样攒下去会一起灌进球里（球内糊成一整面墙）。
+     * 这里只保留「最近这一段」，配合 SiriAssistant.clipToBall 的显示上限。
+     */
+    private static final int MIRROR_BUF_MAX = 1200;
+
+    static void capBuffer(StringBuilder buf, int max) {
+        int over = buf.length() - max;
+        if (over > 0) buf.delete(0, over);
+    }
+
+    /** 字符串版：只保留最后 max 个字符（前面补省略号）。 */
+    static String clip(String s, int max) {
+        if (s == null) return "";
+        if (s.length() <= max) return s;
+        return "…" + s.substring(s.length() - max);
+    }
+
     private String hostOf() {
         try {
             java.net.URI uri = java.net.URI.create(base);

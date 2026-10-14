@@ -121,7 +121,25 @@ public class FloatingBallService extends Service {
         nextShotCheck = now + 200;
         java.io.File f = new java.io.File(SHOT_REQ);
         if (!f.exists()) return;
+        // 文件里写了内容 → 把它当成「要显示的球内文字」（调试长文本溢出用），否则只截一帧
+        String payload = null;
+        try {
+            if (f.length() > 0) {
+                byte[] buf = new byte[(int) Math.min(f.length(), 64 * 1024)];
+                java.io.FileInputStream in = new java.io.FileInputStream(f);
+                int n = in.read(buf);
+                in.close();
+                if (n > 0) payload = new String(buf, 0, n, "UTF-8").trim();
+            }
+        } catch (Throwable ignored) { }
         if (!f.delete() && f.exists()) return;
+        if (payload != null && !payload.isEmpty()) {
+            final String text = payload;
+            Log.i("FloatingBall", "shot request text len=" + text.length());
+            main.post(new Runnable() {
+                @Override public void run() { applySiriText(text); }
+            });
+        }
         try { captureBallPngNow(); } catch (Throwable t) { Log.w("FloatingBall", "shot request failed: " + t); }
     }
 
@@ -524,8 +542,24 @@ public class FloatingBallService extends Service {
             siriText.setMaxWidth(textMaxW);
             siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            // 兜底：极端情况下（超大字号 / 超长文本）measured 高度仍可能超过球的上限，
+            // 那就继续减行数 —— 文字必须待在球里，绝不能糊到球外面去。
+            for (int guard = 0; guard < 64 && maxLines > 1
+                    && siriText.getMeasuredHeight() > maxHalfText * 2f; guard++) {
+                maxLines--;
+                siriText.setMaxLines(maxLines);
+                siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            }
             tw = siriText.getMeasuredWidth();
             th = siriText.getMeasuredHeight();
+            if (th > maxHalfText * 2f + 1f) {
+                Log.w("FloatingBall", "siri text still too tall: h=" + th
+                        + " limit=" + (maxHalfText * 2f) + " lines=" + maxLines);
+            }
+            if (s.length() > 60) {
+                Log.i("FloatingBall", "siri text len=" + s.length() + " lines=" + maxLines + " h=" + th);
+            }
         } else {
             android.text.TextPaint p = new android.text.TextPaint();
             p.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
@@ -609,6 +643,7 @@ public class FloatingBallService extends Service {
         float m = dp(24);
         int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
+        Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
         if (W == winW && H == winH) return;
         float bcx = params.x + winW * 0.5f;
         float bcy = params.y + winH * 0.5f;
