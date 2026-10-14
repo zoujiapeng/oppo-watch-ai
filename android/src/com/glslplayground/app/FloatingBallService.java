@@ -452,10 +452,14 @@ public class FloatingBallService extends Service {
             siriTextDy = prefs().getInt("float_siri_dy", 10);
             siriTextPx = dp(prefs().getInt("float_siri_sp", 34));
             siriBlackStep = prefs().getInt("float_siri_wavegap", 100);
-            // 记录“原来的水晶球”尺寸，作为最短形态
+            // 记录“原来的水晶球”尺寸，作为最短形态。
+            // 这里必须把整体 scale(master) 算进去：Siri 模式下球体几何走 svHalf*/tMaster，
+            // master 不参与计算 —— 不在这一步乘，就会出现「初始那颗球变小了，
+            // 一进 Siri 模式（聆听/思考/回答）反而弹回原来大小」的割裂。
             if (renderer != null) {
-                if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
-                if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
+                float ms = renderer.master > 0.02f ? renderer.master : 1f;
+                if (renderer.halfX > 0.02f) minHalfX = renderer.halfX * ms;
+                if (renderer.halfY > 0.02f) minHalfY = renderer.halfY * ms;
                 minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
             }
             // 初始形态必须是“原来的水晶球”，避免用默认值(0.30/0.30 → 圆形)一闪
