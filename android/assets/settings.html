@@ -111,6 +111,13 @@
       <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
       <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
       <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
+      <div class="row" style="margin-top:10px"><label>思考中圆点环半径 (px)</label><span class="v" id="vOrbR">90</span></div>
+      <input type="range" id="orbR" min="30" max="220" step="5" value="90">
+      <div class="row" style="margin-top:8px"><label>思考中圆点亮度</label><span class="v" id="vOrbG">1.10</span></div>
+      <input type="range" id="orbG" min="10" max="400" step="5" value="110">
+      <div class="muted" style="margin-top:6px">「思考中」的那组流体圆点：环半径按<b>屏幕像素</b>给，圆点在任何形状的球里都是等大的圆
+        （旧版把竖轴多放大了一倍多，扁球里被拉成高椭圆，又大又亮、整颗球像换了个东西）；亮度默认与 Siri 波在黑区里对齐。
+        聆听→思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。</div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
 
@@ -474,6 +481,22 @@
   siriBlack.addEventListener('input', function () {
     vSiriBlack.textContent = (siriBlack.value / 1000).toFixed(2);
     try { W.setSiriBlackStep(parseInt(siriBlack.value, 10)); } catch (e) {}
+  });
+
+  // 思考中的流体圆点：环半径(屏幕像素) + 亮度增益
+  var orbR = document.getElementById('orbR'), vOrbR = document.getElementById('vOrbR');
+  var orbG = document.getElementById('orbG'), vOrbG = document.getElementById('vOrbG');
+  try { var curOrbR = W.getOrbRadius(); if (curOrbR != null) orbR.value = curOrbR; } catch (e) {}
+  try { var curOrbG = W.getOrbGain(); if (curOrbG != null) orbG.value = curOrbG; } catch (e) {}
+  vOrbR.textContent = orbR.value;
+  vOrbG.textContent = (orbG.value / 100).toFixed(2);
+  orbR.addEventListener('input', function () {
+    vOrbR.textContent = orbR.value;
+    try { W.setOrbRadius(parseInt(orbR.value, 10)); } catch (e) {}
+  });
+  orbG.addEventListener('input', function () {
+    vOrbG.textContent = (orbG.value / 100).toFixed(2);
+    try { W.setOrbGain(parseInt(orbG.value, 10)); } catch (e) {}
   });
 
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──

@@ -101,6 +101,7 @@ public class FloatingBallService extends Service {
     private final Runnable renderTick = new Runnable() {
         @Override public void run() {
             if (glView == null || targetFps <= 0) return;
+            pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
             glView.requestRender();
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
@@ -121,6 +122,30 @@ public class FloatingBallService extends Service {
     private boolean waveSaved = false;
     private boolean waveOnSaved = true;
     private int waveModeSaved = 1;
+
+    // 波 ↔ 流体圆点 的交叉淡化：状态一变就朝目标推进，避免「聆听→思考」时光效瞬间换脸。
+    private float orbMixNow = 0f;            // 当前值（0=纯 Siri 波，1=纯流体圆点）
+    private float orbMixTarget = 0f;
+    private long orbMixLastMs = 0;
+    private static final long ORB_MIX_MS = 320;   // 淡化时长
+
+    private void pumpOrbMix() {
+        if (renderer == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        float dt = orbMixLastMs == 0 ? 0.016f : Math.min(0.05f, (now - orbMixLastMs) / 1000f);
+        orbMixLastMs = now;
+        if (orbMixNow != orbMixTarget) {
+            float step = dt * 1000f / ORB_MIX_MS;
+            orbMixNow += Math.max(-step, Math.min(step, orbMixTarget - orbMixNow));
+            if (Math.abs(orbMixTarget - orbMixNow) < 0.002f) orbMixNow = orbMixTarget;
+            renderer.orbMix = orbMixNow;
+        }
+    }
+
+    private void setOrbMixTarget(float t) {
+        orbMixTarget = Math.max(0f, Math.min(1f, t));
+        if (renderer != null && orbMixNow == orbMixTarget) renderer.orbMix = orbMixNow;
+    }
 
     private void saveWaveOnce() {
         if (waveSaved || renderer == null) return;
@@ -145,19 +170,22 @@ public class FloatingBallService extends Service {
             s.saveWaveOnce();
             s.renderer.waveOn = true;
             s.renderer.waveMode = 2;            // siriFluidDotsCore
+            s.setOrbMixTarget(1f);
         } else if ("LISTENING".equals(state) || "TRANSCRIBING".equals(state)) {
             s.saveWaveOnce();
             s.renderer.waveOn = true;
             s.renderer.waveMode = 1;            // siriWaveCore
+            s.setOrbMixTarget(0f);
         } else {
             // 回答中 / 空闲：交还给用户自己的 Siri 模式设定 ——
             // 回复就是「原本的 Siri 模式 + 球内文字」，不再叠任何特效
             s.restoreWave();
+            s.setOrbMixTarget(0f);
             if ("IDLE".equals(state) || "OFF".equals(state)) s.renderer.voiceBoost = 0f;
         }
         Log.i("FloatingBall", "assistant state=" + state
                 + " waveOn=" + s.renderer.waveOn + " waveMode=" + s.renderer.waveMode
-                + " (0=关 1=Siri波 2=流体圆点)");
+                + " orbMix→" + s.orbMixTarget + " (0=关 1=Siri波 2=流体圆点)");
     }
 
     /** 球当前是否处于 Siri 形变模式（助手据此决定要不要先打开）。 */
@@ -279,6 +307,40 @@ public class FloatingBallService extends Service {
     public static void setSiriBlackStep(int v) {
         FloatingBallService s = INSTANCE;
         if (s != null) s.main.post(() -> s.applySiriBlackStep(v));
+    }
+
+    /** 思考中流体圆点的环半径（屏幕像素），实时生效。 */
+    public static void setOrbRadius(int px) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyOrbRadius(px));
+    }
+
+    /** 思考中流体圆点的亮度增益（百分之一，110=1.10），实时生效。 */
+    public static void setOrbGain(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyOrbGain(pct));
+    }
+
+    public static int getOrbRadius() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 90 : s.prefs().getInt("float_orb_radius", 90);
+    }
+
+    public static int getOrbGain() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 110 : s.prefs().getInt("float_orb_gain", 110);
+    }
+
+    private void applyOrbRadius(int px) {
+        px = Math.max(30, Math.min(300, px));
+        prefs().edit().putInt("float_orb_radius", px).apply();
+        if (renderer != null) renderer.orbRadius = px;
+    }
+
+    private void applyOrbGain(int pct) {
+        pct = Math.max(10, Math.min(400, pct));
+        prefs().edit().putInt("float_orb_gain", pct).apply();
+        if (renderer != null) renderer.orbGain = pct / 100f;
     }
 
     private void applySiriBlackStep(int v) {
@@ -694,6 +756,9 @@ public class FloatingBallService extends Service {
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winW, winH);
         renderer.refSize = winSize;
+        // 思考中的流体圆点：环半径(px)/亮度增益，跟着设置页走
+        renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
+        renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);

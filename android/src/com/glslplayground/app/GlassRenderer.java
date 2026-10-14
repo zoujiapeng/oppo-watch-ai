@@ -50,6 +50,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     /** 语音助手实时音量叠加在 waveAmp 上的增益（0 = 不影响用户设置）。 */
     public volatile float voiceBoost = 0f;
 
+    // ── 思考中（流体圆点）的成形参数：环半径按屏幕像素给，圆点在任何球里都是等大的圆 ──
+    public volatile float orbRadius = 90f;    // 圆点环半径（屏幕像素）
+    public volatile float orbOffset = -0.03f; // 环心 ny 偏移（负 = 更靠球底，避开文字）
+    public volatile float orbGain = 1.1f;     // 亮度增益（跟 Siri 波对齐）
+    /** 波↔圆点的交叉淡化进度：0=纯 Siri 波，1=纯流体圆点（见 FloatingBallService.setAssistantState）。 */
+    public volatile float orbMix = 0f;
+
     public volatile float winX, winY;
 
     // ── GL 资源 ──
@@ -160,7 +167,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
-        "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uWaveMode;\n" +
+        "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
+        "uniform float uOrbRadius, uOrbOffset, uOrbGain;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
         "  float outside = length(max(cc,0.0)) - r;\n" +
@@ -215,14 +223,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float g=clamp(2.0-abs(h*6.0-2.0),0.0,1.0);\n" +
         "  float b=clamp(2.0-abs(h*6.0-4.0),0.0,1.0);\n" +
         "  return vec3(r,g,b); }\n" +
-        "float orbDotR(float fi, float seed, float t){ return 0.036 + 0.010*sin(t*1.3+seed*6.2831853) + 0.005*sin(t*2.4+fi*1.3); }\n" +
+        "float orbDotR(float fi, float seed, float t, float rBase){ return rBase + 0.010*sin(t*1.3+seed*6.2831853) + 0.005*sin(t*2.4+fi*1.3); }\n" +
         "float orbDotSD(vec2 p, vec2 pos, float r, float t, float fi, float shapeDamp){\n" +
         "  vec2 dd = p - pos;\n" +
         "  float sq = 0.075*(0.5+0.5*sin(t*0.9+fi*2.0))*shapeDamp;\n" +
         "  float ca=cos(t*0.35+fi), sa=sin(t*0.35+fi);\n" +
         "  dd = mat2(ca,-sa,sa,ca)*dd; dd *= vec2(1.0+sq,1.0-sq);\n" +
         "  return length(dd) - r; }\n" +
-        "vec3 orbScene(vec2 p, float t){\n" +
+        // rBase（圆点半径）按球体实际像素尺寸换算：这样圆点在任何球里都是同样大小的圆，
+        // 与「环半径 = uOrbRadius 像素」配套（见 orbScenePx）。
+        "vec3 orbScene(vec2 p, float t, float rBase){\n" +
         "  float k=floor(t/6.0); float te=fract(t/6.0)*6.0;\n" +
         "  float tg=mod(t,12.0);\n" +
         "  float g=settleCrit((tg-9.2)*1.8,7.5)-settleWL(tg-10.0,6.5,4.0);\n" +
@@ -243,8 +253,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float goStart=pairId*0.33; float retStart=0.99+pairId*0.33;\n" +
         "    float m=(settleOrb(te-goStart)-settleOrb(te-retStart))*isMover;\n" +
         "    float rec=(settleOrb(te-goStart-0.11)-settleOrb(te-retStart-0.11))*(1.0-isMover);\n" +
-        "    float rSelf=orbDotR(fi,seed,t); rSelf=mix(rSelf,0.036,gC); rSelf*=1.0-0.18*charge;\n" +
-        "    float fj=mod(fi+3.0,6.0); float rPart=orbDotR(fj,hash11(fj),t);\n" +
+        "    float rSelf=orbDotR(fi,seed,t,rBase); rSelf=mix(rSelf,rBase,gC); rSelf*=1.0-0.18*charge;\n" +
+        "    float fj=mod(fi+3.0,6.0); float rPart=orbDotR(fj,hash11(fj),t,rBase);\n" +
         "    float deep=-(R+0.035)-0.12*rPart;\n" +
         "    float radial=mix(R,deep,m)+0.035*rec; radial=mix(radial,0.008,g);\n" +
         "    vec2 pos=radial*dir;\n" +
@@ -257,9 +267,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float w=exp(-sdG*0.5); cAcc+=w*dotCol; wAcc+=w;\n" +
         "  }\n" +
         "  vec3 sd3=max(total3,vec3(0.0))+1e-4;\n" +
-        "  vec3 core3=clamp(0.0025/pow(sd3,vec3(1.35)),0.0,1.0);\n" +
+        "  vec3 core3=clamp(0.0035/pow(sd3,vec3(1.35)),0.0,1.0);\n" +
         "  vec3 edge3=1.0-smoothstep(vec3(0.02),vec3(0.56),sd3);\n" +
         "  return core3*edge3*gBright*(cAcc/wAcc); }\n" +
+        // 思考中的流体圆点：坐标 = 球内像素 / uOrbRadius * uRingR（uRingR=0.17），
+        // 所以环半径恒等于 uOrbRadius 像素；x/y 同倍率 → 圆点在扁球里也不会被拉长。
+        // 旧写法把 uWaveScale 当像素倍率（x/y 同值），竖轴等于又乘了 hy/hx 倍 →
+        // 2:1 的胶囊球里圆点被拉成 2.8 倍高的椭圆、又大又亮，整颗球像换了个东西。
+        "vec3 orbScenePx(vec2 localPx, float hx, float hy, float t){\n" +
+        "  float k = 0.17/max(uOrbRadius, 1e-3);\n" +
+        "  vec2 q = localPx - vec2(0.0, -uOrbOffset*hy);\n" +
+        "  return orbScene(q*k, t, 0.038*k); }\n" +
         "vec2 screenUv(vec2 fc){\n" +
         "  vec2 top = vec2(fc.x, iRes.y - fc.y);\n" +
         "  return (uWinPos + top) / uScreen;\n" +
@@ -299,16 +317,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
         "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
-        "    if(uWaveMode < 1.5){\n" +
-        "      wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
-        "      float below = smoothstep(0.7, -0.5, wp.y);\n" +
-        "      col += (waveCol(wp, iTime, 1.0) + wglow*(0.25 + 0.6*below)) * uWaveAmp * waveVis;\n" +
-        "    } else {\n" +
-        "      vec3 oc = orbScene(wp * 0.42, iTime);\n" +
-        "      oc = pow(max(oc, 0.0), vec3(1.0/1.2));\n" +
-        "      wglow = vec3(0.80,0.95,1.25);\n" +
-        "      col += oc * uWaveAmp * waveVis;\n" +
-        "    }\n" +
+        "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：聆听→思考时不再「啪」地换一套光效\n" +
+        "    vec3 waveEff = waveCol(wp, iTime, 1.0);\n" +
+        "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
+        "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
+        "    waveEff += wglow*(0.25 + 0.6*below);\n" +
+        "    vec3 orbEff = pow(max(orbScenePx(cw, uHalf.x, uHalf.y, iTime), 0.0), vec3(1.0/1.2)) * uOrbGain;\n" +
+        "    wglow = mix(wglow, vec3(0.80,0.95,1.25), uOrbMix);\n" +
+        "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis;\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
         "  col *= mix(0.70,1.,innerEdge);\n" +
@@ -531,7 +547,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),
                 waveOn ? waveAmp * (1f + voiceBoost) : 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveMode"), waveMode);
+        // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), orbMix);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), orbRadius);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);

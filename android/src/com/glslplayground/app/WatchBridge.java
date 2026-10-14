@@ -301,6 +301,32 @@ public class WatchBridge {
         });
     }
 
+    /** 思考中（流体圆点）的环半径：屏幕像素。 */
+    @JavascriptInterface
+    public int getOrbRadius() {
+        return FloatingBallService.getOrbRadius();
+    }
+
+    @JavascriptInterface
+    public void setOrbRadius(final int px) {
+        ui(new Runnable() {
+            public void run() { FloatingBallService.setOrbRadius(px); }
+        });
+    }
+
+    /** 思考中（流体圆点）的亮度增益：百分之一。 */
+    @JavascriptInterface
+    public int getOrbGain() {
+        return FloatingBallService.getOrbGain();
+    }
+
+    @JavascriptInterface
+    public void setOrbGain(final int pct) {
+        ui(new Runnable() {
+            public void run() { FloatingBallService.setOrbGain(pct); }
+        });
+    }
+
     // ─────────── DSH 语音助手（悬浮球 ↔ 本机 DSH）───────────
 
     @JavascriptInterface
