@@ -437,11 +437,17 @@ public final class SiriAssistant {
         if (s == State.IDLE || s == State.OFF) main.postDelayed(idleClear, IDLE_CLEAR_MS);
     }
 
-    /** 空闲多久之后清空球内文字（留一点时间让人看完回答）。 */
-    private static final long IDLE_CLEAR_MS = 8000;
+    /**
+     * 收尾后多久清空球内文字。
+     * 「球变回原本状态」和「文字消失」是同一件事：等最后一个字弹完，
+     * 再停 IDLE_CLEAR_MS，然后清空 —— 球随即收缩回原本那颗水晶球。
+     */
+    private static final long IDLE_CLEAR_MS = 1500;
     private final Runnable idleClear = new Runnable() {
         @Override public void run() {
-            if (state == State.IDLE || state == State.OFF) sayNow("");
+            if (state != State.IDLE && state != State.OFF) return;
+            if (typing) { main.postDelayed(this, 200); return; }   // 等打字机把最后一个字弹完
+            sayNow("");                                            // 文字跟着球一起消失
         }
     };
 
