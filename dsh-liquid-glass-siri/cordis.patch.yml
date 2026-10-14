@@ -1,0 +1,21 @@
+# Bundle patch for dsh-liquid-glass-siri.
+#
+# A top-level array of Loader patch entries. This one carries no `id`, so its
+# `insert` list is appended to the composed entry list; the row below is what
+# makes the Loader mount this package (and therefore what makes the
+# client-modules node half publish ./lib/client.js into window.__DSH_BOOT__).
+#
+# The row id is the handle other patch layers target, e.g. from the profile's
+# own cordis.patch.yml:
+#
+#   - id: liquid-glass-siri
+#     config:
+#       language: en
+#       continuous: false
+#
+- insert:
+    - id: liquid-glass-siri
+      name: 'dsh-liquid-glass-siri'
+      config:
+        # Verify the plugin loaded: open the orb, or press Alt+S anywhere.
+        language: zh
