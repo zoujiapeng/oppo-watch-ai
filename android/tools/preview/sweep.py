@@ -34,9 +34,11 @@ for v in vals or ['']:
     for r in d['rows']:
         rows.append((v, r))
 
-hdr = f"{args.sweep:>10} {'mode':<10} {'addMean':>8} {'peak':>6} {'hotpx':>7} {'W':>5} {'H':>5} {'cyOff':>6}"
+hdr = (f"{args.sweep:>10} {'mode':<10} {'addMean':>8} {'peak':>6} {'hotpx':>7} {'W':>5} {'H':>5} "
+       f"{'cyOff':>6} {'rim':>7} {'rimBot':>7}")
 print(hdr)
 print('-' * len(hdr))
 for v, r in rows:
     print(f"{v:>10} {r['mode']:<10} {r['addMean']:>8.4f} {r['addPeak']:>6.3f} {r['hotPx']:>7} "
-          f"{r['clusterW']:>5} {r['clusterH']:>5} {str(r['clusterCyOff']):>6}")
+          f"{r['clusterW']:>5} {r['clusterH']:>5} {str(r['clusterCyOff']):>6} "
+          f"{r.get('rimAddMean', 0):>7.4f} {r.get('rimBottomAddMean', 0):>7.4f}")

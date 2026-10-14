@@ -43,6 +43,10 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
   （`SiriAssistant.IDLE_CLEAR_MS`，想更长改这个常量）。
 - **光效**：只有 THINKING 是流体圆点；LISTENING/TRANSCRIBING 是 Siri 波；
   ANSWERING/IDLE 还原用户自己的波形设定（`FloatingBallService.setAssistantState`）。
+  圆点与波**共用同一套坐标框架**（屏幕像素 / `uOrbRadius` * 0.17，x/y 同倍率），
+  边缘辉光取「圆点自身亮度 × `uOrbRim`」而不是固定满值；切换时 `uOrbMix` 做 320ms 交叉淡化。
+  调这三个参数：设置页「思考中圆点环半径 / 亮度 / 边缘辉光」，
+  离线看效果：`android/tools/preview`（不必刷 APK）。
 - **黑区下沿按文字实际高度算**，不按行数：
   `tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5)`，
   滑块「文字与 Siri 波的安全距离」= `waveGap`（pref `float_siri_wavegap`，默认 100 → 0.10）。
@@ -74,3 +78,7 @@ POST http://127.0.0.1:3080/api/<namespace>/<method>      # 斜杠，不是点
 4. `android/docs/probes/*.mjs` 是当时跑通的 Node 探针，可复用。
 5. 仓库里 `dsh-liquid-glass-siri/` 是早期做的**网页版** DSH 插件（用户最终没要），
    独立功能、可从 profile 移除：`dsh plugin --profile web remove dsh-liquid-glass-siri`。
+6. 设置页很长、WebView 不能滚动（实测自动化 swipe 无效），要触发「思考中」只能：
+   双击球说话（真机路径），或先把 DSH 区块挪到页首再重装。球体截图在
+   `/data/data/com.glslplayground.app/files/ball-capture.png`（root 可读，Termux 要经
+   `su -c cp` 到 `~/oppo-watch-ai/.preview/`，`/sdcard` 与 `/data/local/tmp` 在 Termux 命名空间里看不见）。

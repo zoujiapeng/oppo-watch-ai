@@ -331,6 +331,23 @@ public class FloatingBallService extends Service {
         return s == null ? 110 : s.prefs().getInt("float_orb_gain", 110);
     }
 
+    /** 思考中圆点带起的边缘辉光（百分之一，130=1.30），实时生效。 */
+    public static void setOrbRim(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyOrbRim(pct));
+    }
+
+    public static int getOrbRim() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 130 : s.prefs().getInt("float_orb_rim", 130);
+    }
+
+    private void applyOrbRim(int pct) {
+        pct = Math.max(0, Math.min(400, pct));
+        prefs().edit().putInt("float_orb_rim", pct).apply();
+        if (renderer != null) renderer.orbRim = pct / 100f;
+    }
+
     private void applyOrbRadius(int px) {
         px = Math.max(30, Math.min(300, px));
         prefs().edit().putInt("float_orb_radius", px).apply();
@@ -759,6 +776,7 @@ public class FloatingBallService extends Service {
         // 思考中的流体圆点：环半径(px)/亮度增益，跟着设置页走
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
+        renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);

@@ -284,6 +284,33 @@ export function gainMetrics(frame, base, ui) {
   };
 }
 
+// ── 球边缘（球壳高光 + 赤道线 + 底缘）的辉光增益：两种形态最容易「一眼突兀」的地方 ──
+// 采样球内 4~16px 的一圈（避开放射状色差），比较「有光效 − 无光效」的平均增量。
+export function rimMetrics(frame, base, ui, bandPx = 16) {
+  const baseFx = ui.refSize * 0.9;
+  const hx = baseFx * ui.halfX * ui.master, hy = baseFx * ui.halfY * ui.master;
+  const cx = frame.w * 0.5, cy = frame.h * 0.5;
+  let sum = 0, n = 0, bottom = 0, nb = 0;
+  for (let y = 0; y < frame.h; y++) {
+    for (let x = 0; x < frame.w; x++) {
+      const cxx = x + 0.5 - cx, cyy = -(y + 0.5 - cy);
+      const r = Math.sqrt((cxx / hx) ** 2 + (cyy / hy) ** 2);
+      if (r > 1 || r < 1 - bandPx / Math.min(hx, hy)) continue;
+      const o = (y * frame.w + x) * 4;
+      const lum = (0.2126 * frame.data[o] + 0.7152 * frame.data[o + 1] + 0.0722 * frame.data[o + 2]) / 255;
+      const lum0 = (0.2126 * base.data[o] + 0.7152 * base.data[o + 1] + 0.0722 * base.data[o + 2]) / 255;
+      const g = lum - lum0;
+      sum += g; n++;
+      if (cyy < -0.2 * hy) { bottom += g; nb++; }
+    }
+  }
+  return {
+    rimAddMean: +(sum / Math.max(1, n)).toFixed(4),
+    rimBottomAddMean: +(bottom / Math.max(1, nb)).toFixed(4),
+    rimPeak: undefined,
+  };
+}
+
 export function saveFrame(path, frame) {
   fs.writeFileSync(path, encodePng(frame.w, frame.h, Buffer.from(frame.data)));
 }

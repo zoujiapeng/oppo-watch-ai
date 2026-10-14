@@ -115,9 +115,14 @@
       <input type="range" id="orbR" min="30" max="220" step="5" value="90">
       <div class="row" style="margin-top:8px"><label>思考中圆点亮度</label><span class="v" id="vOrbG">1.10</span></div>
       <input type="range" id="orbG" min="10" max="400" step="5" value="110">
+      <div class="row" style="margin-top:8px"><label>思考中边缘辉光</label><span class="v" id="vOrbRim">1.30</span></div>
+      <input type="range" id="orbRim" min="0" max="400" step="5" value="130">
       <div class="muted" style="margin-top:6px">「思考中」的那组流体圆点：环半径按<b>屏幕像素</b>给，圆点在任何形状的球里都是等大的圆
         （旧版把竖轴多放大了一倍多，扁球里被拉成高椭圆，又大又亮、整颗球像换了个东西）；亮度默认与 Siri 波在黑区里对齐。
-        聆听→思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。</div>
+        聆听→思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。<br>
+        <b>边缘辉光</b>是圆点带起的球壳高光 / 赤道线 / 底缘亮度：波动形态用的是波自己的暗色，
+        圆点形态若用固定满值会让整圈球边亮 5 倍（就是「思考中边缘太亮、很突兀」），
+        所以这里按「圆点自身亮度 × 系数」走，默认 1.30 与 Siri 波同亮；调到 0 = 圆点完全不带边缘光。</div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
 
@@ -497,6 +502,13 @@
   orbG.addEventListener('input', function () {
     vOrbG.textContent = (orbG.value / 100).toFixed(2);
     try { W.setOrbGain(parseInt(orbG.value, 10)); } catch (e) {}
+  });
+  var orbRim = document.getElementById('orbRim'), vOrbRim = document.getElementById('vOrbRim');
+  try { var curOrbRim = W.getOrbRim(); if (curOrbRim != null) orbRim.value = curOrbRim; } catch (e) {}
+  vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
+  orbRim.addEventListener('input', function () {
+    vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
+    try { W.setOrbRim(parseInt(orbRim.value, 10)); } catch (e) {}
   });
 
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──

@@ -54,6 +54,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float orbRadius = 90f;    // 圆点环半径（屏幕像素）
     public volatile float orbOffset = -0.03f; // 环心 ny 偏移（负 = 更靠球底，避开文字）
     public volatile float orbGain = 1.1f;     // 亮度增益（跟 Siri 波对齐）
+    public volatile float orbRim = 1.3f;      // 边缘辉光 = 圆点自身亮度 × 这个系数（跟波对齐，别把球边点亮）
     /** 波↔圆点的交叉淡化进度：0=纯 Siri 波，1=纯流体圆点（见 FloatingBallService.setAssistantState）。 */
     public volatile float orbMix = 0f;
 
@@ -168,7 +169,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
-        "uniform float uOrbRadius, uOrbOffset, uOrbGain;\n" +
+        "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
         "  float outside = length(max(cc,0.0)) - r;\n" +
@@ -322,8 +323,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
         "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
         "    waveEff += wglow*(0.25 + 0.6*below);\n" +
-        "    vec3 orbEff = pow(max(orbScenePx(cw, uHalf.x, uHalf.y, iTime), 0.0), vec3(1.0/1.2)) * uOrbGain;\n" +
-        "    wglow = mix(wglow, vec3(0.80,0.95,1.25), uOrbMix);\n" +
+        "    vec3 orbRaw = orbScenePx(cw, uHalf.x, uHalf.y, iTime);\n" +
+        "    vec3 orbEff = pow(max(orbRaw, 0.0), vec3(1.0/1.2)) * uOrbGain;\n" +
+        // 边缘辉光必须跟着光效自己的亮度：Siri 波用波的颜色（很暗），圆点若用固定满值
+        // (0.80,0.95,1.25)，球壳高光/赤道线/底缘会整体亮 5 倍 —— 「思考中球边缘太亮」的根源。
+        "    float orbLum = max(orbRaw.r, max(orbRaw.g, orbRaw.b)) * 1.2;\n" +
+        "    vec3 orbGlow = vec3(0.80,0.95,1.25) * (orbLum * uOrbRim);\n" +
+        "    wglow = mix(wglow, orbGlow, uOrbMix);\n" +
         "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis;\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
@@ -552,6 +558,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), orbRadius);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);

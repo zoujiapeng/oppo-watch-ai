@@ -327,6 +327,19 @@ public class WatchBridge {
         });
     }
 
+    /** 思考中圆点带起的边缘辉光：百分之一。 */
+    @JavascriptInterface
+    public int getOrbRim() {
+        return FloatingBallService.getOrbRim();
+    }
+
+    @JavascriptInterface
+    public void setOrbRim(final int pct) {
+        ui(new Runnable() {
+            public void run() { FloatingBallService.setOrbRim(pct); }
+        });
+    }
+
     // ─────────── DSH 语音助手（悬浮球 ↔ 本机 DSH）───────────
 
     @JavascriptInterface

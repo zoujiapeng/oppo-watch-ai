@@ -1,7 +1,7 @@
 // CLI：渲染「聆听中 / 思考中」球体对比图 + 增益统计。
 //   node run.mjs --bg synthetic|capture|dark [--out x.png] [--t 4] [--modes wave,old,new]
 import path from 'node:path';
-import { defaultUi, syntheticDesktop, loadBg, render, gainMetrics, saveFrame, stripFrames } from './render.mjs';
+import { defaultUi, syntheticDesktop, loadBg, render, gainMetrics, rimMetrics, saveFrame, stripFrames } from './render.mjs';
 import { DEFAULT_K } from './shader.mjs';
 
 const args = process.argv.slice(2);
@@ -27,7 +27,7 @@ const K_new = {
   orbFadeIn: num('fadein', DEFAULT_K.orbFadeIn),
   gain: num('gain', 1.0), intensity: num('intensity', DEFAULT_K.intensity),
   dotR: num('dotr', DEFAULT_K.dotR), ringR: num('ringr', DEFAULT_K.ringR),
-  fadeEnd: num('fadeend', DEFAULT_K.fadeEnd), glow: num('glow', DEFAULT_K.glow),
+  fadeEnd: num('fadeend', DEFAULT_K.fadeEnd), glow: num('glow', DEFAULT_K.glow), rimScale: num('rim', DEFAULT_K.rimScale),
 };
 
 const baseFrame = render(ui, bg, 'none', K_new);   // 无光效基准
@@ -37,7 +37,7 @@ for (const m of (arg('modes', 'wave,old,new')).split(',')) {
   const kind = (m === 'wave' || m === 'none' || m === 'blend' || m === 'dots') ? m : m;
   const f = render(ui, bg, kind, K);
   frames.push(f);
-  rows.push({ mode: m, ...gainMetrics(f, baseFrame, ui) });
+  rows.push({ mode: m, ...gainMetrics(f, baseFrame, ui), ...rimMetrics(f, baseFrame, ui) });
 }
 const strip = stripFrames(frames, 6);
 saveFrame(outPathResolved, strip);

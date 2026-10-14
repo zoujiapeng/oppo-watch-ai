@@ -143,7 +143,7 @@ export const DEFAULT_K = {
   falloffP: 1.35,
   fadeEnd: 0.56,
   colorBoost: 1.0 / 1.2,
-  glow: 1.0,
+  rimScale: 1.30,        // 圆点形态下，边缘辉光取「圆点自身亮度 × 这个系数」
   gain: 1.1,             // 与 Siri 波在黑区里的亮度对齐（原来 1.0 等于波的 4 倍亮）
 };
 
@@ -183,7 +183,11 @@ export function overlay(ny, cxx, cyy, t, b1, blackMask, topDarken, hx, hy, waveA
   const py = cyy - K.orbOffsetNy * hy;         // 环心相对球心下移
   let oc = orbScene(cxx * os.x, py * os.y, t, K);
   oc = vpow(oc, K.colorBoost);
-  const glow = vscale(V(0.80, 0.95, 1.25), K.glow);
+  // 边缘辉光必须跟着光效自己的亮度走：
+  // 波动形态用波的颜色 wglow（很暗，~0.25 倍），圆点形态若用固定满值 (0.8,0.95,1.25)，
+  // 球壳高光/赤道线/底缘会整体亮 5 倍 —— 这就是「思考中球边缘太亮、很突兀」的来源。
+  const dotLum = Math.max(oc.x, Math.max(oc.y, oc.z));
+  const glow = vscale(V(0.80, 0.95, 1.25), dotLum * K.rimScale);
   if (mode === 'dotsonly') return { col: oc, glow: glow };
   return { col: vscale(oc, K.gain * waveAmp * waveVis), glow: vscale(glow, waveAmp) };
 }
