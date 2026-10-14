@@ -223,6 +223,45 @@ public class FloatingBallService extends Service {
                 + " orbMix→" + s.orbMixTarget + " (0=关 1=Siri波 2=流体圆点)");
     }
 
+    // ── 球内文字「钉住」：用户点一下文字就保持住，再点一下解除干预 ──────────────
+    // 助手侧（SiriAssistant.quietTick）会看这个标志：钉住时不做安静清空。
+    private volatile boolean asstTextPinned = false;
+    private long lastTextTapAt = 0;
+    private final Runnable togglePin = new Runnable() {
+        @Override public void run() { setAssistantPinned(!asstTextPinned); }
+    };
+
+    /** 球内文字是否被用户钉住（助手据此暂停自动清空）。 */
+    public static boolean isAssistantTextPinned() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.asstTextPinned;
+    }
+
+    /** 钉住 / 解除钉住球内文字。 */
+    public static void setAssistantPinned(final boolean pinned) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(() -> s.applyAssistantPinned(pinned));
+    }
+
+    private void applyAssistantPinned(boolean pinned) {
+        if (asstTextPinned == pinned) return;
+        asstTextPinned = pinned;
+        main.removeCallbacks(togglePin);
+        if (siriText != null) {
+            // 钉住时显示一个图钉，解除后去掉；文字本体不变（siriStr 不动）
+            siriText.setText(displayTextOf(siriStr));
+        }
+        if (!pinned) armQuietFromBall();      // 解除干预 → 安静计时重新开始，该消失就消失
+        Log.i("FloatingBall", "assistant text " + (pinned ? "PINNED（不再自动清空）" : "unpinned（恢复自动清空）"));
+    }
+
+    /** 用户解除钉住后，让助手侧重新开始安静计时（该消散就消散）。 */
+    private void armQuietFromBall() {
+        SiriAssistant a = SiriAssistant.peek();
+        if (a != null) a.rearmQuietPublic();
+    }
+
     /** 球当前是否处于 Siri 形变模式（助手据此决定要不要先打开）。 */
     public static boolean isSiriOn() {
         FloatingBallService s = INSTANCE;
@@ -458,24 +497,167 @@ public class FloatingBallService extends Service {
         try {
             wm.addView(tv, siriParams);
             siriText = tv;
+            setupSiriTouchLayer();
         } catch (Exception e) {
             Log.w("FloatingBall", "add siri text failed: " + e);
         }
     }
 
+    // ── 文字上的「点击区」：一个透明层，压在文字窗之上 ────────────────────────
+    // 为什么不直接把文字 TextView 变可触摸：文字窗盖住球心一大块，一旦可触摸，
+    // 用户就没法从文字那块拖动球了（触摸全被文字吃掉）。所以改成：
+    //   · 文字层永远 NOT_TOUCHABLE（只管画）
+    //   · 上面盖一个同尺寸的透明层，只在「有文字」时存在
+    //   · 它只认「单击=钉住/解除、长按=解除」；一旦移动超过阈值就转成拖球，
+    //     用的是和球完全相同的夹取逻辑（moveBallDrag），所以手感一致
+    private volatile boolean siriTextShown = false;   // 文字当前是否在屏上（不依赖 getVisibility，测量期间布局还没更新）
+    private View siriTouch;
+    private WindowManager.LayoutParams siriTouchParams;
+    private float touchDownRawX, touchDownRawY;
+    private int touchStartX, touchStartY;
+    private boolean touchDragging;
+
+    private void setupSiriTouchLayer() {
+        if (siriTouch != null || wm == null) return;
+        View v = new View(this);
+        v.setBackgroundColor(0x00000000);      // 透明，但可触摸
+        v.setClickable(true);
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+        siriTouchParams = new WindowManager.LayoutParams(
+                2, 2, type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        siriTouchParams.gravity = Gravity.TOP | Gravity.START;
+        final android.view.GestureDetector gd = new android.view.GestureDetector(this,
+                new android.view.GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onDown(MotionEvent e) { return true; }
+            @Override public boolean onSingleTapConfirmed(MotionEvent e) {
+                main.removeCallbacks(togglePin);
+                main.postDelayed(togglePin, 60);
+                return true;
+            }
+            @Override public boolean onDoubleTap(MotionEvent e) {
+                main.removeCallbacks(togglePin);       // 双击不切换，避免误触
+                return true;
+            }
+            @Override public void onLongPress(MotionEvent e) {
+                main.removeCallbacks(togglePin);
+                if (asstTextPinned) setAssistantPinned(false);
+            }
+        });
+        v.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        touchDownRawX = e.getRawX(); touchDownRawY = e.getRawY();
+                        touchStartX = params.x; touchStartY = params.y;
+                        touchDragging = false;
+                        long now = System.currentTimeMillis();
+                        if (now - lastTextTapAt < 400) main.removeCallbacks(togglePin);
+                        lastTextTapAt = now;
+                        gd.onTouchEvent(e);
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float moved = Math.abs(e.getRawX() - touchDownRawX)
+                                + Math.abs(e.getRawY() - touchDownRawY);
+                        if (!touchDragging && moved > dp(10)) {
+                            touchDragging = true;
+                            main.removeCallbacks(togglePin);   // 拖了就不算点击
+                        }
+                        if (touchDragging) {
+                            moveBallDrag(touchStartX + (e.getRawX() - touchDownRawX),
+                                    touchStartY + (e.getRawY() - touchDownRawY));
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        gd.onTouchEvent(e);
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        touchDragging = false;
+                        gd.onTouchEvent(e);
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+        try {
+            wm.addView(v, siriTouchParams);
+            siriTouch = v;
+            Log.i("FloatingBall", "touch layer added");
+        } catch (Exception e) {
+            Log.w("FloatingBall", "add siri touch layer failed: " + e);
+        }
+    }
+
+    /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
+    private void moveBallDrag(float wantX, float wantY) {
+        params.x = Math.round(wantX);
+        params.y = Math.round(wantY);
+        if (siriEnabled) {
+            float base = winSize * 0.9f;
+            float m = Math.max(0.01f, renderer.svMaster);
+            float hx = base * renderer.svHalfX * m;
+            float hy = base * renderer.svHalfY * m;
+            float bcx = params.x + winW * 0.5f;
+            float bcy = params.y + winH * 0.5f;
+            bcx = Math.max(hx, Math.min(screenW - hx, bcx));
+            bcy = Math.max(hy, Math.min(screenH - hy, bcy));
+            params.x = Math.round(bcx - winW * 0.5f);
+            params.y = Math.round(bcy - winH * 0.5f);
+        } else {
+            params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
+            params.y = Math.max(-winSize / 4, Math.min(screenH - winSize * 3 / 4, params.y));
+        }
+        if (wm != null) wm.updateViewLayout(glView, params);
+        glView.post(winSync);
+    }
+
+    /** 触摸层跟随文字区域（有文字才有触摸层，没文字就收起，球的手势完全不受影响）。 */
+    private void syncSiriTouchLayer() {
+        if (siriTouch == null || siriTouchParams == null || wm == null) return;
+        boolean show = siriTextShown && siriStr != null && !siriStr.trim().isEmpty();
+        int wantVis = show ? View.VISIBLE : View.GONE;
+        if (siriTouch.getVisibility() != wantVis) {
+            siriTouch.setVisibility(wantVis);
+            Log.i("FloatingBall", "text touch layer " + (show ? "on" : "off"));
+        }
+        if (!show) return;
+        int w = Math.max(2, siriText.getMeasuredWidth());
+        int h = Math.max(2, siriText.getMeasuredHeight());
+        if (siriTouchParams.width == w && siriTouchParams.height == h
+                && siriTouchParams.x == siriParams.x && siriTouchParams.y == siriParams.y) return;
+        siriTouchParams.width = w;
+        siriTouchParams.height = h;
+        siriTouchParams.x = siriParams.x;
+        siriTouchParams.y = siriParams.y;
+        try { wm.updateViewLayout(siriTouch, siriTouchParams); } catch (Throwable ignored) { }
+    }
+
     /** 立刻把球内文字藏掉（不进布局）—— 球缩回最小形态时必须同一帧生效。 */
     private void hideSiriTextNow() {
         if (siriText == null) return;
+        siriTextShown = false;
+        // 钉住状态下文字必须一直留着（否则就点不到、解不开了）——
+        // 这时球缩回最小形态，但文字保持可见不动，直到用户再点一下文字
+        if (asstTextPinned && siriStr != null && !siriStr.isEmpty()) return;
         if (siriText.getVisibility() != View.GONE) {
             siriText.setVisibility(View.GONE);
             Log.i("FloatingBall", "siri text hidden (ball back to minimal)");
         }
+        syncSiriTouchLayer();             // 没字 → 触摸层收起，球的手势完全不受影响
     }
 
     /** 有字要显示时再放出来。 */
     private void showSiriTextNow() {
         if (siriText == null) return;
+        siriTextShown = true;
         if (siriText.getVisibility() != View.VISIBLE) siriText.setVisibility(View.VISIBLE);
+        syncSiriTouchLayer();             // 有字 → 触摸层铺在文字区域上
     }
 
     private void removeSiriText() {
@@ -485,10 +667,17 @@ public class FloatingBallService extends Service {
         siriText = null;
     }
 
+    /** 文字本体 +（钉住时）图钉标记 —— 排版/黑区仍按纯文字算，图钉只影响显示。 */
+    private String displayTextOf(String text) {
+        String t = text == null ? "" : text;
+        if (asstTextPinned && !t.isEmpty()) return t + "\u2009\uD83D\uDCCD";
+        return t;
+    }
+
     private void applySiriText(String text) {
         String prev = siriStr;
         siriStr = text == null ? "" : text;
-        if (siriText != null) siriText.setText(siriStr);
+        if (siriText != null) siriText.setText(displayTextOf(siriStr));
         measureSiriTargets(siriStr);
         boolean prevEmpty = prev == null || prev.trim().isEmpty();
         boolean nowEmpty = siriStr.trim().isEmpty();
@@ -709,6 +898,7 @@ public class FloatingBallService extends Service {
         float sysOffset = winYnow - params.y;
         siriParams.y = Math.round(ballTop + siriTextDy - Math.max(0f, topGap) - sysOffset);   // 字形顶相对球顶的偏移
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
+        syncSiriTouchLayer();
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
 

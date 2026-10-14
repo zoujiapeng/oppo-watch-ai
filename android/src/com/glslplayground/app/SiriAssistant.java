@@ -336,6 +336,7 @@ public final class SiriAssistant {
     /** 直接以文本提问（设置页 / 调试用，也可给键盘输入用）。 */
     public void ask(final String text) {
         if (transport == null) { toast("DSH 未连接"); return; }
+        FloatingBallService.setAssistantPinned(false);   // 新一轮开始：解除文字钉住
         setState(State.THINKING);
         lastAnswer = "";
         // 球里不显示这句提问：球内只允许出现「语音识别到的字」和 AI 的回答，
@@ -459,6 +460,8 @@ public final class SiriAssistant {
     private volatile long lastTextAt = android.os.SystemClock.uptimeMillis();
     private final Runnable quietTick = new Runnable() {
         @Override public void run() {
+            // 用户点过球内文字 = 钉住：文字保持不动，直到他再点一下文字解除干预
+            if (FloatingBallService.isAssistantTextPinned()) return;
             long quiet = android.os.SystemClock.uptimeMillis() - lastTextAt;
             // 打字机队列里还有没弹完的字 → 重排计时，别在半途把字清掉
             if (targetText.length() > shownText.length()) { armQuiet(); return; }
@@ -468,6 +471,13 @@ public final class SiriAssistant {
             if (state == State.ANSWERING || state == State.THINKING) setState(State.IDLE);
         }
     };
+
+    /** 供球侧调用（用户解除钉住后重新开始安静计时）。 */
+    public void rearmQuietPublic() {
+        main.post(new Runnable() {
+            @Override public void run() { armQuiet(); }
+        });
+    }
 
     /** 重排安静计时（每次有字进来都调一次）。 */
     private void armQuiet() {
