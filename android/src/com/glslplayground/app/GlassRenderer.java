@@ -39,7 +39,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     private OnSurfaceReady readyCb;
 
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
-    public float master = 0.5f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸：0.5 = 原来默认(1.0)的一半
+    public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
     public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
     public float blur = 0.3f;

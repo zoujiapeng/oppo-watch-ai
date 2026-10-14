@@ -159,8 +159,10 @@
 
   <div class="grp gl" id="grpGlassShape" style="display:none">
     <div class="gh">液态玻璃 · 形状</div>
-    <div class="row"><label>整体 scale</label><span class="v" id="vSC">1.00</span></div>
-    <input type="range" id="SC" min="30" max="160" value="100">
+    <div class="row"><label>球体大小（整体 scale）</label><span class="v" id="vSC">1.00</span></div>
+    <input type="range" id="SC" min="20" max="200" value="100">
+    <div class="muted" style="margin:-6px 0 10px">球体整体大小：1.00 = 原始大小，0.50 = 一半。
+      实时生效、自动保存。说话/回答时球会按文字大小变形，但仍以这个倍率为基准。</div>
     <div class="row"><label>整体 y 位置</label><span class="v" id="vPY">0.50</span></div>
     <input type="range" id="PY" min="8" max="92" value="50">
     <div class="row"><label>整体 x 位置</label><span class="v" id="vPX">0.50</span></div>

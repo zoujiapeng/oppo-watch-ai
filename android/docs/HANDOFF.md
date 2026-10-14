@@ -66,6 +66,10 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 - **黑区下沿按文字实际高度算**，不按行数：
   `tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5)`，
   滑块「文字与 Siri 波的安全距离」= `waveGap`（pref `float_siri_wavegap`，默认 100 → 0.10）。
+- **球体大小**：设置页「液态玻璃 · 形状 → 球体大小（整体 scale）」= `master`（20%~200%，1.00 = 原始大小），
+  实时生效、随 `float_params` 一起持久化。
+  注意：Siri 模式（聆听/思考/回答）下球体几何走 `svHalf*/tMaster`，`master` 不参与 ——
+  所以 `minHalfX/minHalfY`（空球基准比例）刻意**不乘** master，否则滑块一动就双重缩放。
 - **球高封顶屏高 70%**，封顶后按能放下的行数截断并加省略号；`measureSiriTargets` 还会再校验
   measured 高度、超了就继续减行数（兜底，防文字糊到球外）。
 - **球内文字长度封顶 600 字**（`SiriAssistant.BALL_TEXT_MAX`，超了只留最后一段）＋
