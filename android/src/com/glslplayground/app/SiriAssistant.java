@@ -438,24 +438,41 @@ public final class SiriAssistant {
     private void setState(State s) {
         state = s;
         FloatingBallService.setAssistantState(s.name());
-        // 回到空闲后过一会儿把球内文字清掉 —— 球恢复成原本那颗水晶球，不留字
-        main.removeCallbacks(idleClear);
-        if (s == State.IDLE || s == State.OFF) main.postDelayed(idleClear, IDLE_CLEAR_MS);
+        // 文字的清空由「安静计时」负责（见 quietTick）：不管是否收到 turn/end，
+        // 只要球内文字停了一会儿没变，就自己消散 —— 球恢复成原本那颗水晶球。
+        armQuiet();
     }
 
     /**
-     * 收尾后多久清空球内文字。
-     * 「球变回原本状态」和「文字消失」是同一件事：等最后一个字弹完，
-     * 再停 IDLE_CLEAR_MS，然后清空 —— 球随即收缩回原本那颗水晶球。
+     * 回答结束后，球内文字还能留多久。
+     * 「球变回原本状态」和「文字消失」是同一件事：打字机弹完最后一个字，
+     * 再静 IDLE_CLEAR_MS 没有新字进来，就把文字清掉、状态回 IDLE，球随即收缩回原本那颗水晶球。
+     *
+     * 为什么不能只等 turn/end：镜像跟随的那条会话可能是一轮跑很久的长任务
+     * （几十个 step、几分钟都不 end），只认 turn/end 的话文字会一直挂在那儿 ——
+     * 用户看到的就是「回答完变回球了，字还留着，怪怪的」。
      */
     private static final long IDLE_CLEAR_MS = 1500;
-    private final Runnable idleClear = new Runnable() {
+
+    /** 最近一次球内文字有变化的时间（打字机每弹一个字都会刷新）。 */
+    private volatile long lastTextAt = android.os.SystemClock.uptimeMillis();
+    private final Runnable quietTick = new Runnable() {
         @Override public void run() {
-            if (state != State.IDLE && state != State.OFF) return;
-            if (typing) { main.postDelayed(this, 200); return; }   // 等打字机把最后一个字弹完
-            sayNow("");                                            // 文字跟着球一起消失
+            long quiet = android.os.SystemClock.uptimeMillis() - lastTextAt;
+            // 打字机队列里还有没弹完的字 → 重排计时，别在半途把字清掉
+            if (targetText.length() > shownText.length()) { armQuiet(); return; }
+            if (quiet < IDLE_CLEAR_MS) { main.postDelayed(this, 200); return; }
+            if (shownText != null && !shownText.isEmpty()) sayNow("");   // 文字消散，球自己缩回原样
+            // 不管有没有字：球不该一直挂着「回答中/思考中」的光效
+            if (state == State.ANSWERING || state == State.THINKING) setState(State.IDLE);
         }
     };
+
+    /** 重排安静计时（每次有字进来都调一次）。 */
+    private void armQuiet() {
+        main.removeCallbacks(quietTick);
+        main.postDelayed(quietTick, IDLE_CLEAR_MS + 100);
+    }
 
     // ── 球内文字：一个字一个字弹出来 ────────────────────────────────────
     // 模型是按 token 吐的（一次几个字），这里再按固定节奏逐字揭示，
@@ -476,6 +493,7 @@ public final class SiriAssistant {
             int step = lag > 80 ? 4 : lag > 30 ? 2 : 1;
             shownText = targetText.substring(0, Math.min(target, shown + step));
             FloatingBallService.setSiriText(shownText);
+            lastTextAt = android.os.SystemClock.uptimeMillis();   // 有字在弹 → 重置安静计时
             main.postDelayed(this, 40);
         }
     };
@@ -491,7 +509,9 @@ public final class SiriAssistant {
         stopTyping();
         targetText = t;
         shownText = t;
+        lastTextAt = android.os.SystemClock.uptimeMillis();
         FloatingBallService.setSiriText(t);
+        armQuiet();
     }
 
     /** 逐字揭示（回答用）；target 可以在揭示过程中不断变长。 */
@@ -502,6 +522,8 @@ public final class SiriAssistant {
             stopTyping();
         }
         targetText = t;
+        lastTextAt = android.os.SystemClock.uptimeMillis();   // 新字到了 → 重置安静计时
+        armQuiet();
         if (!typing && shownText.length() < targetText.length()) {
             typing = true;
             main.post(typist);
