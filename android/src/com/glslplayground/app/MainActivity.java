@@ -366,14 +366,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    // 每多一行黑区下移量（百分之一单位，35=0.35）
+    // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）；
+    // 黑区下沿本身由文字实际高度决定，不再按行数下移。
     public int getSiriBlackStep() {
-        return prefs().getInt("float_siri_black", 35);
+        return prefs().getInt("float_siri_wavegap", 100);
     }
 
     public void setSiriBlackStep(int v) {
-        v = Math.max(0, Math.min(300, v));
-        prefs().edit().putInt("float_siri_black", v).apply();
+        v = Math.max(0, Math.min(450, v));
+        prefs().edit().putInt("float_siri_wavegap", v).apply();
         if (FloatingBallService.running) {
             FloatingBallService.setSiriBlackStep(v);
         }

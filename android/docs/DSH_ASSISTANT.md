@@ -143,3 +143,39 @@ pm install -r glsl-playground.apk
 `docs/dsh-external-client-spec.md`（916 行）是这套接口的完整逆向记录：WebSocket 流式协议、
 每个 endpoint 的字节级样例、鉴权与签名 cookie 的生成、以及 `dsh sdk` / `dsh acp` 两条备选路径的对比。
 `docs/probes/` 下是当时跑通的 Node 探针脚本。
+
+## 球内文字：只留必要的，空闲就清空
+
+- **不写任何占位字**：没有「聆听中…／识别中…／思考中…」，球里只可能出现
+  ①语音识别到的那句话 ②AI 的回答。设置页里手动输入的文字属显式操作，照旧。
+- **空闲 8 秒后自动清空**：回答打完、状态回到 IDLE 之后再留 8 秒给人看完，
+  然后球恢复成原本那颗水晶球（`SiriAssistant.idleClear`）。长按取消则立即清空。
+- 想彻底不要浏览器聊天的内容进球，把设置页「镜像当前会话」关掉即可 ——
+  那样球只在语音交互时出字。
+
+## 黑区下沿：按文字实际高度算，不再按行数
+
+着色器里黑区下沿 `b1 = uBlack1 - blackOffset`（ny 以球顶为 +1、球底为 -1）。
+旧实现用 `blackOffset = (行数-1) × 每行下移` —— 字号一小，同样行数装下的字少一半，
+黑区就对不上了。现在直接由文字像素高度反推：
+
+```java
+float textTopPx     = max(0, siriTextDy) + dp(4);           // 字形顶相对球顶
+float textBottomNy  = 1f - (textTopPx + th) / hypx;         // 文字下沿的 ny
+float waveGap       = siriBlackStep / 1000f;                // 「文字与 Siri 波的安全距离」
+tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5);
+```
+
+于是 `b1 = 文字下沿 - 安全距离`：黑区永远刚好盖住文字，再往下留出的那道空隙就是
+给 Siri 波的。**与字号、行数、球体大小全部无关** —— 实测两种极端都对：
+10sp 两行短句（黑区不动，b1 仍在赤道）；10sp 约 28 行长文（黑区下移到 ny≈-0.85，
+文字底 -0.62，空隙 0.23）。
+
+设置页原来的「每多一行黑区下移」滑块改名为「文字与 Siri 波的安全距离」
+（默认 0.10，范围 0~0.45），语义变了，用的也是新的 pref key `float_siri_wavegap`。
+
+## 球体截图（调试）
+
+设置页「DSH 语音助手」里有个「保存球体截图」：用 `PixelCopy` 只抓悬浮窗那一帧
+（球 + 24dp 边距，不含桌面内容），存到 App 内部 `files/ball-capture.png`，
+用来对着调黑区 / 文字 / 波的位置。

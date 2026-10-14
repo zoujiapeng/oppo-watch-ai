@@ -304,10 +304,12 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (text == null || text.trim().isEmpty()) {
                             toast("没听清，再说一次");
-                            say("");
+                            sayNow("");
                             setState(State.IDLE);
                             return;
                         }
+                        // 先把你说的那句显示在球里，回答到了再逐字替换
+                        sayNow(text.trim());
                         ask(text.trim());
                     }
                 });
@@ -329,8 +331,8 @@ public final class SiriAssistant {
         if (transport == null) { toast("DSH 未连接"); return; }
         setState(State.THINKING);
         lastAnswer = "";
-        // 思考期间球里显示「你问的这句」，回答一到就逐字替换掉它
-        sayNow(text);
+        // 球里不显示这句提问：球内只允许出现「语音识别到的字」和 AI 的回答，
+        // 别的字（思考中…、提问原文、状态词）一律不写。
         askInFlight = true;          // 这一轮由本 App 自己收流，镜像先让路，避免重复打字
         transport.ask(text, new Stream() {
             @Override public void onDelta(final String soFar) {
@@ -430,7 +432,18 @@ public final class SiriAssistant {
     private void setState(State s) {
         state = s;
         FloatingBallService.setAssistantState(s.name());
+        // 回到空闲后过一会儿把球内文字清掉 —— 球恢复成原本那颗水晶球，不留字
+        main.removeCallbacks(idleClear);
+        if (s == State.IDLE || s == State.OFF) main.postDelayed(idleClear, IDLE_CLEAR_MS);
     }
+
+    /** 空闲多久之后清空球内文字（留一点时间让人看完回答）。 */
+    private static final long IDLE_CLEAR_MS = 8000;
+    private final Runnable idleClear = new Runnable() {
+        @Override public void run() {
+            if (state == State.IDLE || state == State.OFF) sayNow("");
+        }
+    };
 
     // ── 球内文字：一个字一个字弹出来 ────────────────────────────────────
     // 模型是按 token 吐的（一次几个字），这里再按固定节奏逐字揭示，

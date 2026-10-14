@@ -394,4 +394,10 @@ public class WatchBridge {
     public String getMirrorStatus() {
         return SiriAssistant.get(act).mirrorStatus();
     }
+
+    /** 把球体这一帧存成 PNG（调试用），返回文件路径。 */
+    @JavascriptInterface
+    public String captureBall() {
+        return FloatingBallService.captureBallPng();
+    }
 }

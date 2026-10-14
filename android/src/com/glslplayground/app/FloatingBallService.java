@@ -172,6 +172,51 @@ public class FloatingBallService extends Service {
         return s == null ? "" : (s.siriStr == null ? "" : s.siriStr);
     }
 
+    /**
+     * 调试用：把球体这一帧存成 PNG，返回文件路径。
+     * 只截悬浮窗（= 球 + 24dp 边距），不含桌面内容，方便对着调黑区/文字/波的位置。
+     */
+    public static String captureBallPng() {
+        FloatingBallService s = INSTANCE;
+        if (s == null || s.glView == null) return "";
+        String path = "";
+        try {
+            // 写内部私有目录：Termux 侧看不到 /storage/emulated/0，内部目录 root 可直接读
+            java.io.File dir = s.getFilesDir();
+            path = new java.io.File(dir, "ball-capture.png").getAbsolutePath();
+            final String out = path;
+            final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    Math.max(1, s.glView.getWidth()), Math.max(1, s.glView.getHeight()),
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            android.view.PixelCopy.request(s.glView, bmp,
+                    new android.view.PixelCopy.OnPixelCopyFinishedListener() {
+                        @Override public void onPixelCopyFinished(int result) {
+                            if (result != android.view.PixelCopy.SUCCESS) {
+                                Log.w("FloatingBall", "pixel copy result=" + result);
+                                bmp.recycle();
+                                return;
+                            }
+                            java.io.OutputStream os = null;
+                            try {
+                                os = new java.io.FileOutputStream(out);
+                                bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os);
+                                os.flush();
+                                Log.i("FloatingBall", "ball capture -> " + out);
+                            } catch (Throwable t) {
+                                Log.w("FloatingBall", "ball capture write failed: " + t);
+                            } finally {
+                                try { if (os != null) os.close(); } catch (Throwable ignored) {}
+                                bmp.recycle();
+                            }
+                        }
+                    }, new android.os.Handler(android.os.Looper.getMainLooper()));
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "ball capture failed: " + t);
+            return "";
+        }
+        return path;
+    }
+
     /** 助手开始工作前确保球在 Siri 形变模式下（否则文字没有地方显示）。 */
     public static void ensureSiriForAssistant() {
         FloatingBallService s = INSTANCE;
@@ -195,7 +240,7 @@ public class FloatingBallService extends Service {
     private long siriTickLast = 0;
     private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
-    private volatile int siriBlackStep = 35; // 每多一行黑区下移量（百分之一单位，35=0.35）
+    private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
 
@@ -237,7 +282,7 @@ public class FloatingBallService extends Service {
     }
 
     private void applySiriBlackStep(int v) {
-        siriBlackStep = Math.max(0, Math.min(300, v));
+        siriBlackStep = Math.max(0, Math.min(450, v));
         if (siriEnabled) measureSiriTargets(siriStr);
     }
 
@@ -246,7 +291,7 @@ public class FloatingBallService extends Service {
         if (en) {
             siriTextDy = prefs().getInt("float_siri_dy", 10);
             siriTextPx = dp(prefs().getInt("float_siri_sp", 34));
-            siriBlackStep = prefs().getInt("float_siri_black", 35);
+            siriBlackStep = prefs().getInt("float_siri_wavegap", 100);
             // 记录“原来的水晶球”尺寸，作为最短形态
             if (renderer != null) {
                 if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
@@ -352,8 +397,7 @@ public class FloatingBallService extends Service {
                     .build();
             lines = sl.getLineCount();
         }
-        // 行数越多，黑区整体越往下（黑区起点/终点同步下移）
-        tBlack = Math.max(0, lines - 1) * (siriBlackStep / 100f);
+        // 黑区下移量不在这里算：它必须由「文字实际有多高」决定，见下面 hypx 定下来之后。
         // 第 3 行起内边距改大（大圆角方形，留白更足）
         float padX = lines >= 3 ? dp(58) : dp(42);
         float padY = lines >= 3 ? dp(44) : dp(34);
@@ -412,6 +456,18 @@ public class FloatingBallService extends Service {
             tCorner = minCorner;
         }
         updateSiriWindow(hxpx, hypx);
+
+        // ── 黑区下移量：按「文字到底有多高」算，而不是按行数 ───────────────
+        // 着色器里黑区下沿 b1 = uBlack1 - blackOffset，ny 以球顶为 +1、球底为 -1。
+        // 文字从球顶往下铺，占 [1 - textTop/hypx, 1 - (textTop+th)/hypx]；
+        // 只要把 b1 放在文字下沿再往下一个「安全距离」，文字就永远待在黑区里、
+        // 不会碰到黑区下方那道 Siri 波 —— 而且和字号无关（字号变小、行数变多也照样对）。
+        float textTopPx = Math.max(0f, siriTextDy) + dp(4);
+        float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
+        float waveGap = Math.max(0f, Math.min(0.45f, siriBlackStep / 1000f));
+        float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
+        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - waveGap)));
+
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
         tMaster = 1f;
