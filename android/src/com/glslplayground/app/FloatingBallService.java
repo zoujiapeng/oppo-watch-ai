@@ -463,6 +463,21 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 立刻把球内文字藏掉（不进布局）—— 球缩回最小形态时必须同一帧生效。 */
+    private void hideSiriTextNow() {
+        if (siriText == null) return;
+        if (siriText.getVisibility() != View.GONE) {
+            siriText.setVisibility(View.GONE);
+            Log.i("FloatingBall", "siri text hidden (ball back to minimal)");
+        }
+    }
+
+    /** 有字要显示时再放出来。 */
+    private void showSiriTextNow() {
+        if (siriText == null) return;
+        if (siriText.getVisibility() != View.VISIBLE) siriText.setVisibility(View.VISIBLE);
+    }
+
     private void removeSiriText() {
         if (siriText != null && wm != null) {
             try { wm.removeView(siriText); } catch (Exception ignored) { }
@@ -499,6 +514,11 @@ public class FloatingBallService extends Service {
             tBlack = 0f;
             float b0 = winSize * 0.9f;
             updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+            // 球要缩回最小形态了 —— 文字必须「同一时刻」消失。
+            // 只把文字设成空串是不够的：窗口/测量的更新是异步的，球收缩的这半秒里
+            // 旧文字还留在屏幕上，看起来就是「球变小了、文字却飞出球外」。
+            // 直接把文字视图藏掉（GONE 立即生效、不参与布局），球一变小就没有字。
+            hideSiriTextNow();
             return;
         }
         if (siriTextPx <= 0) siriTextPx = dp(34);
@@ -553,6 +573,7 @@ public class FloatingBallService extends Service {
             }
             tw = siriText.getMeasuredWidth();
             th = siriText.getMeasuredHeight();
+            showSiriTextNow();          // 有字 → 确保文字层可见（之前可能被藏起来过）
             if (th > maxHalfText * 2f + 1f) {
                 Log.w("FloatingBall", "siri text still too tall: h=" + th
                         + " limit=" + (maxHalfText * 2f) + " lines=" + maxLines);
@@ -657,6 +678,7 @@ public class FloatingBallService extends Service {
 
     private void updateSiriTextPos() {
         if (siriText == null || siriParams == null || wm == null) return;
+        if (siriText.getVisibility() != View.VISIBLE) return;   // 已藏起来（球回最小形态）就别再摆位置/改透明度
         float winXnow = (renderer != null) ? renderer.winX : params.x;
         float winYnow = (renderer != null) ? renderer.winY : params.y;
         float base = winSize * 0.9f;
