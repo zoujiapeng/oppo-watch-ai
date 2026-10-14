@@ -42,8 +42,10 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 
 - **手势**：双击=开始说话；再双击=结束并发送；长按=取消；拖动=只拖动；**单击不响应**。
 - **球内文字只有两种**：语音识别到的那句话、AI 的回答。没有「聆听中/识别中/思考中」占位字。
-- **回答结束、球变回原本状态时文字一起消失**：等打字机弹完最后一个字 → 停 1.5s → 清空
-  （`SiriAssistant.IDLE_CLEAR_MS`，想更长改这个常量）。
+- **回答结束、球变回原本状态时文字一起消失**：等打字机弹完最后一个字 → 安静 1.5s → 清空并回 IDLE
+  （`SiriAssistant.IDLE_CLEAR_MS` + `quietTick`）。
+  **注意清空不看 turn/end**：镜像跟的那条会话可能是一轮跑很久的长任务（几十个 step、几分钟不 end），
+  只认 turn/end 的话文字会一直挂在球里 —— 现在只要「没新字进来」就自己消散。
 - **光效**：只有 THINKING 是流体圆点；LISTENING/TRANSCRIBING 是 Siri 波；
   ANSWERING/IDLE 还原用户自己的波形设定（`FloatingBallService.setAssistantState`）。
   圆点与波**共用同一套坐标框架**（屏幕像素 / `uOrbRadius` * 0.17，x/y 同倍率），
