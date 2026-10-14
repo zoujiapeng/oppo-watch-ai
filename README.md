@@ -22,7 +22,7 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 
 ## 📱 安卓悬浮水晶球 = 本机 DSH 的前端
 
-这个仓库里还有一个**安卓端**（分支 `feat/dsh-liquid-glass-siri`）：一颗浮在桌面上的液态玻璃水晶球，
+这个仓库里还有一个**安卓端**（已合入 `main`）：一颗浮在桌面上的液态玻璃水晶球，
 **双击说话 → 本机 DSH 转写并回答 → 回答逐字打进这颗球里**（球随文字变形；聆听时是 Siri 波、
 思考中是流体圆点、回答完文字消散、球缩回原本那颗水晶球）。DSH 侧一行没改，
 走的是它已经在给浏览器用的 HTTP / WebSocket 接口。
@@ -38,7 +38,7 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 
 ```bash
 curl -L -o glsl-playground.apk \
-  https://github.com/zoujiapeng/oppo-watch-ai/raw/feat/dsh-liquid-glass-siri/glsl-playground.apk
+  https://github.com/zoujiapeng/oppo-watch-ai/raw/main/glsl-playground.apk
 pm install -r glsl-playground.apk
 # 装完进 App →「⚙ 设置」→ 打开「悬浮于桌面」，球才会出现
 # 注意：这个开关不持久 —— 重启手机 / 重装 / 被系统杀掉之后都要再点一次

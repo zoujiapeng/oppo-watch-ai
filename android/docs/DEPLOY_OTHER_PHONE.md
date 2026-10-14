@@ -4,7 +4,8 @@
 > 这份文档只讲「怎么在陌生机器上一次装成」，原理和内部实现看
 > [`DSH_ASSISTANT.md`](DSH_ASSISTANT.md) / [`HANDOFF.md`](HANDOFF.md)。
 >
-> 仓库：`https://github.com/zoujiapeng/oppo-watch-ai`，工作分支 `feat/dsh-liquid-glass-siri`。
+> 仓库：`https://github.com/zoujiapeng/oppo-watch-ai`（`main` 已含全部功能）。
+> 下面的链接与 `git clone -b` 都写成 `main`；若你在自己的分支上改过代码，把 `main` 换成你的分支名即可。
 
 ---
 
@@ -72,8 +73,9 @@ DSH 就是 DeepSeek Harness，正常按它的方式装到 Termux 里、能 `dsh 
 
 ```bash
 cd ~
+# 直链（main 分支）；若在别的分支上，把 main 换成你的分支名
 curl -L -o glsl-playground.apk \
-  https://github.com/zoujiapeng/oppo-watch-ai/raw/feat/dsh-liquid-glass-siri/glsl-playground.apk
+  https://github.com/zoujiapeng/oppo-watch-ai/raw/main/glsl-playground.apk
 # 直链已实测可用：HTTP 200，906247 字节（约 885KB）
 pm install -r glsl-playground.apk
 ```
@@ -86,7 +88,7 @@ pm install -r glsl-playground.apk
 ```bash
 cd ~
 pkg install git
-git clone -b feat/dsh-liquid-glass-siri https://github.com/zoujiapeng/oppo-watch-ai.git
+git clone https://github.com/zoujiapeng/oppo-watch-ai.git     # 默认就是 main
 cd oppo-watch-ai
 
 # 构建依赖（全新 Termux 一个都没有，需要联网装）
