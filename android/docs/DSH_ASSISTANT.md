@@ -1,5 +1,7 @@
 # 水晶球 × DSH 语音助手（安卓端）
 
+> 换机器部署看 [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)；这份讲原理与实现。
+
 把 **这台手机上的悬浮水晶球** 变成 DeepSeek Harness 的前端：点一下球就能说话，
 AI 的回答**以 Siri 模式的文字写回球里**（球按你那套 `measureSiriTargets` 的几何随文字变形）。
 DSH 本身不动一行代码 —— 只用它已经在给浏览器用的那套 HTTP/JSON-RPC 接口。

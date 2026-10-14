@@ -2,6 +2,10 @@
 
 > 这份是给"下一个会话的自己/别人"看的：现状、关键决定、怎么构建验证、还没做完的事。
 > 仓库：`~/oppo-watch-ai`（GitHub `zoujiapeng/oppo-watch-ai`），工作分支 `feat/dsh-liquid-glass-siri`。
+>
+> 🚚 **要在另一台手机上安装部署**（而不是改代码）→ 直接看
+> [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
+> 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
 ## 一句话现状
 
