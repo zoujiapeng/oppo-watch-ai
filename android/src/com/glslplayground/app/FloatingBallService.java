@@ -2368,6 +2368,43 @@ public class FloatingBallService extends Service {
         return f;
     }
 
+    /**
+     * 把**整颗球**（含球内文字）夹在屏幕内 —— 用户要求「文字永远被包裹在近方形玻璃内、不能超出屏幕」。
+     *
+     * 为什么需要单独做一次：`updateSiriWindow()` 只保住"球心不动"，球长高长宽之后就会顶出屏幕
+     * （球心可以贴到屏幕边缘，一半球在屏幕外），文字层跟着一起出界。
+     * 这里按**当前几何**算玻璃轮廓的屏幕矩形（球心 + 半宽/半高），平移窗口把它夹回屏幕内。
+     * 位置计算与拖动夹取同源：玻璃窗口中心 = params + winW/2、winH/2。
+     * 留 sysOffset 是因为 Siri 模式下系统会给窗口加一个顶部 inset（实测 ≈96px 状态栏），
+     * 不补上的话"夹到顶"实际会停在状态栏下面一点/或反过来被推出去。
+     */
+    private void clampBallOnScreen() {
+        if (wm == null || glView == null || renderer == null) return;
+        float base = winSize * 0.9f;
+        if (base <= 0f) return;
+        float m = Math.max(0.01f, siriEnabled ? renderer.svMaster : 1f);
+        float halfW, halfH;
+        if (siriEnabled) {
+            halfW = base * renderer.svHalfX * m;
+            halfH = base * renderer.svHalfY * m;
+        } else {
+            halfW = halfH = base * 0.5f;               // 常态是一颗圆球
+        }
+        float sysOffset = renderer.winY - params.y;    // 请求 y → 实际 y 的差值（顶部 inset）
+        float cx = params.x + winW * 0.5f;
+        float cy = params.y + winH * 0.5f + sysOffset;
+        float newCx = Math.max(halfW, Math.min(screenW - halfW, cx));
+        float newCy = Math.max(halfH, Math.min(screenH - halfH, cy));
+        if (Math.abs(newCx - cx) < 1f && Math.abs(newCy - cy) < 1f) return;
+        params.x = Math.round(newCx - winW * 0.5f);
+        params.y = Math.round(newCy - winH * 0.5f - sysOffset);
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        glView.post(winSync);
+        Log.i("FloatingBall", "clampBallOnScreen: 球心 (" + Math.round(cx) + "," + Math.round(cy)
+                + ") → (" + Math.round(newCx) + "," + Math.round(newCy) + ")"
+                + " 半宽/半高=" + Math.round(halfW) + "/" + Math.round(halfH));
+    }
+
     /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
     private void moveBallDrag(float wantX, float wantY) {
         params.x = Math.round(wantX);
@@ -2392,6 +2429,7 @@ public class FloatingBallService extends Service {
         }
         if (wm != null) wm.updateViewLayout(glView, params);
         glView.post(winSync);
+        clampBallOnScreen();          // 拖到屏幕边缘时把整颗球（含文字）夹回屏内
     }
 
     /** 触摸层跟随文字区域（有文字才有触摸层，没文字就收起，球的手势完全不受影响）。 */
@@ -2781,6 +2819,7 @@ public class FloatingBallService extends Service {
         params.y = Math.round(bcy - H * 0.5f);
         try { wm.updateViewLayout(glView, params); } catch (Exception ignored) { }
         glView.post(winSync);
+        clampBallOnScreen();          // 文字变长 → 球变大 → 可能要往屏内挪，否则文字出界
     }
 
     private void updateSiriTextPos() {
@@ -2793,12 +2832,15 @@ public class FloatingBallService extends Service {
         float sx = winXnow + winW * 0.5f;
         float sy = winYnow + winH * 0.5f;
         float hypx = base * aHalfY * aMaster;     // 当前球半高
-        float ballTop = sy - hypx;
-        int textMaxW = siriTextMaxW();
-        siriText.setMaxWidth(textMaxW);
+        // 宽度上限 = 当前球的实际内宽（每帧按当前几何算），而不是"文字最长时的球宽"。
+        // 坑：只在文字变化时量一次的话，球后来变小了、文字层还留着旧的大宽度 → 文字横向溢出玻璃
+        //（实测球 658 宽、文字层 697 宽，两侧各冒出去 19px）。
+        // 这里**不调用 setMaxWidth**（那会污染球的测量结果），只用 AT_MOST 量一次用于排版/居中。
+        float ballHalfW = base * aHalfX * aMaster;
+        int textMaxW = Math.max(1, Math.round(2f * ballHalfW - 2f * dp(28)));
         siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int tw = siriText.getMeasuredWidth();
+        int tw = Math.min(siriText.getMeasuredWidth(), textMaxW);
         // 补偿字体上方留白(ascent 空白)，让首行字形真正贴近球顶，视觉间距 ≈ 5dp
         float topGap = 0f;
         try {
@@ -2810,11 +2852,33 @@ public class FloatingBallService extends Service {
             tp.getTextBounds(first, 0, first.length(), rb);
             topGap = -fm.ascent + rb.top;      // TextView 顶 → 首行字形顶
         } catch (Throwable ignored) { }
+        float ballHalfH = base * aHalfY * aMaster;
+        float ballTop = sy - ballHalfH;
+        float ballBottom = sy + ballHalfH;
         siriParams.x = Math.round(sx - tw / 2f);
         // 系统会给悬浮窗加一个顶部 inset 偏移（=球窗口实际 top − 请求 y，≈状态栏高度）；
         // 必须减掉它，否则文字会被整体推低约一个状态栏的高度。
         float sysOffset = winYnow - params.y;
         siriParams.y = Math.round(ballTop + siriTextDy - Math.max(0f, topGap) - sysOffset);   // 字形顶相对球顶的偏移
+        // 兜底夹取：文字层的实际屏幕位置也要在屏内（x 留一点边距，y 夹在屏幕高度内）
+        int[] tloc = new int[2];
+        siriText.getLocationOnScreen(tloc);
+        int tdx = tloc[0] - siriParams.x;          // 请求 x → 实际 x 的差值（系统 inset）
+        int tdy = tloc[1] - siriParams.y;
+        int realX = siriParams.x + tdx;
+        int realY = siriParams.y + tdy;
+        int maxX = Math.max(0, screenW - tw);
+        int clampedX = Math.max(0, Math.min(maxX, realX));
+        int clampedY = Math.max(0, Math.min(Math.max(0, screenH - siriText.getMeasuredHeight()), realY));
+        if (clampedX != realX) siriParams.x += clampedX - realX;
+        if (clampedY != realY) siriParams.y += clampedY - realY;
+        // 垂直方向也要在玻璃轮廓内：文字块顶不低于球顶、底不高于球底（否则就是"文字跑出玻璃"）
+        int th = siriText.getMeasuredHeight();
+        int glassTop = Math.round(ballTop) + 2;
+        int glassBottom = Math.round(ballBottom) - 2;
+        int wantY = siriParams.y + tdy;                       // 当前实际屏幕 y
+        if (wantY < glassTop) siriParams.y += glassTop - wantY;
+        else if (wantY + th > glassBottom) siriParams.y += (glassBottom - th) - wantY;
         try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
         syncSiriTouchLayer();
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
@@ -3064,6 +3128,7 @@ public class FloatingBallService extends Service {
         renderer.winX = loc[0];
         renderer.winY = loc[1];
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
+        clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
         if (!renderer.selfExcluded && applySkipScreenshot()) {
             renderer.selfExcluded = true;
