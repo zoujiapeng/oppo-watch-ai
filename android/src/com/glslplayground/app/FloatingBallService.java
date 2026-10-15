@@ -216,6 +216,40 @@ public class FloatingBallService extends Service {
         }
     }
 
+    // ── 独立渲染节拍 ──────────────────────────────────────────────────────
+    // 为什么不能只靠主线程的 postDelayed：方形态里那个**大字块**（上千像素高、几十行）
+    // 每次重排/重绘都在主线程上，一打字就把主线程占住，renderTick 的 33ms 节拍被拖到 ~50ms
+    // —— 实测 GPU 每帧只要 12~17ms，卡的是"节拍"不是"渲染"。
+    // GLSurfaceView.requestRender() 本身是线程安全的，所以这里用一个专用线程按目标帧率敲门，
+    // 主线程照旧只管几何/文字/窗口；这样即使主线程忙，球的动画也是稳的。
+    private volatile boolean renderDriving = false;
+    private Thread renderDriver;
+
+    private void startRenderDriver() {
+        if (renderDriving) return;
+        renderDriving = true;
+        renderDriver = new Thread(new Runnable() {
+            @Override public void run() {
+                while (renderDriving) {
+                    GLSurfaceView v = glView;
+                    try { if (v != null) v.requestRender(); } catch (Throwable ignored) { }
+                    try { Thread.sleep(Math.max(1, 1000 / Math.max(1, targetFps))); }
+                    catch (InterruptedException e) { return; }
+                }
+            }
+        }, "ball-render-driver");
+        renderDriver.setDaemon(true);
+        renderDriver.start();
+        Log.i("FloatingBall", "render driver 启动（独立节拍，目标 " + targetFps + "fps）");
+    }
+
+    private void stopRenderDriver() {
+        renderDriving = false;
+        Thread t = renderDriver;
+        renderDriver = null;
+        if (t != null) t.interrupt();
+    }
+
     private final Runnable renderTick = new Runnable() {
         @Override public void run() {
             if (glView == null || targetFps <= 0) return;
@@ -225,7 +259,7 @@ public class FloatingBallService extends Service {
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
             pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
-            glView.requestRender();
+            // requestRender 交给 ball-render-driver 线程（见上），这里只推进各种包络
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
         }
@@ -2033,6 +2067,10 @@ public class FloatingBallService extends Service {
     // 文字窗上一次真正落下去的位置/尺寸（用来跳过无变化的 updateViewLayout）
     private int siriTextLastX = Integer.MIN_VALUE, siriTextLastY = Integer.MIN_VALUE;
     private int siriTextLastW = -1, siriTextLastH = -1;
+    // 文本测量缓存（见 updateSiriTextPos：每帧重量大段文字会把主线程吃满）
+    private String textMeasuredStr = null;
+    private float textMeasuredPx = -1f, textTopGap = 0f;
+    private int textMeasuredMaxW = -1, textMeasuredW = -1;
     private float aMaster = 1f, aHalfX = 0.30f, aHalfY = 0.30f, aCorner = 1f;
     private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
@@ -2811,7 +2849,11 @@ public class FloatingBallService extends Service {
         // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字层同一时刻藏掉。
         hideSiriTextNow();
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
-        if (renderer != null) renderer.waveInGlass = 0f;   // 球底那团散光跟着收掉
+        if (renderer != null) renderer.waveInGlass = 0f;   // 球底那截波跟着收掉
+        if (glView != null) {                              // 回最小形态 → 恢复全分辨率渲染
+            glassBufW = glassBufH = -1;
+            try { glView.getHolder().setFixedSize(0, 0); } catch (Throwable ignored) { }
+        }
         float b0 = winSize * 0.9f;
         updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
     }
@@ -3077,10 +3119,12 @@ public class FloatingBallService extends Service {
         int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
         Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
         if (W == winW && H == winH) return;
         final float hx0 = homeCxSafe(), hy0 = homeCySafe();
         winW = W; winH = H;
         params.width = W; params.height = H;
+        setGlassBufferScale((long) W * H);      // 大方框降分辨率渲染玻璃（否则每帧 45~55ms = 卡顿）
         // 水平：以"家"为中心（宽固定 85% 屏宽，左右对称）。
         params.x = Math.round(hx0 - W * 0.5f);
         // 竖直：**家的球顶钉住，高度往下长**（用户要求"高度随文字往下涨"）。
@@ -3113,20 +3157,33 @@ public class FloatingBallService extends Service {
         // 这里**不调用 setMaxWidth**（那会污染球的测量结果），只用 AT_MOST 量一次用于排版/居中。
         float ballHalfW = base * aHalfX * aMaster;
         int textMaxW = Math.max(1, Math.round(2f * ballHalfW - 2f * dp(28)));
-        siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int tw = Math.min(siriText.getMeasuredWidth(), textMaxW);
-        // 补偿字体上方留白(ascent 空白)，让首行字形真正贴近球顶，视觉间距 ≈ 5dp
-        float topGap = 0f;
-        try {
-            android.text.TextPaint tp = new android.text.TextPaint(siriText.getPaint());
-            tp.setTextSize(siriTextPx);
-            android.graphics.Paint.FontMetricsInt fm = tp.getFontMetricsInt();
-            android.graphics.Rect rb = new android.graphics.Rect();
-            String first = (siriStr == null || siriStr.isEmpty()) ? "字" : siriStr.substring(0, 1);
-            tp.getTextBounds(first, 0, first.length(), rb);
-            topGap = -fm.ascent + rb.top;      // TextView 顶 → 首行字形顶
-        } catch (Throwable ignored) { }
+        // ⚠️ 这段 measure 只在「文字 / 字号 / 可用宽度」变了才做一次。
+        // 它跑在 16ms 的 tick 上，而方形态的文本动辄上千像素高、几十行 —— 每帧重量一次
+        // 足以把主线程吃满，渲染节拍被挤到 ~50ms（实测：方形态 50ms vs 圆球态 32ms，
+        // 屏幕上就是用户说的"卡顿、像 LED 一闪一闪"）。测量结果只用于居中/贴顶，缓存完全够用。
+        if (textMeasuredMaxW != textMaxW || !siriStr.equals(textMeasuredStr)
+                || textMeasuredPx != siriTextPx) {
+            siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            textMeasuredW = siriText.getMeasuredWidth();
+            textMeasuredStr = siriStr;
+            textMeasuredPx = siriTextPx;
+            textMeasuredMaxW = textMaxW;
+            // 补偿字体上方留白(ascent 空白)，让首行字形真正贴近球顶，视觉间距 ≈ 5dp
+            float gap = 0f;
+            try {
+                android.text.TextPaint tp = new android.text.TextPaint(siriText.getPaint());
+                tp.setTextSize(siriTextPx);
+                android.graphics.Paint.FontMetricsInt fm = tp.getFontMetricsInt();
+                android.graphics.Rect rb = new android.graphics.Rect();
+                String first = (siriStr == null || siriStr.isEmpty()) ? "字" : siriStr.substring(0, 1);
+                tp.getTextBounds(first, 0, first.length(), rb);
+                gap = -fm.ascent + rb.top;     // TextView 顶 → 首行字形顶
+            } catch (Throwable ignored) { }
+            textTopGap = gap;
+        }
+        int tw = Math.min(textMeasuredW > 0 ? textMeasuredW : textMaxW, textMaxW);
+        float topGap = textTopGap;
         float ballHalfH = base * aHalfY * aMaster;
         float ballTop = sy - ballHalfH;
         float ballBottom = sy + ballHalfH;
@@ -3383,7 +3440,8 @@ public class FloatingBallService extends Service {
             renderer.setOnSurfaceReady(st -> main.post(() -> startCapture(st)));
         }
         glView.setRenderer(renderer);
-        glView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);   // 由 renderTick 按目标帧率驱动
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);   // 由 ball-render-driver 按目标帧率驱动
+        startRenderDriver();
         glView.setFocusable(false);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -3425,6 +3483,39 @@ public class FloatingBallService extends Service {
         lastParamsJson = prefs().getString("float_params", null);
         renderer.bgMode = prefs().getInt("float_mode", 0);
         if (prefs().getBoolean("float_siri", false)) applySiriEnabled(true);
+    }
+
+    /**
+     * 大方框降分辨率渲染玻璃层。
+     *
+     * 为什么：方形态窗口最大 1044×2115 ≈ 2.2M 像素，全分辨率实测每帧 45~55ms（圆球态 32ms），
+     * 屏幕上就是"卡顿 / 像 LED 一闪一闪"。而折射源本身只有半屏分辨率（CapLive 540×1206），
+     * 所以把绘制缓冲降到 ~52 万像素（≈ 圆球态的规模）几乎看不出差别，帧间隔直接回到 33ms。
+     *
+     * 只在"面积档位"变化时才调 `setFixedSize` —— 每次调用都会重建缓冲（会顿一下）。
+     */
+    private int glassBufW = -1, glassBufH = -1;
+
+    private void setGlassBufferScale(long areaPx) {
+        if (glView == null) return;
+        float scale = 1f;
+        if (areaPx > 700_000L) {
+            scale = (float) Math.sqrt(520_000.0 / (double) areaPx);   // 目标 ≈52 万像素
+            scale = Math.max(0.42f, Math.min(1f, scale));
+        }
+        int bw = Math.max(2, Math.round(winW * scale));
+        int bh = Math.max(2, Math.round(winH * scale));
+        if (glassBufW > 0 && Math.abs(bw - glassBufW) < glassBufW * 0.08f
+                && Math.abs(bh - glassBufH) < glassBufH * 0.08f) return;   // 变化不大就别重建缓冲
+        glassBufW = bw; glassBufH = bh;
+        try {
+            if (scale >= 0.999f) glView.getHolder().setFixedSize(0, 0);   // 回到跟随视图
+            else glView.getHolder().setFixedSize(bw, bh);
+            Log.i("FloatingBall", "glass buffer " + bw + "x" + bh + " (window " + winW + "x" + winH
+                    + ", scale=" + String.format("%.2f", scale) + ")");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "setFixedSize failed: " + t);
+        }
     }
 
     // 抓屏映射必须用窗口的真实屏幕位置（params.x/y 是请求值，会被系统 inset 修正）
@@ -3576,6 +3667,7 @@ public class FloatingBallService extends Service {
     }
 
     @Override public void onDestroy() {
+        stopRenderDriver();          // 独立渲染节拍线程跟着服务一起收
         running = false;
         INSTANCE = null;
         main.removeCallbacks(winSyncLoop);

@@ -92,6 +92,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float panelAccentR = 1f, panelAccentG = 0.30f, panelAccentB = 0.24f;
 
     public volatile float winX, winY;
+    /**
+     * 窗口的**真实像素尺寸**（params.width/height）。为什么需要它：
+     * 方形态面积最大到 2.2M 像素，全分辨率画下来每帧 45~55ms（实测）→ 肉眼就是"卡顿/一闪一闪"。
+     * 于是大方框改用 `SurfaceView.setFixedSize()` 把**绘制缓冲**降分辨率（SurfaceFlinger 会把它
+     * 放大回窗口大小）。折射源本来就是半屏分辨率（540×1206），所以玻璃看着几乎没差别，
+     * 但片元数能砍掉一大半。这里存窗口尺寸，用来算"缓冲像素 ÷ 窗口像素"的缩放系数。
+     */
+    public volatile int winPixelW = 0, winPixelH = 0;
 
     // ── GL 资源 ──
     private int capProg, blurProg, compProg, maskProg;
@@ -206,6 +214,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
         "uniform float uWaveInGlass;  // 1 = 方形态收尾：波整体沉到球底以下，只露波顶\n" +
+        "uniform float uPxToScreen;    // 绘制缓冲像素 → 屏幕像素（方形态降分辨率渲染时 > 1）\n" +
         "uniform float uWaveDrop;     // 方形态收尾：波中心藏在球底下方多少像素\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
@@ -322,7 +331,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  vec2 q = localPx - vec2(0.0, -uOrbOffset*hy);\n" +
         "  return orbScene(q*k, t, 0.038*k); }\n" +
         "vec2 screenUv(vec2 fc){\n" +
-        "  vec2 top = vec2(fc.x, iRes.y - fc.y);\n" +
+        // fc 是**绘制缓冲**里的像素；乘 uPxToScreen 换成屏幕像素，才能和 uWinPos/uScreen 对齐
+        "  vec2 top = vec2(fc.x, iRes.y - fc.y) * uPxToScreen;\n" +
         "  return (uWinPos + top) / uScreen;\n" +
         "}\n" +
         "void main(){\n" +
@@ -339,7 +349,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  vec2 grad = normalize(gradSdRoundRect(c, uHalf, gradRadius) + depthEffect * normalize(c + 1e-5));\n" +
         "  vec2 gradUV = vec2(grad.x, -grad.y);\n" +
         "  vec2 suv = screenUv(fc) + gradUV * d / uScreen;\n" +
-        "  vec2 cScreenTop = uWinPos + vec2(uCenter.x, iRes.y - uCenter.y);\n" +
+        "  vec2 cScreenTop = uWinPos + vec2(uCenter.x, iRes.y - uCenter.y) * uPxToScreen;\n" +
         "  vec2 cuv = cScreenTop / uScreen;\n" +
         "  suv = cuv + (suv - cuv) / uZoom;\n" +
         "  float dispI = uAberration * ((c.x * c.y) / (uHalf.x * uHalf.y)) / 30.0;\n" +
@@ -514,11 +524,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         ensureFbos();
 
         // 球体几何（抠图与合成共用）
+        // k = 绘制缓冲像素 / 窗口像素（方形态降分辨率渲染时 <1）。合成 pass 里凡是以
+        // "屏幕像素"给的量（球半径/圆角/折射位移/带宽/边缘宽度/圆点环半径/波的下沉量）
+        // 都要乘 k，才能和缓冲像素坐标系里的 c/sd 对齐；屏幕 UV 那边则乘 1/k。
+        float k = (winPixelW > 0 && winW > 0) ? (float) winW / (float) winPixelW : 1f;
+        float invK = 1f / Math.max(k, 1e-3f);
         float ref = refSize > 0 ? refSize : winW;
         float base = ref * 0.9f;
+        // 球半径按**屏幕像素**给（base/hx/hy/cr），缓冲降分辨率时再乘 k 换算到缓冲像素；
+        // 而 (cx, cy) 是"窗口内的位置"，直接用缓冲尺寸算即可 —— 千万别再乘一次 k（会双重缩放，球跑偏）。
         float hx = base * halfX * master, hy = base * halfY * master;
-        // 位置以“参考方窗”为基准，窗口变高也不影响原球位置
-        float cx = winW * posX, cy = winH * 0.5f + ref * (0.5f - posY);
+        float cx = winW * posX, cy = winH * 0.5f + ref * k * (0.5f - posY);
         float cr = base * halfY * corner * master;
         if (siriGeom) {
             // Siri 模式：几何完全由服务端动画驱动
@@ -593,9 +609,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glUniform1i(GLES20.glGetUniformLocation(maskProg, "iBg"), 1);
             GLES20.glUniform2f(GLES20.glGetUniformLocation(maskProg, "iRes"), bg2.w, bg2.h);
             // 球心换算到屏幕像素（y 向下）：窗口左上 + 窗口内 y 翻转
+            // 抠图 pass 的坐标系是**抓屏像素 = 屏幕像素**，而 (cx, cy) 是缓冲像素 → 先 /k 回到窗口像素
             GLES20.glUniform2f(GLES20.glGetUniformLocation(maskProg, "uCenter"),
-                    winX + cx, winY + (winH - cy));
-            GLES20.glUniform2f(GLES20.glGetUniformLocation(maskProg, "uHalf"), hx, hy);
+                    winX + cx * invK, winY + (winPixelH > 0 ? winPixelH - cy * invK : winH - cy * invK));
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(maskProg, "uHalf"), hx, hy);   // 屏幕像素
             GLES20.glUniform1f(GLES20.glGetUniformLocation(maskProg, "uCorner"), cr);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(maskProg, "uMargin"), 3f);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
@@ -624,12 +641,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "iRes"), winW, winH);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uScreen"), screenW, screenH);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uWinPos"), winX, winY);
-        GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx, hy);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx * k, hy * k);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uCenter"), cx, cy);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"), refraction * master);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"), band * master);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), master);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"), refraction * master * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"), band * master * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), master * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), dome);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), aberration);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"), topDarken);
@@ -638,13 +655,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), waveInGlass);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), waveDropPx);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPxToScreen"), invK);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), waveDropPx * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveAmpEff);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), orbMix);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), orbRadius);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), orbRadius * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
