@@ -387,9 +387,19 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    } else {\n" +
         "      wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    }\n" +
-        // 黑区遮蔽：圆球态照旧（波画在黑区里，不压一下会过曝）；
-        // 方形态收尾时**不压** —— 那截波顶就在球底，被黑区渐变压掉就什么都看不见了（实测）。
-        "    float waveVis = mix(1.0 - blackMask*uTopDarken*0.85, 1.0, uWaveInGlass);\n" +
+        // ── 方形态（uWaveInGlass=1）：只有球底那一小截要画，其余照旧算就是白烧 GPU ──
+        // 用户反馈方形态"卡卡的、像 LED 一闪一闪"：方框面积是圆球的 ~4 倍（最大 1044×2115），
+        // 而这段原来每像素要算 2 次 waveCol（核心 + 辉光）+ 整套流体圆点（6 个点带 smin/pow）。
+        // 方形态既不显示圆点、也不需要辉光（那截波顶是加在玻璃上的），而且离波带远的像素
+        // 波函数本来就是 0 —— 于是这里整段短路：只算 1 次 waveCol，且只算球底附近那一条带。
+        "    if(uWaveInGlass > 0.5){\n" +
+        "      if(abs(wp.y) < 1.6){\n" +                       // 只有贴着球底的这一条带需要画
+        "        vec3 waveEff = waveCol(wp, iTime, 1.0) * 2.2;\n" +   // ×2.2：加在亮桌面内容上，不提亮看不见
+        "        col += waveEff * uWaveAmp;\n" +
+        "      }\n" +
+        "    } else {\n" +
+        // 黑区遮蔽：圆球态照旧（波画在黑区里，不压一下会过曝）
+        "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
         "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：聆听→思考时不再「啪」地换一套光效\n" +
         "    vec3 waveEff = waveCol(wp, iTime, 1.0);\n" +
         "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
@@ -402,11 +412,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float orbLum = max(orbRaw.r, max(orbRaw.g, orbRaw.b)) * 1.2;\n" +
         "    vec3 orbGlow = vec3(0.80,0.95,1.25) * (orbLum * uOrbRim);\n" +
         "    wglow = mix(wglow, orbGlow, uOrbMix);\n" +
-        // 方形态那截波顶额外提亮 ×2.2：它是**加**在玻璃上的，而方框下半部分往往压着很亮的
-        // 桌面内容，加一点点光在亮底子上等于看不见（用户原话：「波要露一点点出来，
-        // 不是完完全全看不见」）。圆球态不加成 —— 它本来就画在黑区上，对比度足够。
-        "    float waveBoost = mix(1.0, 2.2, uWaveInGlass);\n" +
-        "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis * waveBoost;\n" +
+        "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis;\n" +
+        "    }\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
         "  col *= mix(0.70,1.,innerEdge);\n" +

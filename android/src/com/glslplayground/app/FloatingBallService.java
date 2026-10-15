@@ -490,6 +490,15 @@ public class FloatingBallService extends Service {
     // 做法：波不再叠在玻璃表面，而是先画进背景纹理（GlassRenderer.FS_WAVE），
     // 于是它天然吃到与背景完全相同的折射/放大/色散/模糊；锚点在球底（renderer.waveNy）。
     private volatile boolean turnEnded = false;
+    /**
+     * 生效中的闸门（带压后）。为什么不直接用 turnEnded：
+     * DSH 一轮里 `turn/end` 和**下一条消息的 attempt-start** 会交替出现（实测相隔几百毫秒），
+     * 直接跟着它开关，球底那截波就会**一闪一闪像 LED**（用户报的现象）。
+     * 所以"开"立刻生效、"关"压后 WAVE_OFF_SETTLE_MS，期间又遇到 turn/end 就当没关过。
+     */
+    private volatile boolean waveHold = false;
+    private Runnable waveOffSettle;
+    private static final long WAVE_OFF_SETTLE_MS = 1200;
 
     /** SiriAssistant 在 turn/end 时调用；新一轮开始（onAttemptStart / 新提问 / 清空）时调 false。 */
     public static void setAssistantTurnEnded(boolean ended) {
@@ -501,8 +510,36 @@ public class FloatingBallService extends Service {
     private void applyTurnEnded(boolean ended) {
         if (turnEnded == ended) return;
         turnEnded = ended;
-        Log.i("FloatingBall", "turn ended=" + ended + "（方形态的波闸门 " + (ended ? "开" : "关") + "）");
-        refreshFinalWave();
+        if (ended) {
+            cancelWaveOffSettle();      // 又结束了 → 撤销"关闸门"的压后
+            waveHold = true;
+            Log.i("FloatingBall", "turn ended=true（波闸门 开）");
+            refreshFinalWave();
+        } else {
+            scheduleWaveOffSettle();    // 关闸门走压后，避免 turn/end 与 attempt-start 交替造成闪烁
+            Log.i("FloatingBall", "turn ended=false（波闸门压后 " + WAVE_OFF_SETTLE_MS + "ms 再关）");
+        }
+    }
+
+    private void cancelWaveOffSettle() {
+        if (waveOffSettle != null) {
+            main.removeCallbacks(waveOffSettle);
+            waveOffSettle = null;
+        }
+    }
+
+    private void scheduleWaveOffSettle() {
+        if (waveOffSettle != null) return;
+        waveOffSettle = new Runnable() {
+            @Override public void run() {
+                waveOffSettle = null;
+                if (turnEnded) return;
+                waveHold = false;
+                Log.i("FloatingBall", "波闸门压后到点 → 关");
+                refreshFinalWave();
+            }
+        };
+        main.postDelayed(waveOffSettle, WAVE_OFF_SETTLE_MS);
     }
 
     /**
@@ -511,14 +548,17 @@ public class FloatingBallService extends Service {
      */
     private void refreshFinalWave() {
         if (renderer == null) return;
-        boolean show = siriEnabled && turnEnded && hasBallText();
+        boolean show = siriEnabled && waveHold && hasBallText();
         renderer.waveInGlass = show ? 1f : 0f;
         if (show) {
             renderer.waveOn = true;
-            setWaveForm(1);              // siriWaveCore；此刻幅度是 0，切形态看不出跳变
+            // ⚠️ 这里**不走 setWaveForm()**：那个函数为了"看不见跳变"会先把幅度淡到 0、
+            // 换完形态再淡回来；而这个函数每打一个字就会被调用一次（镜像打字机），
+            // 一走淡出淡入就是用户看到的"LED 一闪一闪"。方形态固定用 Siri 波，直接钉住。
+            if (renderer.waveMode != 1) { renderer.waveMode = 1; waveModePending = -1; }
+            waveGateTarget = 1f;
         } else if (hasBallText()) {
-            setWaveForm(-1);             // 有字但这一轮还没结束：保证不出波
-            waveGateTarget = 0f;
+            waveGateTarget = 0f;         // 有字但这一轮还没结束：不出波
         }
     }
 
@@ -1990,6 +2030,9 @@ public class FloatingBallService extends Service {
     private android.widget.TextView siriText;
     private WindowManager.LayoutParams siriParams;
     private volatile String siriStr = "";
+    // 文字窗上一次真正落下去的位置/尺寸（用来跳过无变化的 updateViewLayout）
+    private int siriTextLastX = Integer.MIN_VALUE, siriTextLastY = Integer.MIN_VALUE;
+    private int siriTextLastW = -1, siriTextLastH = -1;
     private float aMaster = 1f, aHalfX = 0.30f, aHalfY = 0.30f, aCorner = 1f;
     private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
@@ -3110,7 +3153,15 @@ public class FloatingBallService extends Service {
         int wantY = siriParams.y + tdy;                       // 当前实际屏幕 y
         if (wantY < glassTop) siriParams.y += glassTop - wantY;
         else if (wantY + th > glassBottom) siriParams.y += (glassBottom - th) - wantY;
-        try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
+        // ⚠️ 只在真的变了才 updateViewLayout：这函数跑在 16ms 的 tick 上，
+        // 方形态的文字块又高又多行，每帧重摆窗口 = 每帧一次跨进程事务（方形态"卡卡的"一半来自这里）。
+        // 项目里"别每帧重摆窗口"这条教训对代理窗口写过，这里补上。
+        if (siriParams.x != siriTextLastX || siriParams.y != siriTextLastY
+                || tw != siriTextLastW || th != siriTextLastH) {
+            siriTextLastX = siriParams.x; siriTextLastY = siriParams.y;
+            siriTextLastW = tw; siriTextLastH = th;
+            try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
+        }
         syncSiriTouchLayer();
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
