@@ -1721,7 +1721,7 @@ public class FloatingBallService extends Service {
                     params.x = Math.max(-winW / 2, Math.min(screenW - winW / 2, params.x));
                     params.y = Math.max(-Math.round(dp(24)),
                             Math.min(screenH - winH + Math.round(dp(24)), params.y));
-                    if (wm != null) wm.updateViewLayout(glView, params);
+                    if (wm != null) try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
                     glView.post(winSync);
                 }
                 return true;
@@ -2232,7 +2232,7 @@ public class FloatingBallService extends Service {
     private void updateProxyWindow() {
         try {
             ballTouchParams.setTitle(PROXY_TITLE);
-            wm.updateViewLayout(ballTouch, ballTouchParams);
+            try { wm.updateViewLayout(ballTouch, ballTouchParams); } catch (Throwable ignored) { }
         } catch (Throwable ignored) { }
     }
 
@@ -2489,7 +2489,14 @@ public class FloatingBallService extends Service {
             params.x = Math.max(Math.round(-d / 4), Math.min(Math.round(screenW - d * 3 / 4), params.x));
             params.y = Math.max(Math.round(-d / 4), Math.min(Math.round(screenH - d * 3 / 4), params.y));
         }
-        if (wm != null) wm.updateViewLayout(glView, params);
+        // ⚠️ glView 可能为 null：服务刚启动还没建好视图、或已在销毁流程中收到触摸。
+        // 原来只判了 wm != null，于是 updateViewLayout(null, ...) 抛
+        //   IllegalArgumentException: view must not be null
+        // → 整个 App 崩溃（实测崩溃栈：moveBallDrag → updateViewLayout）。
+        if (glView == null) return;
+        if (wm != null) {
+            try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        }
         glView.post(winSync);
         clampBallOnScreen();          // 拖到屏幕边缘时把整颗球（含文字）夹回屏内
     }
