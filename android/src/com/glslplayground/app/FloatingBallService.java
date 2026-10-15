@@ -2645,22 +2645,29 @@ public class FloatingBallService extends Service {
         if (wm == null || glView == null || renderer == null) return;
         float base = winSize * 0.9f;
         if (base <= 0f) return;
-        float m = Math.max(0.01f, siriEnabled ? renderer.svMaster : 1f);
+        // ⚠️ 两个坑（都实测踩过，"长回复结束后球上下跳、像跳出屏幕"就是这个）：
+        //  ① 不能用**动画值** svHalf*：窗口刚 resize 时动画值还是上一套（大方框）尺寸，
+        //     拿它去夹取会把刚摆好的最小窗口又推走 —— 实测 clamp 当场把 y=919 改成 986/1427，
+        //     球最终停在离"家"530px 的位置。改用**目标几何** tHalf*。
+        //  ② 不能用 renderer.winY 反推系统 inset：窗口刚变大/变小时它是过期值，
+        //     算出来的球心会偏出几百像素。直接用 glView.getLocationOnScreen()。
+        float m = Math.max(0.01f, siriEnabled ? tMaster : 1f);
         float halfW, halfH;
         if (siriEnabled) {
-            halfW = base * renderer.svHalfX * m;
-            halfH = base * renderer.svHalfY * m;
+            halfW = base * tHalfX * m;
+            halfH = base * tHalfY * m;
         } else {
             halfW = halfH = base * 0.5f;               // 常态是一颗圆球
         }
-        float sysOffset = renderer.winY - params.y;    // 请求 y → 实际 y 的差值（顶部 inset）
-        float cx = params.x + winW * 0.5f;
-        float cy = params.y + winH * 0.5f + sysOffset;
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        float cx = loc[0] + winW * 0.5f;
+        float cy = loc[1] + winH * 0.5f;
         float newCx = Math.max(halfW, Math.min(screenW - halfW, cx));
         float newCy = Math.max(halfH, Math.min(screenH - halfH, cy));
         if (Math.abs(newCx - cx) < 1f && Math.abs(newCy - cy) < 1f) return;
         params.x = Math.round(newCx - winW * 0.5f);
-        params.y = Math.round(newCy - winH * 0.5f - sysOffset);
+        params.y = Math.round(newCy - winH * 0.5f);
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         glView.post(winSync);
         Log.i("FloatingBall", "clampBallOnScreen: 球心 (" + Math.round(cx) + "," + Math.round(cy)
@@ -3093,7 +3100,17 @@ public class FloatingBallService extends Service {
      */
     private void rememberHomeIfMinimal() {
         if (renderer == null || winW <= 0 || winH <= 0) return;
-        boolean minimal = renderer.svHalfX <= minHalfX * 1.06f && renderer.svHalfY <= minHalfY * 1.06f;
+        // ⚠️ 判据必须用「目标几何 + 本轮没出过字 + 窗口也是最小窗口」，**不能只看动画值**：
+        // 方框缩回圆球的过程中，动画值会途经最小尺寸，而那一刻窗口还停在被 clamp 顶上来的
+        // 位置 —— 于是把那个位置记成了"家"，球从此永久偏上去。
+        // 实测症状：长回复结束后球停在 449..896，而它的家本该是 982..1555（差了 530px），
+        // 用户看到的就是"会话结束弹出最后文字时上下跳，然后像跳出屏幕不见了"。
+        float minHalfH = winSize * 0.9f * minHalfY;
+        int minWinH = Math.round(2 * minHalfH + 2 * dp(24));
+        boolean minimal = !textHold
+                && tHalfX <= minHalfX * 1.02f && tHalfY <= minHalfY * 1.02f
+                && renderer.svHalfX <= minHalfX * 1.06f && renderer.svHalfY <= minHalfY * 1.06f
+                && winH <= minWinH * 1.12f;
         if (!minimal) return;
         float cx = params.x + winW * 0.5f;
         float cy = params.y + winH * 0.5f;
