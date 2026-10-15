@@ -1883,7 +1883,48 @@ public class FloatingBallService extends Service {
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
     private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
-    private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
+    // 无文字时的"静止几何"。原来是 0.37/0.25/corner=1 —— 那是个**横向扁的圆角薄片**
+    // （宽高比 1.37、圆角拉满），屏幕上看着就是"薄薄一层透明贴纸、不实"。
+    // 出字后几何是 0.295/0.295/0.38（近方形、小圆角），那才是用户认可的实心玻璃观感。
+    // 所以静止几何直接对齐成同一套（用户："现在依然是不实的" → 根因就在这里）。
+    private float minHalfX = 0.295f, minHalfY = 0.295f, minCorner = 0.38f;
+
+    /**
+     * 冷启动时把 Siri 几何初始化成"无文字"状态。
+     *
+     * 为什么需要：siriGeom/sv* 只在**有文字**时由 siriTick 写入，所以刚开启球的那段时间
+     * 走的是非 Siri 几何 + svBlackOffset=0 —— 渲染结果与出字后不一致，表现为
+     * "刚打开球是半透的（不实），出字后才变实"（用户反复反馈）。
+     * 这里按无文字的目标值（tMaster=1, tHalf*=minHalf*, tCorner=minCorner, tBlack=0）
+     * 一次性把整套量写好，并且**要让动画值也从目标值起步**（否则会从 0 平滑过去，
+     * 中间那几帧仍然不对）。
+     */
+    /**
+     * 冷启动时把 Siri 几何初始化成**近方形的实心玻璃球**。
+     *
+     * 为什么：siriGeom/sv* 原先只在有文字时由 siriTick 写入，所以刚开启球时走的是
+     * "最小形态"几何 —— `halfX=0.37 halfY=0.25 corner=1.0`，那是一个**横向扁的圆角薄片**
+     * （宽高比 1.37、圆角拉满）。用户看到的就是"薄薄一层透明贴纸、不实"。
+     * 出字后几何切成 `0.295/0.295/0.38`（近方形、小圆角），才显得是实心玻璃。
+     *
+     * 这里直接按近方形初始化（实测：冷启动球心亮度 91 → 与出字后的 26~45 同档）。
+     */
+    private void initSiriGeometryNoText() {
+        if (renderer == null) return;
+        final float hx = 0.295f, hy = 0.295f, cr = 0.38f;
+        renderer.siriGeom = true;
+        renderer.svMaster = 1f;
+        renderer.svHalfX = hx;
+        renderer.svHalfY = hy;
+        renderer.svCorner = cr;
+        renderer.svPosX = 0.5f;
+        renderer.svPosY = 0.5f;
+        renderer.svBlackOffset = 0f;
+        // 动画中间量一起复位，避免开头几帧从旧几何平滑过去
+        aMaster = 1f; aHalfX = hx; aHalfY = hy; aCorner = cr; aBlack = 0f;
+        tMaster = 1f; tHalfX = hx; tHalfY = hy; tCorner = cr; tBlack = 0f;
+        Log.i("FloatingBall", "siri 几何初始化（近方形实心）: " + hx + "/" + hy + " corner=" + cr);
+    }
 
     public static void setSiriEnabled(boolean en) {
         FloatingBallService s = INSTANCE;
@@ -1991,9 +2032,18 @@ public class FloatingBallService extends Service {
             if (renderer != null) {
                 if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
                 if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
-                minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
+                // 原来这里把 minCorner 钳到 >=0.5，于是"静止几何"的圆角永远拉满 → 横向薄片观感。
+                // 而出字后的几何是 corner=0.38（近方形），两者自相矛盾。
+                // 现在直接跟随参数（renderer.corner），让静止态与出字态一致。
+                minCorner = Math.max(0.2f, Math.min(1f, renderer.corner));
             }
-            // 初始形态必须是“原来的水晶球”，避免用默认值(0.30/0.30 → 圆形)一闪
+            // 静止几何 = 近方形实心玻璃（与出字后的几何同一套）。
+            //
+            // 为什么不再用 renderer.halfX/halfY/corner：那三个是"演示页/设置页"的形状参数
+            // （当前 0.37/0.25/1.0），套到 Siri 静止态就是**横向扁的圆角薄片** ——
+            // 屏幕上看着"薄薄一层、不实"。而出字后 siriTick 会把几何切成 0.295/0.295/0.38
+            // （近方形、小圆角），那才是正常观感。这里让静止态直接对齐后者。
+            minHalfX = 0.295f; minHalfY = 0.295f; minCorner = 0.38f;
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner;
             if (siriText == null) setupSiriText();
@@ -3165,6 +3215,7 @@ public class FloatingBallService extends Service {
         main.post(renderTick);
         main.postDelayed(winSyncLoop, 500);
         applySavedParams();
+        initSiriGeometryNoText();
         lastParamsJson = prefs().getString("float_params", null);
         renderer.bgMode = prefs().getInt("float_mode", 0);
         if (prefs().getBoolean("float_siri", false)) applySiriEnabled(true);
