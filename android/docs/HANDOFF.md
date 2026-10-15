@@ -988,61 +988,57 @@ blur 1.8 → 1.54     blur 1.2 → 1.68     blur 0.5 → 1.91     blur 0.3 → 2
 （SharedPreferences 有内存缓存，运行期改磁盘会被写回覆盖），改完重启球才生效。
 改参数的小工具：`.preview/fix/set_pref.py <key> <value>`。
 
-## 方形态（有字）的收尾散光：只有整轮结束才亮，且不做「波进玻璃」（2026-10-16 定稿）
+## 方形态（有字）的收尾：Siri 波沉到球底以下，只露波顶一点点（2026-10-16 定稿）
 
-用户需求原话演进（三次收敛，别再往回改）：
+用户三轮收敛（**别再往回改**）：
 
-1. 「有文字就变成近方形」——`measureSiriTargets()` 里那条近方形约束（已有，别动）；
-2. 「方形状态下只有 agent 回复最终结果才能出现 Siri 波」——判定用 **turn/end**（整轮结束），
-   不是流式过程中；
-3. 「方形底端像被 Siri 波贴着产生漫反射，但看不到 Siri 波的模样」。
+1. 「有文字就变成近方形」——`measureSiriTargets()` 里那条近方形约束（已有）；
+2. 「方形状态下只有 agent 回复最终结果才能出现 Siri 波」——判定用 **turn/end**（整轮结束）；
+3. 「相当于方形状态下 Siri 出现在球的 y 轴往下，刚刚好能看到波的顶部一点点，不搞什么漫反射了」
+   ——最终形态：**波照旧画（就是那条熟悉的 Siri 波），只把竖直锚点从黑区下沿挪到球底以下**。
 
-### 实现（`GlassRenderer.FS_COMP` 里十来个 ALU，**没有任何额外 pass**）
+### 实现（一个 uniform + 一行 mix，零额外开销）
 
 ```glsl
-if(uWaveInGlass > 0.5){                       // 方形态收尾：不出波，只在球底打一团散光
-  float gd = abs(ny - uWaveAnchor);           // 离球底锚线的距离
-  float glow = smoothstep(uWaveFall, 0.0, gd); glow *= glow;
-  glow *= 1.0 - 0.55*hx2*hx2;                 // 两端收一点，像贴着球底的一片光
-  float hue = 0.5 + 0.5*sin(hx2*2.2 + iTime*0.5);   // 横向缓慢流动的色相
-  vec3 tint = mix(vec3(0.62,0.78,1.25), vec3(1.15,0.72,0.95), hue);
-  wglow = tint * glow;                        // 赤道线/底缘也吃这团光
-  col += tint * glow * uWaveAmp * uWaveGain;
-}
+float waveAnchor = mix(b1, uWaveAnchor, uWaveInGlass);   // 圆球态=b1（原观感）；方形态收尾=-1.25
+vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - waveAnchor) / max(uWaveScale, 0.1);
 ```
 
-- `uWaveAnchor` = `renderer.waveNy`（默认 -0.72，贴着球底）、`uWaveFall` = 0.55（往上柔和衰减）、
-  `uWaveGain` = `renderer.waveGlassGain`（默认 0.22，**设备侧 `float_wave_gain` 千分比可调**，
-  改完重启球生效）。
-- 触发放闸门在 `refreshFinalWave()`：`turnEnded && 有字` 才开，其余情况一律压到 0。
+- `uWaveAnchor` = `renderer.waveAnchorGlass`，默认 **-1.25**（ny：-1 是球底，所以整条波压在球底下方，
+  球内只露出波顶那一小截）。设备侧 `float_wave_anchor`（千分比）可调，改完重启球生效；
+  想露得多一点就往 -1.1 调，想只剩一丝就 -1.4。
+- 闸门在 `refreshFinalWave()`：`siriEnabled && turnEnded && 有字` 才把 `uWaveInGlass` 置 1；
+  有字但这一轮还没结束 → 幅度压到 0（一点波都没有），与老行为一致。
+- 圆球态（聆听/思考）**一点没动**：那边 `uWaveInGlass=0`，锚点仍是黑区下沿 `b1`。
 
-### ⚠️ 别再做「把波烘进背景纹理再折射」那一版（做过，被性能否掉）
+### ⚠️ 走过的两条弯路（都别再捡回来）
 
-第一版做的是"真·折射"：新建一张 `bgWave`，把波函数画进去（还配了 1/6 分辨率的
-`waveSmall` 散光画布 + 双线性放大），再让既有的折射/色散/模糊链去吃它。效果对，
-但**每帧多一整趟全屏 pass**，上机实测用户直接反馈"太耗性能"。
+1. **「把波烘进背景纹理再折射」**：新建 `bgWave` + 1/6 分辨率散光画布，每帧多一整趟全屏 pass。
+   效果对，但用户实机反馈「太耗性能」→ 整体拆除。
+2. **「球底漫反射散光」**（合成阶段十来个 ALU 的柔光带）：性能没问题（GPU 忙闲实测
+   开/关各 5 次：40~43% vs 31~39%，差异落在桌面内容波动里），但**观感不是用户要的** ——
+   用户要的是"看得见波顶一点点"，不是"一片看不到形状的光"。
 
-结论：**这个效果不值得多一趟 pass**。合成阶段十来个 ALU 的柔光带，观感上一样是
-"被波贴着打出的散光"，而 GPU 忙闲实测无差别（开/关散光各采样 5 次：40~43% vs 31~39%，
-差异落在桌面内容本身的波动里）。要调就调 `float_wave_gain`，别把烘焙那套加回来。
+结论：**别自造抽象**。用户要的就是那条现成的 Siri 波，位置往下挪而已。
 
-### 顺带：黑区**保持原样**（用户明确要求）
+### 黑区**保持原样**（用户明确要求）
 
 中途试过"黑区紧贴文字"（`waveGap` 压到 0.005 + 过渡宽度 0.04），用户看过实机后说
 「原本黑区就不改了，恢复成原来的渐变黑」——已全部撤回：
 
-- `GlassRenderer` 的 `blackMask = smoothstep(b0, b1, ny)`（曾经的 `uBlackSoft` uniform 已删除）；
-- `measureSiriTargets()` 的 `waveGap = clamp(siriBlackStep/1000, 0, 0.45)`、默认 100（0.10）；
+- `GlassRenderer`：`blackMask = smoothstep(b0, b1, ny)`（曾经的 `uBlackSoft` uniform 已删除）；
+- `measureSiriTargets()`：`waveGap = clamp(siriBlackStep/1000, 0, 0.45)`、默认 100（0.10）；
 - 设置页「文字与 Siri 波的安全距离」滑杆保持原样。
 
-### 调试口子（回归这两个状态用，一次性文件、用完即删）
+### 调试口子（回归这条链路用，一次性文件、用完即删）
 
 ```bash
 D=/sdcard/Android/data/com.glslplayground.app/files
 printf '文字' > $D/ballshot        # 往球里塞文字（顺带抓一帧到 files/ball-capture.png）
-touch $D/state-TURNEND             # 等价于收到 turn/end → 球底散光亮起
+touch $D/state-TURNEND             # 等价于收到 turn/end → 球底露出波顶
 touch $D/state-TURNSTART           # 等价于新一轮开始 → 收掉
 ```
 
-注意：喂文字会**同时**触发抓帧，脚本里要等 `ball-capture.png` 写完（末尾是 IEND）
-再拷，否则会拷到半个 PNG（这一轮踩过好几次）。
+注意两个坑：① 喂文字会**同时**触发抓帧，脚本要等 `ball-capture.png` 写完（末尾 IEND）
+再拷，否则拷到半个 PNG；② 助手镜像会不停改写 `turnEnded`（我这边每发一条消息都会
+`onAttemptStart → false`），所以调试时要**反复喂** `state-TURNEND`，别喂一次就截图。

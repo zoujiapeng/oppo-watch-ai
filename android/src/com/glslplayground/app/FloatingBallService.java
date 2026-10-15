@@ -3220,9 +3220,9 @@ public class FloatingBallService extends Service {
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
-        // 「球底那团散光」的亮度（千分之一）：方形态整轮结束时，像被 Siri 波贴着打出的漫反射。
-        // 做成可调是因为它跟 wallpaper 亮度强相关，肉眼调比改代码快。
-        renderer.waveGlassGain = prefs().getInt("float_wave_gain", 150) / 1000f;
+        // 方形态收尾时，Siri 波在球内的竖直锚点（千分比，负 = 沉到球底以下）。
+        // -1250 = -1.25：整条波压在球底下面，球里只露波顶一点点。
+        renderer.waveAnchorGlass = prefs().getInt("float_wave_anchor", -1250) / 1000f;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -3354,7 +3354,7 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
-            renderer.waveGlassGain = prefs().getInt("float_wave_gain", 150) / 1000f;
+            renderer.waveAnchorGlass = prefs().getInt("float_wave_anchor", -1250) / 1000f;
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;

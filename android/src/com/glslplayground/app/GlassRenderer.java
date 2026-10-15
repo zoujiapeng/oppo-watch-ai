@@ -58,16 +58,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      * 0 = 老样子：波直接叠在玻璃上（圆形球聆听/思考时的观感，别动）。
      */
     public volatile float waveInGlass = 0f;
-    /** 波在球内的竖直锚点 ny（只在 waveInGlass=1 时生效）。贴球底 ≈ -0.68。 */
     /**
-     * 球底散光的锚点 ny（只在 waveInGlass=1 时生效）：+1 球顶 / -1 球底。
-     * -0.72 ≈ 贴着球底往上一点，那团光就压在这里。
+     * 方形态收尾时，Siri 波在竖直方向的锚点 ny（+1 球顶 / -1 球底）。
+     * -1.25 = 整条波压到**球底以下**，球内只露波顶一点点；圆球态不受影响（那边锚点仍是 b1）。
+     * 设备侧 `float_wave_anchor`（千分比）可调，改完重启球生效。
      */
-    public volatile float waveNy = -0.72f;
-    /** 散光在竖直方向的半宽（ny）：0.55 ≈ 球高的 55%，从锚点往上柔和衰减。 */
-    public volatile float waveFall = 0.55f;
-    /** 散光亮度增益（prefs 里 float_wave_gain 千分比可调）。 */
-    public volatile float waveGlassGain = 0.15f;
+    public volatile float waveAnchorGlass = -1.25f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -208,8 +204,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
-        "uniform float uWaveInGlass;  // 1 = 方形态收尾：不出波，只在球底打一团散光\n" +
-        "uniform float uWaveAnchor, uWaveFall, uWaveGain;  // 散光：锚点/半宽/亮度\n" +
+        "uniform float uWaveInGlass;  // 1 = 方形态收尾：波整体沉到球底以下，只露波顶\n" +
+        "uniform float uWaveAnchor;   // 方形态收尾时波的锚点 ny（-1.25 = 压到球底以下）\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
@@ -376,26 +372,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  }\n" +
         "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
-        // 方形态收尾（uWaveInGlass=1）不画波，只在球底加一团**漫反射散光** ——
-        // 用户 2026-10-16 的最终选择：原来那套"把波烘进背景再折射"要多画一趟纹理，
-        // 上机实测太重；这里退化成**几个 ALU**：一条贴着球底的柔光带 + 横向缓慢流动的色相，
-        // 观感上仍是"被 Siri 波贴着打出来的散光"，但看不到波的形状，也不再有任何额外 pass。
-        "  if(uWaveInGlass > 0.5){\n" +
-        "    float gd = abs(ny - uWaveAnchor);\n" +
-        "    float glow = smoothstep(uWaveFall, 0.0, gd);\n" +
-        "    glow *= glow;\n" +
-        "    float hx2 = clamp(c.x / uHalf.x, -1.0, 1.0);\n" +
-        "    glow *= 1.0 - 0.55*hx2*hx2;\n" +                                  // 两端收一点，像贴着球底的一片光
-        "    float hue = 0.5 + 0.5*sin(hx2*2.2 + iTime*0.5);\n" +               // 横向慢慢流动的色相
-        "    vec3 tint = mix(vec3(0.62,0.78,1.25), vec3(1.15,0.72,0.95), hue);\n" +
-        "    wglow = tint * glow;\n" +                                          // 让赤道线/底缘也吃这团光
-        "    col += tint * glow * uWaveAmp * uWaveGain;\n" +
-        "  }\n" +
-        // 波的常规画法（圆球态聆听/思考用）——方形态收尾时整段跳过
-        "  float waveOnGlass = 1.0 - uWaveInGlass;\n" +
-        "  if(uWaveAmp > 0.001 && waveOnGlass > 0.5){\n" +
+        // 波照旧画（方形态收尾也画），**只把竖直锚点往下挪**：
+        //   圆球态 = 黑区下沿 b1（原来的观感，一点没动）；
+        //   方形态收尾 = uWaveAnchor（默认 -1.25，整条波压到球底以下）→ 球里只露波顶一点点。
+        // 用户原话：「Siri 出现在球的 y 轴往下，刚刚好能看到波的顶部一点点」。
+        "  float waveAnchor = mix(b1, uWaveAnchor, uWaveInGlass);\n" +
+        "  if(uWaveAmp > 0.001){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
-        "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
+        "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - waveAnchor) / max(uWaveScale, 0.1);\n" +
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
         "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：聆听→思考时不再「啪」地换一套光效\n" +
         "    vec3 waveEff = waveCol(wp, iTime, 1.0);\n" +
@@ -634,9 +618,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), waveInGlass);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAnchor"), waveNy);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveFall"), waveFall);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveGain"), waveGlassGain);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAnchor"), waveAnchorGlass);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveAmpEff);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
