@@ -42,10 +42,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
     public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
-    // ⚠️ 这个值决定球是"磨砂实心玻璃"还是"透明窗"：
-    // blur 小时球内是**清晰的抓屏画面**，屏幕上看着就是"能看清背景的透明贴纸"；
-    // blur 大时内容被抹成光斑，球才显得实心。（0.3 = 代码里的旧默认，1.8+ 才是正常观感）
-    public float blur = 1.8f;
+    // 「玻璃体的失焦」= 唯一一个纯口味滑杆：数值越大越磨砂，越小越像一枚清晰透镜。
+    // 0.5 = 用户 2026-10-16 看着实物定的（1.8 → 1.2 → 0.5 一路往下）：
+    // 球内基本是"清晰的折射画面"，玻璃感完全靠折射位移 / 色散 / 黑顶 / 边缘亮线提供。
+    // ⚠️ 0.5 是**最后还有一点模糊**的档位：buildBlur() 里 `blur < 0.5` 会直接跳过模糊、
+    // 用全分辨率原图（= 一点都不糊）。想再"糊"回去就往 1.0 / 1.8 加。
+    // 设备上的 float_params.blur 会覆盖这里的默认值（演示页滑杆推的就是它，
+    // 那个页面默认还是 1.8：打开演示页时别顺手推参数，会把球改回磨砂）。
+    public float blur = 0.5f;
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
