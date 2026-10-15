@@ -158,6 +158,7 @@ public class FloatingBallService extends Service {
             if (glView == null || targetFps <= 0) return;
             pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
             pumpWaveGate();               // 幅度包络：换形态前先淡出、换完再淡入
+            pumpTextHoldSafety();         // 几何保持的兜底释放
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
             pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
@@ -171,7 +172,10 @@ public class FloatingBallService extends Service {
     // 调「思考中」那类短暂状态时，光靠手点设置页按钮很难卡在正确时刻；
     // 有这个口子就能：先 touch 文件 → 再让助手进入该状态 → 球自己把那一帧存下来。
     private long nextShotCheck = 0;
-    private static final String SHOT_REQ = "/data/local/tmp/ballshot";
+    // 目录必须是**球自己能删**的地方：/data/local/tmp 是 shell_data_file 标签，
+    // untrusted_app 只能读不能删 —— 删不掉就 return，文字/截图请求等于没生效（踩过）。
+    private static final String SHOT_REQ =
+            "/sdcard/Android/data/com.glslplayground.app/files/ballshot";
 
     // ── 状态回放的调试口子：`touch /data/local/tmp/ballstate-THINKING` 让球进入该状态 ──
     // 为什么要它：状态抖动（THINKING↔IDLE 反复）只在一个回合里出现，靠真人对话很难复现，
@@ -343,6 +347,7 @@ public class FloatingBallService extends Service {
             s.stateNow = "IDLE";
             s.stateSig++;
             s.applyAssistantState("OFF");
+            s.releaseTextHold();
             Log.i("FloatingBall", "assistant state=OFF → IDLE（交还形态）");
             return;
         }
@@ -373,6 +378,7 @@ public class FloatingBallService extends Service {
                 cur.idleSettle = null;
                 cur.stateNow = "IDLE";
                 cur.applyAssistantState("IDLE");
+                cur.releaseTextHold();          // 本轮结束 → 球回初始圆球形态
                 Log.i("FloatingBall", "idle settle 到点 → 交还 Siri 波 / 空白（安静了 "
                         + IDLE_SETTLE_MS + "ms）");
             }
@@ -2436,6 +2442,68 @@ public class FloatingBallService extends Service {
         return screenW * 0.85f;
     }
 
+    // ── 回合内几何保持（textHold）：本轮只要出现过文字，就一直保持「近方形」─────────
+    // 用户要的观感：只有「开始」和「真正结束」时是初始的圆球，处理中一旦出过字就一直是近方形。
+    // 为什么需要它：DSH 一个回合里会多次「出字 → 清空 → 再出字」（多段生成、工具调用之间），
+    // 清空那一下按老逻辑会缩回圆球 → 球在圆球/大胶囊之间反复跳，很难看。
+    // 规则：
+    //   · 出现文字（≥2 字）→ 进入保持，并记住本轮量过的最大几何；
+    //   · 文字被清空但保持还没结束 → 不缩回圆球，继续用那份最大几何；
+    //   · 本轮真正结束（idle settle 到点 / answerSettledAfterTurn / OFF）→ 释放，回圆球。
+    private boolean textHold = false;
+    private boolean releasingHold = false;   // 释放时那次重新测量不要再把保持武装起来
+    private float holdHalfX = 0f, holdHalfY = 0f, holdCorner = 1f, holdBlack = 0f;
+    private long lastTextAt = 0;                         // 最后一次「球里有非空文字」的时刻
+    private static final long HOLD_SAFETY_MS = 8000;     // 出字后这么久都没动 → 兜底释放
+
+    /** 兜底：助手在一次流式输出中途被关掉时可能没有 IDLE 事件，久静则自动释放保持。 */
+    private void pumpTextHoldSafety() {
+        if (!textHold || lastTextAt == 0) return;
+        long idleMs = android.os.SystemClock.uptimeMillis() - lastTextAt;
+        if (idleMs > HOLD_SAFETY_MS) {
+            Log.i("FloatingBall", "text hold: 兜底释放（出字后静了 " + idleMs + "ms）");
+            releaseTextHold();
+            lastTextAt = 0;
+        }
+    }
+
+    private void enterTextHold() {
+        lastTextAt = android.os.SystemClock.uptimeMillis();
+        if (!textHold) {
+            textHold = true;
+            holdHalfX = holdHalfY = 0f;      // 新一轮从零开始积累
+            holdBlack = 0f;
+            Log.i("FloatingBall", "text hold: on（本轮出现过文字，保持近方形）");
+        }
+    }
+
+    /** 释放保持，把球交还给「初始圆球」形态。 */
+    private void releaseTextHold() {
+        if (!textHold) return;
+        textHold = false;
+        releasingHold = true;
+        holdHalfX = holdHalfY = 0f;
+        Log.i("FloatingBall", "text hold: off（本轮结束，回初始圆球）");
+        // 直接落回初始形态，**不要**拿残留文字再量一遍 —— 那会量出「按最后那段文字算的方形」
+        // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字层同一时刻藏掉。
+        hideSiriTextNow();
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        float b0 = winSize * 0.9f;
+        updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+    }
+
+    /** 保持期间：不缩小，取「本轮量过的最大值」。 */
+    private void applyHoldGeometry() {
+        if (holdHalfX <= 0f) return;
+        if (tHalfX < holdHalfX) tHalfX = holdHalfX;
+        if (tHalfY < holdHalfY) tHalfY = holdHalfY;
+        tCorner = Math.min(tCorner, holdCorner);      // 更小 = 更方
+        if (tBlack < holdBlack) tBlack = holdBlack;
+        tMaster = 1f;
+        float base = winSize * 0.9f;
+        updateSiriWindow(base * tHalfX, base * tHalfY);
+    }
+
     /** 文字可换行的最大宽度。 */
     private int siriTextMaxW() {
         return (int) Math.max(dp(60), siriMaxBallW() - 2 * dp(42));
@@ -2444,7 +2512,14 @@ public class FloatingBallService extends Service {
     private void measureSiriTargets(String s) {
         if (approvalShown) return;      // 面板在屏上：球尺寸归面板管，别在这儿改
         int n = s == null ? 0 : s.trim().length();
-        if (n <= 1) {                           // 0/1 个字：最短形态 = 原来的水晶球
+        if (n <= 1) {                           // 0/1 个字
+            if (textHold) {
+                // 本轮已经出过字、还没结束：文字被清空（多段生成之间的空档）也不缩回圆球，
+                // 继续用本轮量过的最大几何 —— 否则球会在圆球/近方形之间反复缩胀。
+                hideSiriTextNow();
+                applyHoldGeometry();
+                return;
+            }
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             tBlack = 0f;
             float b0 = winSize * 0.9f;
@@ -2538,15 +2613,31 @@ public class FloatingBallService extends Service {
         float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
         hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 70%（长回复不占满屏）
-        if (lines >= 3) {
-            // 第 3 行起：大圆角方形（圆角半径 ≈ 短边的 38%），不再强制更宽
-            hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx));
-            float r = 0.38f * Math.min(hxpx, hypx);
+        // ① 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，球不缩回去。
+        //    先做减法：把本轮「量过的最大值」钳进来，再夹到上限。
+        if (textHold) {
+            hxpx = Math.max(hxpx, holdHalfX * base);
+            hypx = Math.max(hypx, holdHalfY * base);
+            hypx = Math.min(hypx, maxBallH / 2f);
+        }
+        // ② 只要这一轮出过字，就一律往「近方形」收 —— 用户的原话是「有文字就尽可能变成近方形」。
+        //    两个方向都要补齐：只补宽度会得到一条 5:1 的横条（实测 1044x573），不是近方形。
+        {
+            float a = Math.max(hxpx, hypx);                    // 近方形：短边往长边靠
+            float lo = Math.min(hxpx, hypx);
+            a = Math.min(a, lo * 1.18f);                       // 但别拉太狠（上限 1.18 倍）
+            a = Math.min(a, maxBallW / 2f);                    // 宽 ≤ 屏宽 85%
+            a = Math.min(a, maxBallH / 2f);                    // 高 ≤ 屏高 70%
+            a = Math.max(a, Math.min(base * minHalfY, base * minHalfX));   // 不小于原来的水晶球
+            hxpx = hypx = a;
+            float r = 0.38f * Math.min(hxpx, hypx);            // 圆角 ≈ 短边 38% → squircle
             tCorner = Math.max(0.18f, Math.min(minCorner, r / Math.max(1f, hypx)));
-        } else {
-            // 1~2 行：横向胶囊（两端半圆，宽 ≥ 高×1.35 且 ≤ 85%）
-            hxpx = Math.min(maxBallW / 2f, Math.max(hxpx, hypx * 1.35f));
-            tCorner = minCorner;
+        }
+        // 提示：球内文字被清空（siriStr 为空）但本轮还没结束时，黑区/文字层也跟着藏掉，
+        //      只留一个近方形的空玻璃壳 —— 这正是用户要的「处理中保持形态」。
+        if (s == null || s.trim().isEmpty()) {
+            hideSiriTextNow();
+            tBlack = 0f;
         }
         updateSiriWindow(hxpx, hypx);
 
@@ -2564,6 +2655,17 @@ public class FloatingBallService extends Service {
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
         tMaster = 1f;
+
+        // 本轮出现过文字 → 进入保持，并累计最大几何（保持期间只增不减）
+        if (releasingHold) {
+            releasingHold = false;          // 释放后的那次测量只是把球缩回圆球，别再武装保持
+        } else {
+            enterTextHold();
+        }
+        holdHalfX = Math.max(holdHalfX, tHalfX);
+        holdHalfY = Math.max(holdHalfY, tHalfY);
+        holdCorner = Math.min(holdCorner, tCorner);
+        holdBlack = Math.max(holdBlack, tBlack);
     }
 
     private final Runnable siriTick = new Runnable() {
