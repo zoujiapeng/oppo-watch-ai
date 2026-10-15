@@ -42,7 +42,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
     public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
-    public float blur = 0.3f;
+    // ⚠️ 这个值决定球是"磨砂实心玻璃"还是"透明窗"：
+    // blur 小时球内是**清晰的抓屏画面**，屏幕上看着就是"能看清背景的透明贴纸"；
+    // blur 大时内容被抹成光斑，球才显得实心。（0.3 = 代码里的旧默认，1.8+ 才是正常观感）
+    public float blur = 1.8f;
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
