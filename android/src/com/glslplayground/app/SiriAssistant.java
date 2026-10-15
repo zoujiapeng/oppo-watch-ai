@@ -641,11 +641,101 @@ public final class SiriAssistant {
 
     private void speak(String text) {
         if (!ttsReady || tts == null) return;
+        String spoken = toSpeechText(text);
+        // 调试口：把「要念的稿子」落盘，方便核对清洗效果（球自己的目录，能写能删）
+        try {
+            java.io.File f = new java.io.File(
+                    app.getExternalFilesDir(null), "last-spoken.txt");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+            out.write(spoken.getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable ignored) { }
+        if (spoken.isEmpty()) return;
+        Log.i(TAG, "speak(" + spoken.length() + "字): " + spoken.substring(0, Math.min(80, spoken.length())));
         try {
             tts.stop();
-            tts.speak(text.length() > 800 ? text.substring(0, 800) : text,
+            tts.speak(spoken.length() > 800 ? spoken.substring(0, 800) : spoken,
                     TextToSpeech.QUEUE_FLUSH, null, "dsh-siri");
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 把「给眼睛看的 markdown」转成「给耳朵听的稿子」。
+     *
+     * 为什么需要：DSH 的回复是 markdown，直接丢给 TTS 会把 `**`、反引号、`#`、`-`、`|`
+     * 这些符号念成"星号/井号/竖线"，听感很差。
+     *
+     * 为什么不用另一个模型改写：那会引入额外延迟（回答完还得再等一次生成）、额外费用，
+     * 而且模型可能改写内容、把事实讲错。这里全是确定性规则，零延迟、零成本、不改语义。
+     *
+     * 规则：
+     *   · 代码块 → 整段跳过（念代码没有意义），只在前面留一句「（有代码）」
+     *   · 行内代码 → 只留内容、去掉反引号
+     *   · 标题/列表/引用/表格/分隔线 → 去掉标记，保留文字
+     *   · 链接/图片 → 只念链接文字
+     *   · 去掉所有 markdown 强调符与其余符号（emoji、箭头、制表符等）
+     *   · 只保留：中日韩汉字、拉丁字母数字、空白、逗号句号问号感叹号顿号分号冒号引号括号
+     */
+    private static String toSpeechText(String raw) {
+        if (raw == null) return "";
+        String t = raw;
+
+        // 1) 代码块：整段丢掉，只留一句提示（用户明确说不想听拗口符号）
+        boolean hadCode = false;
+        java.util.regex.Matcher fence = java.util.regex.Pattern
+                .compile("```[\\s\\S]*?```").matcher(t);
+        if (fence.find()) {
+            hadCode = true;
+            t = fence.replaceAll(" （有代码，略过） ");
+        }
+
+        // 2) 行内代码 → 去反引号留内容
+        t = t.replaceAll("`([^`]*)`", "$1");
+        // 3) 图片 ![alt](url) → alt；链接 [text](url) → text
+        t = t.replaceAll("!\\[([^\\]]*)\\]\\([^)]*\\)", "$1");
+        t = t.replaceAll("\\[([^\\]]*)\\]\\([^)]*\\)", "$1");
+        // 4) 行首标记：标题 / 引用 / 列表 / 分隔线 / 表格
+        t = t.replaceAll("(?m)^\\s{0,3}#{1,6}\\s*", "");
+        t = t.replaceAll("(?m)^\\s{0,3}>\\s?", "");
+        t = t.replaceAll("(?m)^\\s{0,3}[-*+]\\s+", "");
+        t = t.replaceAll("(?m)^\\s{0,3}\\d+[.、)]\\s+", "");
+        t = t.replaceAll("(?m)^\\s{0,3}([-*_]\\s*){3,}$", "");
+        // 顺序很重要：表格对齐行（|---|---|）必须**先**清掉再动竖线/连字符，
+        // 否则第 5、7 步会把 `-` 变成空格，这里再也匹配不到（听感就是莫名一顿）。
+        t = t.replaceAll("(?m)^\\s*\\|?\\s*[:-]{2,}[\\s|:-]*$", "");   // 表格对齐行
+        t = t.replaceAll("\\|", " ");                 // 表格竖线
+        // 5) 强调符、删除线、其余零散 markdown 符号
+        t = t.replaceAll("[*_~^\\[\\]{}<>|\\\\]", " ");
+        t = t.replaceAll("#+", " ");
+        // 6) 只保留"能读"的字符：中日韩、拉丁字母数字、空白、常用标点
+        StringBuilder sb = new StringBuilder(t.length());
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            boolean keep;
+            if (c >= '\u4E00' && c <= '\u9FFF') keep = true;        // 汉字
+            else if (c >= '\u3040' && c <= '\u30FF') keep = true;   // 假名
+            else if (c >= '\uAC00' && c <= '\uD7AF') keep = true;   // 谚文
+            else if (Character.isLetterOrDigit(c)) keep = true;       // 拉丁/数字
+            else if (c == ' ' || c == '\n' || c == '\t') keep = true;
+            else keep = "，。！？、；：（）《》【】“”‘’".indexOf(c) >= 0;
+            sb.append(keep ? c : ' ');
+        }
+        t = sb.toString();
+        // 7) 路径/连字符：直接删会粘连（`-r` → `r`、`package/activity` → `packageactivity`），
+        //    替换成空格再合并，听感才对（"pm install -r app" 而不是 "pm install r app" 的粘连版）
+        t = t.replaceAll("[\\-/:@.]+", " ");
+        // 7) 收尾：合并空白、去掉孤零零的标点（念出来会"顿"一下）
+        t = t.replaceAll("[ \\t]{2,}", " ");
+        // ⚠️ Java 的 replaceAll 有个坑：替换串里写 "\\n" 会被当成**转义字母 n**，不是换行。
+        // 实测「第一行\n第二行」会被替换成「第一行n第二行」（多出一个字母 n，念出来很奇怪）。
+        // 用 $0（整个匹配文本）代替：$ 开头的替换串按字面处理，换行原样保留。
+        t = t.replaceAll("\\n{3,}", "$0$0");            // 多个换行压成两个（段落停顿）
+        t = t.replaceAll("[ \\t]*\\n[ \\t]*", "$0");    // 行首行尾空白去掉
+        t = t.replaceAll("(?m)^ +", "");                // 行首残留空格（表格/缩进留下的）
+        t = t.replaceAll("^[，。！？、；：）】”’\\s]+", "");
+        t = t.replaceAll("[，。！？、；：（【“‘\\s]+$", "");
+        if (t.isEmpty() && hadCode) t = "有代码，略过";
+        return t.trim();
     }
 
     private void stopTts() {
