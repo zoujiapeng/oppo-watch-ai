@@ -47,6 +47,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
+    /**
+     * 波形整体幅度闸门（0..1），由服务侧的状态包络驱动。
+     * 一个 uniform 同时决定波形与流体圆点：直接切 waveMode 会「瞬间换脸」——实测观感就是
+     * 「处理中 ↔ Siri 波」之间硬跳。所以换形态时把 gate 快速压到 0 → 换模式 → 再抬回 1，
+     * 中间那一瞬没有任何波/点在画，切换就看不出来了。
+     */
+    public volatile float waveGate = 1f;
     /** 语音助手实时音量叠加在 waveAmp 上的增益（0 = 不影响用户设置）。 */
     public volatile float voiceBoost = 0f;
 
@@ -577,7 +584,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),
-                waveOn ? waveAmp * (1f + voiceBoost) : 0f);
+                waveOn ? waveAmp * (1f + voiceBoost) * waveGate : 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), orbMix);

@@ -157,7 +157,9 @@ public class FloatingBallService extends Service {
         @Override public void run() {
             if (glView == null || targetFps <= 0) return;
             pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
+            pumpWaveGate();               // 幅度包络：换形态前先淡出、换完再淡入
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
+            pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
             glView.requestRender();
             main.removeCallbacks(this);
@@ -170,6 +172,31 @@ public class FloatingBallService extends Service {
     // 有这个口子就能：先 touch 文件 → 再让助手进入该状态 → 球自己把那一帧存下来。
     private long nextShotCheck = 0;
     private static final String SHOT_REQ = "/data/local/tmp/ballshot";
+
+    // ── 状态回放的调试口子：`touch /data/local/tmp/ballstate-THINKING` 让球进入该状态 ──
+    // 为什么要它：状态抖动（THINKING↔IDLE 反复）只在一个回合里出现，靠真人对话很难复现，
+    // 也不方便断言"IDLE 有没有被压后"。有了这个口子就能脚本化喂一串状态，然后看日志/截图。
+    // 改动动画状态机时用它回归，别删。状态取值：IDLE / THINKING / ANSWERING / LISTENING / OFF。
+    private long nextStateCheck = 0;
+    // 目录必须是**球自己能写**的地方：/data/local/tmp 是 shell_data_file 标签，
+    // untrusted_app 只能读不能删（踩过：触发文件删不掉 → 每 120ms 被反复消费）。
+    private static final String STATE_REQ_PREFIX = "/sdcard/Android/data/com.glslplayground.app/files/state-";
+    private static final String[] STATE_NAMES =
+            {"IDLE", "THINKING", "ANSWERING", "LISTENING", "TRANSCRIBING", "OFF"};
+
+    private void pumpStateRequest() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now < nextStateCheck) return;
+        nextStateCheck = now + 120;
+        for (final String name : STATE_NAMES) {
+            java.io.File f = new java.io.File(STATE_REQ_PREFIX + name);
+            if (!f.exists()) continue;
+            f.delete();
+            Log.i("FloatingBall", "state request (debug): " + name);
+            setAssistantState(name);
+            return;
+        }
+    }
 
     private void pumpShotRequest() {
         long now = android.os.SystemClock.uptimeMillis();
@@ -209,11 +236,6 @@ public class FloatingBallService extends Service {
         s.renderer.voiceBoost = Math.max(0f, Math.min(1.6f, rms * 1.7f));
     }
 
-    /** 助手接管前的波形设置；交还时原样恢复，用户调好的参数不会被助手改掉。 */
-    private boolean waveSaved = false;
-    private boolean waveOnSaved = true;
-    private int waveModeSaved = 1;
-
     // 波 ↔ 流体圆点 的交叉淡化：状态一变就朝目标推进，避免「聆听→思考」时光效瞬间换脸。
     private float orbMixNow = 0f;            // 当前值（0=纯 Siri 波，1=纯流体圆点）
     private float orbMixTarget = 0f;
@@ -238,45 +260,167 @@ public class FloatingBallService extends Service {
         if (renderer != null && orbMixNow == orbMixTarget) renderer.orbMix = orbMixNow;
     }
 
-    private void saveWaveOnce() {
-        if (waveSaved || renderer == null) return;
-        waveOnSaved = renderer.waveOn;
-        waveModeSaved = renderer.waveMode;
-        waveSaved = true;
+    /** 助手接管前的波形设置；交还时原样恢复，用户调好的参数不会被助手改掉。 */
+    private boolean waveSaved = false;
+    private boolean waveOnSaved = true;
+    private int waveModeSaved = 1;
+
+    // ── 波形幅度包络 + 状态沉降：解决「处理中 ↔ Siri 波」来回硬跳 ──────────────────
+    // 两个问题合起来看：
+    //  ① 抖动：一个回合里 DSH 会多次报 THINKING / ANSWERING / IDLE（多段生成、工具调用之间），
+    //     而 IDLE 一到就把形态交还给用户的 Siri 模式 → 球在「流体圆点」和「Siri 波」之间闪。
+    //  ② 生硬：waveMode 是 uniform 里的分支，切换即换脸，没有过渡。
+    // 对策：
+    //  ① 沉降（settle）：IDLE 不当场生效，压后 IDLE_SETTLE_MS。期间任何一次真实活动
+    //     （THINKING/ANSWERING/LISTENING…）都会取消它 —— 只有「确实安静下来了」才回 IDLE。
+    //  ② 包络（gate）：换形态先把幅度淡到 0、换完再淡回来（WAVE_FADE_MS ×2）。
+    private String stateNow = "IDLE";          // 球当前呈现的助手状态
+    private long stateEnteredAt = 0;           // 进入 stateNow 的时刻
+    private Runnable idleSettle;               // 压后的「回 IDLE」
+    private long stateSig = 0;                 // 去重：同一个状态连续上报只处理一次
+    private static final long IDLE_SETTLE_MS = 1200;   // 安静多久才算真的结束
+
+    private float waveGateTarget = 1f;
+    private int waveModePending = -1;          // 淡出到底时要切到的形态（-1=不切）
+    private static final long WAVE_FADE_MS = 180;
+
+    /** 每帧推进：幅度闸门朝目标走，走到底时执行挂起的形态切换。 */
+    private void pumpWaveGate() {
+        if (renderer == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        float dt = waveGateLastMs == 0 ? 0.016f : Math.min(0.05f, (now - waveGateLastMs) / 1000f);
+        waveGateLastMs = now;
+        if (renderer.waveGate == waveGateTarget) {
+            if (waveModePending >= 0 && waveGateTarget == 0f) {
+                // 已经淡到 0（画面里没有波也没有点）→ 现在换形态，看不出跳变
+                renderer.waveMode = waveModePending;
+                waveModePending = -1;
+                waveGateTarget = 1f;
+                Log.i("FloatingBall", "wave mode -> " + renderer.waveMode + "（幅度为 0 时切换）");
+            }
+            return;
+        }
+        float step = dt * 1000f / WAVE_FADE_MS;
+        float g = renderer.waveGate;
+        g += Math.max(-step, Math.min(step, waveGateTarget - g));
+        if (Math.abs(waveGateTarget - g) < 0.01f) g = waveGateTarget;
+        renderer.waveGate = Math.max(0f, Math.min(1f, g));
     }
 
-    private void restoreWave() {
+    private long waveGateLastMs = 0;
+
+    /** 让波形幅度淡出 →（可选）换形态 → 淡入。 */
+    private void setWaveForm(int mode) {
+        if (renderer == null) return;
+        if (mode < 0) {                            // 不换形态，只保证幅度是开着的
+            waveModePending = -1;
+            waveGateTarget = 1f;
+            return;
+        }
+        if (renderer.waveMode == mode && waveModePending < 0) {
+            waveGateTarget = 1f;
+            return;
+        }
+        waveModePending = mode;
+        waveGateTarget = 0f;
+    }
+
+    /** 把形态交还给用户自己的 Siri 模式设定（走包络，不硬切）。 */
+    private void releaseWaveForm() {
         if (!waveSaved || renderer == null) return;
-        renderer.waveOn = waveOnSaved;
-        renderer.waveMode = waveModeSaved;
-        waveSaved = false;
+        waveSaved = false;                         // 只交还一次；形态在淡出到底时才真正切
+        setWaveForm(waveModeSaved);
     }
 
     /** 助手状态：IDLE / LISTENING / TRANSCRIBING / THINKING / ANSWERING / OFF。 */
     public static void setAssistantState(String state) {
         FloatingBallService s = INSTANCE;
         if (s == null || s.renderer == null || state == null) return;
+
+        // OFF = 助手关了，立刻回 IDLE 并交还形态（不参与沉降）
+        if ("OFF".equals(state)) {
+            s.cancelIdleSettle();
+            s.stateNow = "IDLE";
+            s.stateSig++;
+            s.applyAssistantState("OFF");
+            Log.i("FloatingBall", "assistant state=OFF → IDLE（交还形态）");
+            return;
+        }
+
+        boolean active = !"IDLE".equals(state);
+        if (active) {
+            // 任何真实活动都取消「压后回 IDLE」，IDLE 才能真正代表结束
+            boolean hadSettle = s.idleSettle != null;
+            s.cancelIdleSettle();
+            if (!state.equals(s.stateNow)) {
+                s.stateNow = state;
+                s.stateSig++;
+                s.applyAssistantState(state);
+            } else if (hadSettle) {
+                Log.i("FloatingBall", "idle settle 被 " + state + " 取消（回合还没完）");
+            }
+            return;
+        }
+
+        // IDLE：压后生效 —— 安静 IDLE_SETTLE_MS 之后，才回 Siri 波 / 空白
+        if (s.idleSettle != null) return;          // 已经在压后了
+        if ("IDLE".equals(s.stateNow)) { s.stateSig++; s.applyAssistantState("IDLE"); return; }
+        final long sig = ++s.stateSig;
+        s.idleSettle = new Runnable() {
+            @Override public void run() {
+                FloatingBallService cur = INSTANCE;
+                if (cur == null || sig != cur.stateSig) return;
+                cur.idleSettle = null;
+                cur.stateNow = "IDLE";
+                cur.applyAssistantState("IDLE");
+                Log.i("FloatingBall", "idle settle 到点 → 交还 Siri 波 / 空白（安静了 "
+                        + IDLE_SETTLE_MS + "ms）");
+            }
+        };
+        s.main.postDelayed(s.idleSettle, IDLE_SETTLE_MS);
+        Log.i("FloatingBall", "IDLE 压后 " + IDLE_SETTLE_MS + "ms（期间再有活动就取消）");
+    }
+
+    private void cancelIdleSettle() {
+        if (idleSettle != null) {
+            main.removeCallbacks(idleSettle);
+            idleSettle = null;
+        }
+    }
+
+    /** 把状态真正落到波形上（走包络，不硬切形态）。 */
+    private void applyAssistantState(String state) {
+        if (renderer == null) return;
         if ("THINKING".equals(state)) {
             // 只有「思考中」才切到流体圆点
-            s.saveWaveOnce();
-            s.renderer.waveOn = true;
-            s.renderer.waveMode = 2;            // siriFluidDotsCore
-            s.setOrbMixTarget(1f);
+            saveWaveOnce();
+            renderer.waveOn = true;
+            setWaveForm(2);                        // siriFluidDotsCore
+            setOrbMixTarget(1f);
         } else if ("LISTENING".equals(state) || "TRANSCRIBING".equals(state)) {
-            s.saveWaveOnce();
-            s.renderer.waveOn = true;
-            s.renderer.waveMode = 1;            // siriWaveCore
-            s.setOrbMixTarget(0f);
+            saveWaveOnce();
+            renderer.waveOn = true;
+            setWaveForm(1);                        // siriWaveCore
+            setOrbMixTarget(0f);
         } else {
             // 回答中 / 空闲：交还给用户自己的 Siri 模式设定 ——
             // 回复就是「原本的 Siri 模式 + 球内文字」，不再叠任何特效
-            s.restoreWave();
-            s.setOrbMixTarget(0f);
-            if ("IDLE".equals(state) || "OFF".equals(state)) s.renderer.voiceBoost = 0f;
+            releaseWaveForm();
+            setOrbMixTarget(0f);
+            if ("IDLE".equals(state) || "OFF".equals(state)) renderer.voiceBoost = 0f;
         }
         Log.i("FloatingBall", "assistant state=" + state
-                + " waveOn=" + s.renderer.waveOn + " waveMode=" + s.renderer.waveMode
-                + " orbMix→" + s.orbMixTarget + " (0=关 1=Siri波 2=流体圆点)");
+                + " waveOn=" + renderer.waveOn + " waveMode=" + renderer.waveMode
+                + " gate→" + waveGateTarget + " pending=" + waveModePending
+                + " orbMix→" + orbMixTarget + " (0=Siri波 1=流体圆点)");
+    }
+
+    /** 助手接管前的波形设置存档（只存一次）。 */
+    private void saveWaveOnce() {
+        if (waveSaved || renderer == null) return;
+        waveOnSaved = renderer.waveOn;
+        waveModeSaved = renderer.waveMode == 0 ? 1 : renderer.waveMode;
+        waveSaved = true;
     }
 
     // ── 球内文字「钉住」：用户点一下文字就保持住，再点一下解除干预 ──────────────
@@ -2877,6 +3021,7 @@ public class FloatingBallService extends Service {
         running = false;
         INSTANCE = null;
         main.removeCallbacks(winSyncLoop);
+        cancelIdleSettle();
         main.removeCallbacks(renderTick);
         main.removeCallbacks(siriTick);
         removeSiriText();

@@ -406,3 +406,52 @@ python3 ~/oppo-watch-ai/android/tools/ball-proxy-state.py        # 单看代理�
 且本次启动没见过任何信号"才算遗留。
 
 **还没做的**：DSH 再重启一次可让插件带上"握手成功后删信号文件"的清理（非必需，球侧已有 8 秒豁免兜底）。
+
+## 状态动画：沉降 + 幅度包络（2026-10-15 新增）
+
+**用户反馈**：「处理中的动画在没有真正回复时不要恢复为 Siri 波和空白状态，不然老是在处理中和
+Siri 波之间跳动；而且处理中的动画老是断断续续，不丝滑。」
+
+**根因**（两个叠加）：
+
+1. **状态抖动**：一个回合里 DSH 会多次报 `THINKING / ANSWERING / IDLE`（多段生成、工具调用
+   之间各来一次），而 `IDLE` 一到就 `restoreWave()` 把形态交还给用户的 Siri 模式 →
+   球在「流体圆点」和「Siri 波」之间来回闪。
+2. **切换生硬**：`waveMode` 是 shader 里的分支（1=波 / 2=圆点），改它就是硬切换脸；
+   同一个 `uWaveAmp` 管着两者，所以也没有交叉淡化的余地。
+
+**做法**：
+
+- **沉降（settle）**：`IDLE` 不当场生效，压后 `IDLE_SETTLE_MS = 1200`；期间任何一次真实活动
+  （`THINKING/ANSWERING/LISTENING/TRANSCRIBING`）都会取消它。`ANSWERING` 仍然立即生效
+  （一旦开始出字就得是 Siri 波 + 文字），所以短回复也不会延迟。
+- **幅度包络（envelope）**：`GlassRenderer.waveGate`（0..1）乘在 `uWaveAmp` 上，只影响波/圆点，
+  **不动玻璃壳**。换形态时先淡到 0 → 在"无波无点"那一瞬切 `waveMode` → 再淡回 1
+  （`WAVE_FADE_MS = 180` 单程）。切换点被藏进"什么都没有"的那一帧里，看不出跳变。
+- 日志会打 `gate→` / `pending=` 和 `wave mode -> N（幅度为 0 时切换）`，便于回归。
+
+**实测（用调试口子喂状态，脚本可复现）**：
+
+```
+场景A 抖动：THINKING→IDLE→THINKING→IDLE→THINKING
+  22:10:59.229  THINKING: gate→0.0 pending=2
+  22:10:59.465  wave mode -> 2（幅度为 0 时切换）
+  22:10:59.634  IDLE  → 压后（没有交还）
+  22:11:00.044  THINKING → idle settle 被 THINKING 取消（回合还没完）
+  22:11:00.993  THINKING → 再次取消
+  → 三次 IDLE 假信号一次都没让球回到 Siri 波
+
+场景B 真结束：THINKING→ANSWERING→IDLE
+  22:11:07.196  ANSWERING: 换回 Siri 波（原设计：出字时就得是波+文字）
+  22:11:07.673  喂入 IDLE
+  22:11:08.992  idle settle 到点 → 交还（安静了 1200ms，正好符合设定）
+```
+
+球体区域像素校验：IDLE 与 THINKING 两态都有内容（均值 28–33），**没有空白帧**；
+淡出只掐掉波/圆点，玻璃壳一直在。
+
+**动画状态机的调试口子**（回归用，别删）：
+`touch /sdcard/Android/data/com.glslplayground.app/files/state-THINKING`
+（可选值 `IDLE/THINKING/ANSWERING/LISTENING/TRANSCRIBING/OFF`）。
+注意触发文件必须放在**球自己能删**的目录 —— 放 `/data/local/tmp` 会因为 SELinux
+（`shell_data_file` / untrusted_app 只能读不能删）删不掉，结果每 120ms 被反复消费一次。
