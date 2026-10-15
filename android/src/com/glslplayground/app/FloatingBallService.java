@@ -2075,6 +2075,8 @@ public class FloatingBallService extends Service {
     private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
     private long siriTickLast = 0;
+    /** 几何缓动时间常数（秒）：生长 0.06 跟手，收起 0.22 从容。 */
+    private volatile float siriEaseTau = 0.06f;
     private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
     private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
@@ -2836,6 +2838,7 @@ public class FloatingBallService extends Service {
     }
 
     private void enterTextHold() {
+        siriEaseTau = 0.06f;        // 出字时恢复跟手速度
         lastTextAt = android.os.SystemClock.uptimeMillis();
         if (!textHold) {
             textHold = true;
@@ -2850,6 +2853,7 @@ public class FloatingBallService extends Service {
         if (!textHold) return;
         textHold = false;
         releasingHold = true;
+        siriEaseTau = 0.22f;        // 收起慢一点：连续缩回，而不是一帧跳回最小球
         holdHalfX = holdHalfY = 0f;
         Log.i("FloatingBall", "text hold: off（本轮结束，回初始圆球）");
         // 直接落回初始形态，**不要**拿残留文字再量一遍 —— 那会量出「按最后那段文字算的方形」
@@ -3047,7 +3051,9 @@ public class FloatingBallService extends Service {
             long now = android.os.SystemClock.uptimeMillis();
             float dt = siriTickLast == 0 ? 0.016f : Math.min(0.05f, (now - siriTickLast) / 1000f);
             siriTickLast = now;
-            float k = 1f - (float) Math.exp(-dt / 0.06);
+            // 生长要跟手（0.06s），收起要从容（0.22s）—— 收字时从大方框缩回圆球，
+            // 太快就是"啪一下跳回去"（用户报的"上下跳动"）
+            float k = 1f - (float) Math.exp(-dt / Math.max(0.02f, siriEaseTau));
             // 面板挂着时**每帧把目标值钉回审批那一套**：Siri 那条路（镜像打字、静默清空、
             // 新一轮提问）随时可能调 measureSiriTargets() 把 tHalf* 改成小球尺寸，
             // 这里不许它影响面板 —— 面板撤走时才把控制权交还（approvalShown=false）。
@@ -3073,6 +3079,13 @@ public class FloatingBallService extends Service {
             }
             // 审批球挂着的时候：几何由审批那一套驱动，原球那条 Siri 文字通道一律不碰 ——
             // 这样原球的文字、钉住状态、光效设定在整个审批期间原封不动。
+            // 窗口跟着**动画值**走：文字期的方框是"一步步"量出来的（每换一行跳一次），
+            // 而收字回圆球时更是从 1044x2097 一次性掉回 787x573 —— 用户看到的就是"上下跳"。
+            // 这里按 16ms 的节拍让它跟着缓动值连续变，只在变化超过阈值时才真的动窗口。
+            if (!approvalShown && siriEnabled && aMaster > 0.02f) {
+                float baseS = winSize * 0.9f;
+                maybeUpdateSiriWindowSmooth(baseS * aHalfX * aMaster, baseS * aHalfY * aMaster);
+            }
             if (approvalShown) {
                 updateApprovalWindow();
                 updateApprovalLayout();
@@ -3130,12 +3143,26 @@ public class FloatingBallService extends Service {
         return homeCy;
     }
 
+    /**
+     * 按动画值平滑地跟窗口尺寸（过渡期用）。阈值 14px：静止时不产生任何窗口操作，
+     * 生长/收起时每帧连续变化 —— 屏幕上就是"方框连续长大/缩回"，而不是一格一格跳。
+     */
+    private void maybeUpdateSiriWindowSmooth(float hxpx, float hypx) {
+        float m = dp(24);
+        int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
+        int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
+        if (Math.abs(W - winW) < 14 && Math.abs(H - winH) < 14) return;
+        updateSiriWindow(hxpx, hypx);
+    }
+
     private void updateSiriWindow(float hxpx, float hypx) {
         if (!siriEnabled || wm == null || glView == null) return;
         float m = dp(24);
         int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
-        Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
+        if (Math.abs(W - winW) > 60 || Math.abs(H - winH) > 60) {
+            Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
+        }
         if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
         if (W == winW && H == winH) return;
         final float hx0 = homeCxSafe(), hy0 = homeCySafe();
@@ -3519,6 +3546,7 @@ public class FloatingBallService extends Service {
         if (areaPx > 700_000L) {
             scale = (float) Math.sqrt(520_000.0 / (double) areaPx);   // 目标 ≈52 万像素
             scale = Math.max(0.42f, Math.min(1f, scale));
+            scale = Math.round(scale * 10f) / 10f;                    // 量化到 0.1：少几次缓冲重建
         }
         int bw = Math.max(2, Math.round(winW * scale));
         int bh = Math.max(2, Math.round(winH * scale));
@@ -3549,7 +3577,9 @@ public class FloatingBallService extends Service {
         renderer.winY = loc[1];
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
-        rememberHomeIfMinimal();        // 最小形态时顺手刷新"家"（滚偏了也能自愈）
+        // ⚠️ 这里**不要**再周期性 rememberHomeIfMinimal()：平滑跟窗时窗口会滞后动画十几像素，
+        // 顺手一记就把这点滞后烘焙成了新的"家"，一轮一轮累积 —— 实测球每轮往下漂 ~27px。
+        // "家"只在两处更新：服务启动时的窗口位置、以及用户拖动球（且当时是最小形态）。
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面。
         // ⚠️ 这一步必须是**无条件**的：一旦球没被排除，抓屏里就含着球自己，背景会被冻住
         // （球内显示的是启动那一刻的画面，或者干脆是球自己的上一帧）→ 观感就是「半透明贴纸」
