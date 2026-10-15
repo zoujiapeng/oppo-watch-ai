@@ -263,6 +263,9 @@ public class FloatingBallService extends Service {
             }
         } catch (Throwable ignored) { }
         if (!f.delete() && f.exists()) return;
+        // 顺带支持参数热重载：改了 float_params 后碰一下这个钩子即可生效，
+        // 不必重装 APK / 重启服务（调折射、缩放这类参数时很有用）。
+        if (pumpParamsReload()) return;
         if (payload != null && !payload.isEmpty()) {
             final String text = payload;
             Log.i("FloatingBall", "shot request text len=" + text.length());
@@ -3177,6 +3180,7 @@ public class FloatingBallService extends Service {
         main.post(renderTick);
         main.postDelayed(winSyncLoop, 500);
         applySavedParams();
+        lastParamsJson = prefs().getString("float_params", null);
         renderer.bgMode = prefs().getInt("float_mode", 0);
         if (prefs().getBoolean("float_siri", false)) applySiriEnabled(true);
     }
@@ -3204,6 +3208,18 @@ public class FloatingBallService extends Service {
     // ───────────────────────── 参数同步（来自 liquid-glass 页面）─────────────────────────
     private android.content.SharedPreferences prefs() {
         return getSharedPreferences("watch", MODE_PRIVATE);
+    }
+
+    private String lastParamsJson = null;
+
+    /** float_params 有变化就重新应用；返回 true 表示这轮只做了重载（不抓帧）。 */
+    private boolean pumpParamsReload() {
+        String s = prefs().getString("float_params", null);
+        if (s == null || s.equals(lastParamsJson)) return false;
+        lastParamsJson = s;
+        applyParams(s);
+        Log.i("FloatingBall", "float_params 热重载（" + s.length() + " 字节）");
+        return true;
     }
 
     private void applySavedParams() {
