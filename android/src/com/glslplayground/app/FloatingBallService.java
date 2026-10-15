@@ -3102,7 +3102,9 @@ public class FloatingBallService extends Service {
         float safeBottom = screenH * SIRI_SAFE_BOTTOM_RATIO;
         if (bottom > safeBottom) top -= (bottom - safeBottom);
         float minTop = Math.max(0f, winY0());
+        float maxTop = Math.max(minTop, screenH - halfH * 2f - winY0());   // 别把球顶到屏幕外
         if (top < minTop) top = minTop;
+        if (top > maxTop) top = maxTop;
         return top;
     }
 
@@ -3147,6 +3149,14 @@ public class FloatingBallService extends Service {
             return;
         }
         mdScrolling = false;
+        // ★ 用户规则：「处理中不恢复初始形状，处理中的圆点动画和那段文字一起待着等下一个回复」。
+        //   所以只要助手还在处理中（THINKING/ANSWERING），这个 8 秒兜底也**不许**释放 —— 否则
+        //   长任务（几十个 step、几分钟）里球会自己缩回圆球、文字也没了。
+        //   真正的收回只由「最终回复安静 1.5s」（SiriAssistant.quietTick）触发。
+        if ("THINKING".equals(stateNow) || "ANSWERING".equals(stateNow)) {
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            return;
+        }
         long idleMs = android.os.SystemClock.uptimeMillis() - lastTextAt;
         if (idleMs > HOLD_SAFETY_MS) {
             Log.i("FloatingBall", "text hold: 兜底释放（出字后静了 " + idleMs + "ms）");
@@ -3444,7 +3454,17 @@ public class FloatingBallService extends Service {
         // 竖直：**家的球顶钉住，高度往下长**（用户要求"高度随文字往下涨"）。
         // 以前保持球心不动 → 文字一变长球就往上顶，观感是"球在往上跑、波也跟着上去"。
         // 窗口 = 球 + 四周 m 留白 ⇒ 窗口顶边 = 常态圆球的球顶 - m。
-        params.y = Math.round(ballTopOnScreen(hypx) - m - winY0());
+        // 竖直定位：球顶（含"躲开输入区"的上移）+ 夹到屏幕内。
+        // ⚠️ 必须在这里按**屏幕坐标**夹：ballTopOnScreen() 返回的是屏幕 y，
+        // 而 params.y 是请求坐标（与屏幕差一个 inset）。之前只在 ballTopOnScreen 内部夹，
+        // 夹的是请求坐标 → 球实际会掉到屏幕外（实测球窗到 1024+1449=2473，屏只有 2412），
+        // 文字跟着一起出界，用户看到的就是"底下文字超出方形/看不到"。
+        int reqY = Math.round(ballTopOnScreen(hypx) - m - winY0());
+        int winHNow = params.height;                       // 刚设好的窗口高
+        int minReqY = Math.round(winY0() - m);             // 玻璃顶不高于屏幕上沿
+        int maxReqY = Math.round(screenH - winY0() - (winHNow - 2 * m) - m);  // 玻璃底不低于屏幕下沿
+        if (maxReqY < minReqY) maxReqY = minReqY;
+        params.y = Math.max(minReqY, Math.min(maxReqY, reqY));
         Log.i("FloatingBall", "siri window place: home=(" + Math.round(hx0) + ","
                 + Math.round(hy0) + ") 球顶=" + Math.round(ballTopOnScreen(hypx))
                 + " m=" + Math.round(m) + " -> params=(" + params.x + "," + params.y + ")"
@@ -3490,16 +3510,20 @@ public class FloatingBallService extends Service {
         int topPad = (int) dp(8);           // 与 rebuildMarkdown 的 padTop 保持一致
         int padBottomSafe = (int) dp(14);
         int tw = Math.max((int) dp(40), mdLayoutWidthPx());
+        // 高度 = 球顶+留白 → 球底−留白，但**同时**不能超出屏幕可用范围，
+        // 也不能小于 0（球被摆得很高时空间会不够）。空间不足就变矮，由 ScrollView 滚。
         int availTop = Math.round(ballTop + topPad);
-        int availBottom = Math.round(ballBottom - padBottomSafe);
+        int availBottom = Math.round(Math.min(ballBottom - padBottomSafe, screenH - (int) dp(8)));
         int th = Math.max((int) dp(40), availBottom - availTop);
+        th = Math.min(th, Math.max((int) dp(40), Math.round(screenH - dp(12))));
         siriViewportH = th;
-
         int x = Math.max(0, Math.min(Math.max(0, screenW - tw), Math.round(sx - tw / 2f)));
         int wantScreenY = Math.round(ballTop) + 2;
-        int maxScreenY = Math.round(ballBottom) - padBottomSafe - th;
-        if (maxScreenY < wantScreenY) maxScreenY = wantScreenY;  // 球比文字还矮：贴着球顶
+        int maxScreenY = Math.round(ballBottom) - padBottomSafe - th;   // 不越球底
+        if (maxScreenY < wantScreenY) maxScreenY = wantScreenY;         // 球比文字还矮：贴球顶
+        int screenLimit = Math.round(screenH - dp(8) - th);             // 也不越屏幕底
         int screenY = Math.max(wantScreenY, Math.min(maxScreenY, availTop));
+        if (screenY > screenLimit) screenY = Math.max(wantScreenY, screenLimit);
         int y = screenY - sysDy;
 
         // ⚠️ 只在真的变了才 updateViewLayout（这函数跑在 16ms 的 tick 上，每帧重摆 = 每帧一次跨进程事务）

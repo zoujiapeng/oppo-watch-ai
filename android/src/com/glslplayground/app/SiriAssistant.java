@@ -571,29 +571,42 @@ public final class SiriAssistant {
     private volatile long lastTextAt = android.os.SystemClock.uptimeMillis();
     private final Runnable quietTick = new Runnable() {
         @Override public void run() {
-            // 用户点过球内文字 = 钉住：文字保持不动，直到他再点一下文字解除干预
+            // 用户点过球内文字 = 钉住：文字保持不动，直到他再点一下解除干预
             if (FloatingBallService.isAssistantTextPinned()) return;
             long quiet = android.os.SystemClock.uptimeMillis() - lastTextAt;
             // 打字机队列里还有没弹完的字 → 重排计时，别在半途把字清掉
             if (targetText.length() > shownText.length()) { armQuiet(); return; }
-            // 用户正在球里翻阅 → 不清、不收，继续等
+            // 用户正在球里翻阅 → 不清、不收，继续等（松手 MD_SCROLL_HOLD_MS 后才继续）
             if (FloatingBallService.isTextBeingScrolled()) { armQuiet(); return; }
-            // ① 最终回复：安静 1.5s → 收形状（回初始圆球）
-            if (turnSettled && quiet >= FINAL_SHAPE_BACK_MS && !shapeBackSent) {
-                shapeBackSent = true;
-                FloatingBallService.releaseHoldForFinalReply();
+
+            // ★ 用户 2026-10-16 明确的规则：
+            //   「除了最终回复外的每次回复都没必要恢复回初始形状 —— 处理中的动画也可以出现在
+            //     方形内，和那段不算长的文字待在一起，等下一个回复」。
+            //   所以本轮**还没结束**（没有 turn/end、也不是本 App 自己那条流收完）时：
+            //   文字不清、形状不收，一律保持方形态，直到最终回复到来。
+            if (!turnSettled) {
+                main.postDelayed(this, 200);
+                return;
             }
-            // ② 更久（4s）才做"清文字"的兜底
+
+            // ① 最终回复：安静 1.5s → 收形状，**并且同一时刻把文字清掉**
+            //    （用户要求：变回初始形状时不允许出现任何文字）
+            if (!shapeBackSent && quiet >= FINAL_SHAPE_BACK_MS) {
+                shapeBackSent = true;
+                if (shownText != null && !shownText.isEmpty()) sayNow("");   // 先清字
+                FloatingBallService.releaseHoldForFinalReply();             // 再收形状
+                Log.i(TAG, "最终回复安静 " + FINAL_SHAPE_BACK_MS + "ms → 清字 + 收形状（回初始圆球）");
+            }
+            // ② 更久的兜底：只负责把"回答中/思考中"的光效收掉（文字/形状上面已经处理）
             if (quiet < IDLE_CLEAR_MS) { main.postDelayed(this, 200); return; }
-            if (shownText != null && !shownText.isEmpty()) sayNow("");   // 文字消散，球自己缩回原样
-            // 不管有没有字：球不该一直挂着「回答中/思考中」的光效
+            if (shownText != null && !shownText.isEmpty()) sayNow("");
             if (state == State.ANSWERING || state == State.THINKING) setState(State.IDLE);
         }
     };
 
     /**
-     * 调试口子：把当前这轮标记成"最终回复已到"，并重排安静计时。
-     * 用它可以在**没有真实 DSH 回合**的情况下验证"1.5 秒收形状"这条链路。
+     * 调试口子：把当前这轮标记成"最终回复已到"并重排安静计时。
+     * 用于**不跑真实 DSH 回合**也能验证"1.5 秒清字 + 收形状"这条链路。
      */
     public void debugMarkTurnSettled() {
         main.post(new Runnable() {
@@ -687,7 +700,15 @@ public final class SiriAssistant {
      * 全塞进球里的话 TextView 会撑成一整面墙、文字糊在球外面 —— 球是「当前这句话」的显示器，
      * 不是日志窗口。封顶后：球里永远只有能装下的最后一段，超出部分自动消失。
      */
-    private static final int BALL_TEXT_MAX = 600;
+    /**
+     * 球内文字的硬上限（超了只留**最后一段**，前面加省略号）。
+     *
+     * 历史：原方案是 TextView，600 字就会撑成一整面墙，所以卡在 600；
+     * 现在球内是**可滚动的原生富文本**，600 字连一屏都不到（实测一屏约 1000px/18px ≈ 700 字），
+     * 用户报"最终回复那么长我只看到一点点"就是这个上限卡的。
+     * 现在与镜像缓存（{@code DshHttpTransport.MIRROR_BUF_MAX}）对齐到 2500 字。
+     */
+    private static final int BALL_TEXT_MAX = 2500;
 
     private static String clipToBall(String text) {
         String t = text == null ? "" : text;
