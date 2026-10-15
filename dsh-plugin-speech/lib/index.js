@@ -56,6 +56,12 @@ export const name = "speech";
 export const inject = ["llm"];
 
 const PROBE = "/sdcard/Android/data/com.glslplayground.app/files/speech-probe.txt";
+const LOGF = "/sdcard/Android/data/com.glslplayground.app/files/speech-plugin.log";
+
+/** 直接落盘的日志：不依赖 ctx.logger 是否可见（排查期用）。 */
+function note(msg) {
+  try { fs.appendFileSync(LOGF, `${new Date().toISOString().slice(11, 19)} ${msg}\n`); } catch (_) {}
+}
 const DEBUG = process.env.DSH_SPEECH_DEBUG !== "0";   // 排查期默认开
 
 /** 探针：把 assistant/message 的**真实结构**写成一行摘要，用来定位取值为空的原因。 */
@@ -94,21 +100,23 @@ export function apply(ctx) {
     if (type !== "assistant/message") return;
 
     const text = textOf(event).trim();
-    if (!text) return;
+    if (!text) { note("收到 assistant/message 但取不到正文"); return; }
     const source = messageOf(event)?.source ?? {};
     const provider = source.provider;
     const model = source.model;
     if (!provider || !model) {
-      // 静默失败过一次（取错层级），这里留一行日志：拿不到 provider/model 就说清楚
-      ctx.logger?.info?.(`speech: 事件里没有 provider/model（source=${JSON.stringify(source)}），跳过`);
+      note(`没有 provider/model（source=${JSON.stringify(source)}），跳过`);
       return;
     }
+    note(`收到 assistant/message：正文 ${text.length} 字，${provider}/${model}`);
 
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
     (async () => {
       try {
+        note("开始调用 ctx.llm.stream …");
         const assembler = new BlockAssembler();
+        let chunks = 0;
         for await (const chunk of ctx.llm.stream({
           provider,
           model,
@@ -123,14 +131,16 @@ export function apply(ctx) {
           signal: ac.signal,
         })) {
           assembler.push(chunk);
+          chunks++;
         }
-        const spoken = assembler.blocks()
-          .filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
-        if (!spoken) return;
+        const blocks = assembler.blocks();
+        const spoken = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
+        note(`模型返回 chunks=${chunks} blocks=${blocks.map((b) => b.type).join("|")} 文本=${spoken.length} 字`);
+        if (!spoken) { note("模型没给文本，跳过（球用规则清洗）"); return; }
         writeAtomic(OUT, spoken);
-        ctx.logger?.info?.(`speech: 口播稿 ${spoken.length} 字已写入`);
+        note(`口播稿 ${spoken.length} 字已写入`);
       } catch (e) {
-        ctx.logger?.info?.(`speech: 改写失败（悬浮球会用本地规则）: ${e?.message ?? e}`);
+        note(`改写失败: ${e?.name ?? ""} ${e?.message ?? e}`);
       } finally {
         clearTimeout(timer);
       }
