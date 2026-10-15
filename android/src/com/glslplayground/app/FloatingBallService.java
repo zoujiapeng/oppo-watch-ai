@@ -2986,6 +2986,43 @@ public class FloatingBallService extends Service {
         });
     }
 
+    /**
+     * **彻底隐藏所有会显示文字的东西**（用户明确要求：变回初始形状之前必须先隐藏）。
+     *
+     * 做四件事，一次做完、顺序固定：
+     *   ① 把内容列清空（不留任何 View，避免残留半帧内容）；
+     *   ② 文字层 `GONE`（立即生效、不参与布局，不等窗口/测量的异步更新）；
+     *   ③ 指纹清空（下次出现时重建，而不是沿用旧高度）；
+     *   ④ 触摸关掉（圆球态手势全归球）。
+     *
+     * 为什么不只 setText("")：文字层的窗口/布局更新是异步的，
+     * 只清字符串的话，球收缩的那半秒里旧文字还留在屏上（用户报过"球小了字还在"）。
+     */
+    private void forceHideAllText() {
+        siriTextShown = false;
+        if (mdColumn != null) mdColumn.removeAllViews();      // ① 内容清空
+        mdContentH = 0;
+        mdBuiltFor = "";
+        if (siriText != null) {
+            siriText.setVisibility(View.GONE);                // ② 立即不可见
+            siriText.scrollTo(0, 0);
+        }
+        siriTextTouchable = false;                            // ④ 触摸归球
+        Log.i("FloatingBall", "隐藏所有文字：视图=" + (siriText == null ? "null" : siriText.getVisibility())
+                + "（8=GONE）内容块=" + (mdColumn == null ? -1 : mdColumn.getChildCount()));
+        if (syncSiriTouchLayerQuiet()) return;
+        syncSiriTouchLayer();
+    }
+
+    /** 供 forceHideAllText 用：把"不可触摸"直接落下去（跳过可滚动判定）。 */
+    private boolean syncSiriTouchLayerQuiet() {
+        if (siriText == null || siriParams == null || wm == null) return false;
+        if ((siriParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) return true;
+        siriParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        try { wm.updateViewLayout(siriText, siriParams); } catch (Throwable ignored) { }
+        return true;
+    }
+
     /** 立刻把球内文字藏掉（不进布局）—— 球缩回最小形态时必须同一帧生效。 */
     private void hideSiriTextNow() {
         if (siriText == null) return;
@@ -3178,15 +3215,24 @@ public class FloatingBallService extends Service {
 
     /** 释放保持，把球交还给「初始圆球」形态。 */
     private void releaseTextHold() {
-        if (!textHold) return;
+        // ⚠️ 这里**不能**再 `if (!textHold) return;`：那样"没在保持"时直接返回，
+        // 文字不会被隐藏，但形状照样收 —— 用户看到的正是「先变形、字还挂在球上」。
+        // 现在无论是否在保持，都先把所有文字隐藏掉（顺序也是硬要求）。
+        forceHideAllText();          // ★ 先隐藏一切文字
+        if (!textHold) {
+            // 没在保持：只需把几何落回初始形态（可能是文字被清空后残留的大几何）
+            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+            float bb = winSize * 0.9f;
+            updateSiriWindow(bb * minHalfX, bb * minHalfY);
+            return;
+        }
         textHold = false;
         releasingHold = true;
         siriEaseTau = 0.22f;        // 收起慢一点：连续缩回，而不是一帧跳回最小球
         holdHalfX = holdHalfY = 0f;
         Log.i("FloatingBall", "text hold: off（本轮结束，回初始圆球）");
         // 直接落回初始形态，**不要**拿残留文字再量一遍 —— 那会量出「按最后那段文字算的方形」
-        // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字层同一时刻藏掉。
-        hideSiriTextNow();
+        // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字已在方法开头彻底隐藏。
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         if (renderer != null) renderer.waveInGlass = 0f;   // 球底那截波跟着收掉
         if (glView != null) {                              // 回最小形态 → 恢复全分辨率渲染
