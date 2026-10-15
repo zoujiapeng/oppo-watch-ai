@@ -366,6 +366,54 @@ public class MainActivity extends Activity {
         }
     }
 
+    // 球内 AI 回复（富文本）正文字号比例（百分数，25 = 0.25）：正文 = 「Siri 字号」× 它
+    public int getMdFontRatioPct() {
+        return prefs().getInt("md_font_ratio_pct", 25);
+    }
+
+    public void setMdFontRatioPct(int pct) {
+        pct = Math.max(5, Math.min(120, pct));
+        prefs().edit().putInt("md_font_ratio_pct", pct).apply();
+        if (FloatingBallService.running) FloatingBallService.onMdStyleChanged();
+    }
+
+    // 审批/提问面板整体缩放（百分数，55 = 0.55）
+    public int getApScalePct() {
+        return prefs().getInt("ap_scale_pct", 55);
+    }
+
+    public void setApScalePct(int pct) {
+        pct = Math.max(20, Math.min(150, pct));
+        prefs().edit().putInt("ap_scale_pct", pct).apply();
+        FloatingBallService.onApStyleChanged();
+    }
+
+    /** 离线预览：往球里灌一段示例 markdown（不依赖 DSH），并钉住方便调字号。 */
+    public void previewSiriText() {
+        String sample = FloatingBallService.readPreviewSample();
+        setSiriEnabled(true);
+        if (!FloatingBallService.running) {
+            android.util.Log.w("MainActivity", "离线预览：悬浮球没开（先打开「悬浮于桌面」）");
+            return;
+        }
+        FloatingBallService.previewText(sample != null ? sample : MD_SAMPLE);
+    }
+
+    public void previewSiriTextStop() {
+        FloatingBallService.previewStop();
+    }
+
+    /** 内置预览样例（有 files/md-sample.md 时用那个）。 */
+    private static final String MD_SAMPLE =
+            "# 排版预览\n\n这是一段用于调字号的示例 markdown。\n\n"
+            + "| 方案 | 成本 | 说明 |\n|---|---|---|\n"
+            + "| 本地规则清洗 | 0 | 零依赖，语义不变 |\n"
+            + "| 模型改写 | 1 次小请求 | 需要 dsh-llm |\n\n"
+            + "1. 第一步：拖字号滑块\n2. 第二步：看球里的变化\n   - 嵌套一层也能对齐\n\n"
+            + "> 引用：黑区下沿按文字实际高度算。\n\n"
+            + "```bash\necho 0.25 > files/md-ratio\n```\n\n"
+            + "最后一段普通文字，验证换行与滚动。\n";
+
     // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）；
     // 黑区下沿本身由文字实际高度决定，不再按行数下移。
     public int getSiriBlackStep() {

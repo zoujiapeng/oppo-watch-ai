@@ -290,8 +290,20 @@ public class FloatingBallService extends Service {
     //   state-TURNSTART → 等价于新一轮开始（把闸门关回去）
     // 为什么要它：turn/end 只有真跑完一整轮 DSH 才会有，回归「最终结果才出波」时
     // 不可能每次都等一次完整对话。
+    /** 没有 files/md-sample.md 时的内置预览样例（表格/列表/代码块齐全）。 */
+    private static final String MD_PREVIEW_FALLBACK =
+            "# 排版预览\n\n球内正文 = 「Siri 字号」×「球内回复字号比例」。\n\n"
+            + "| 方案 | 成本 | 说明 |\n|---|---|---|\n"
+            + "| 本地规则清洗 | 0 | 零依赖 |\n| 模型改写 | 1 次请求 | 需要 dsh-llm |\n\n"
+            + "1. 第一步：拖字号滑块\n2. 第二步：看球里的变化\n   - 嵌套一层\n\n"
+            + "> 引用：黑区下沿按文字实际高度算。\n\n"
+            + "```bash\necho 0.25 > files/md-ratio\n```\n\n"
+            + "最后一段普通文字，验证换行与滚动。";
+
     private static final String[] STATE_EXTRA =
-            {"TURNEND", "TURNSTART"};
+            {"TURNEND", "TURNSTART",
+             // 离线预览：`touch files/state-PREVIEW` 灌示例并钉住；`state-PREVIEWOFF` 结束。
+             "PREVIEW", "PREVIEWOFF"};
 
     private void pumpStateRequest() {
         long now = android.os.SystemClock.uptimeMillis();
@@ -302,7 +314,14 @@ public class FloatingBallService extends Service {
             if (!f.exists()) continue;
             f.delete();
             Log.i("FloatingBall", "state extra (debug): " + name);
-            applyTurnEnded("TURNEND".equals(name));
+            if ("PREVIEW".equals(name)) {
+                String smp = readPreviewSample();
+                previewText(smp != null ? smp : MD_PREVIEW_FALLBACK);
+            } else if ("PREVIEWOFF".equals(name)) {
+                previewStop();
+            } else {
+                applyTurnEnded("TURNEND".equals(name));
+            }
             return;
         }
         for (final String name : STATE_NAMES) {
@@ -879,7 +898,7 @@ public class FloatingBallService extends Service {
         renderer.waveOn = false;          // 面板不带 Siri 波（退出时按存档还原）
         renderer.voiceBoost = 0f;
 
-        float d = getResources().getDisplayMetrics().density * AP_SCALE;   // 面板整体等比缩放
+        float d = getResources().getDisplayMetrics().density * apScale();   // 面板整体等比缩放
         apPadX = Math.round(AP_PAD_X_DP * d);
         apPadY = Math.round(AP_PAD_Y_DP * d);
         apGap = Math.round(AP_GAP_DP * d);
@@ -2147,6 +2166,87 @@ public class FloatingBallService extends Service {
         rebuildMarkdown();
     }
 
+    /**
+     * 离线预览：把示例 markdown 显示在球里并**钉住**，方便慢慢调字号/排版（不依赖 DSH）。
+     */
+    public static void previewText(final String text) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.applySiriText(text);
+                setAssistantPinned(true);
+                // 预览必须进方形态：先让几何展开（否则 squareFormActive() 会把内容挡掉）
+                s.enterTextHold();
+                s.mdBuiltFor = "";
+                s.rebuildMarkdown();
+                Log.i("FloatingBall", "离线预览：灌入示例（"
+                        + (text == null ? 0 : text.length()) + " 字）并钉住");
+            }
+        });
+    }
+
+    /** 结束离线预览（解除钉住 + 清空 + 回圆球）。 */
+    public static void previewStop() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                setAssistantPinned(false);
+                s.applySiriText("");
+                s.releaseTextHold();
+                Log.i("FloatingBall", "离线预览：结束");
+            }
+        });
+    }
+
+    /** 读离线预览样例（`files/md-sample.md`，没有就返回 null，调用方用内置那份）。 */
+    static String readPreviewSample() {
+        try {
+            FloatingBallService s = INSTANCE;
+            java.io.File dir = (s != null) ? s.getExternalFilesDir(null) : null;
+            if (dir != null) {
+                java.io.File f = new java.io.File(dir, "md-sample.md");
+                if (f.isFile() && f.length() > 0 && f.length() < 64 * 1024) {
+                    byte[] buf = new byte[(int) f.length()];
+                    java.io.FileInputStream in = new java.io.FileInputStream(f);
+                    int n = in.read(buf);
+                    in.close();
+                    if (n > 0) return new String(buf, 0, n, "UTF-8").trim();
+                }
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    /** 设置页改了「球内字号比例」→ 立刻重建内容（字号即时生效）。 */
+    public static void onMdStyleChanged() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.mdBuiltFor = "";
+                s.rebuildMarkdown();
+            }
+        });
+    }
+
+    /** 设置页改了「审批面板缩放」→ 下次弹就是新尺寸（挂着的话当场重排）。 */
+    public static void onApStyleChanged() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.apGeomDirty = true;
+                if (s.approvalShown && s.approvalReq != null) {
+                    s.applyApprovalGeometry();
+                    s.updateApprovalWindow();
+                    s.updateApprovalLayout();
+                }
+            }
+        });
+    }
+
     /** 每多一行黑区整体下移量（百分之一单位，35=0.35），实时生效。 */
     public static void setSiriBlackStep(int v) {
         FloatingBallService s = INSTANCE;
@@ -2309,6 +2409,10 @@ public class FloatingBallService extends Service {
      */
     private void rebuildMarkdown() {
         if (mdColumn == null) return;
+        // ⚠️ 必须保证字号已初始化：siriTextPx 平时由 measureSiriTargets/setupSiriText 设，
+        // 但预览/设置页可能在它们之前就触发重建 —— 那时 siriTextPx=0，正文会被夹到下限 9px
+        //（实测"预览里字特别小"就是这个）。
+        if (siriTextPx <= 0) siriTextPx = dp(27);
         String src = displayTextOf(siriStr);
         int width = Math.max((int) dp(120), mdLayoutWidthPx());
         String key = src.length() + "|" + width + "|" + Math.round(siriTextPx)

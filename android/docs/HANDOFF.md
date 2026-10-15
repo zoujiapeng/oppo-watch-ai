@@ -87,12 +87,133 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
   实时生效、随 `float_params` 一起持久化。
   注意：Siri 模式（聆听/思考/回答）下球体几何走 `svHalf*/tMaster`，`master` 不参与 ——
   所以 `minHalfX/minHalfY`（空球基准比例）刻意**不乘** master，否则滑块一动就双重缩放。
-- **球高封顶屏高 70%**，封顶后按能放下的行数截断并加省略号；`measureSiriTargets` 还会再校验
-  measured 高度、超了就继续减行数（兜底，防文字糊到球外）。
-- **球内文字长度封顶 600 字**（`SiriAssistant.BALL_TEXT_MAX`，超了只留最后一段）＋
+- **球高封顶屏高 55%**（`SIRI_H_RATIO`，2026-10-16 用户要求从 85% 收到 55%），
+  封顶后**不再截断**：多出来的内容在玻璃**内部滚动**（见下面「球内富文本」一节）。
+- **球内文字长度封顶 4000 字**（`FloatingBallService.BALL_TEXT_MAX`，超了只留最后一段）＋
   镜像缓存封顶 1200 字（`DshHttpTransport.MIRROR_BUF_MAX`）—— 一条长任务的输出几万字，
-  不封顶的话 TextView 会撑成一整面墙、文字堵在球外面。
-- 文字排版全部走 App 原有设定（字号/距球顶/内边距/圆角），助手只调 `setSiriText`。
+  不封顶的话球内页面会撑成一整面墙。
+- 文字排版：字号仍取设置页「Siri 字号」，但富文本正文会再乘 `MD_FONT_RATIO`（0.78），
+  距球顶/内边距/圆角沿用原设定，助手只调 `setSiriText`。
+
+## 球内富文本：**原生 View 方案**（2026-10-16 第二次大改，取代 WebView）
+
+> 历史：先做了 WebView + 自写 markdown（能渲染真表格），但真机上出现
+> **「有球无字」+ 一次进程 native 崩溃**，而球的两层窗口都被 SKIP_SCREENSHOT 排除、
+> 截屏/球体截图都拍不到它 —— 这类问题在悬浮窗里的 WebView 上**无法自证**。
+> 用户拍板改用原生，于是有了现在这套。
+
+### 现在的结构
+
+| 位置 | 说明 |
+|---|---|
+| `BallMarkdownView.java` | markdown → **View 树**：标题 / 列表（带缩进）/ 引用 / 代码块 / 分割线 / 行内粗斜体与行内代码 / **逐行对齐的表格** |
+| `FloatingBallService.siriText` | `ScrollView`（球内滚动） |
+| `FloatingBallService.mdColumn` | 里面的 `LinearLayout`，放渲染出来的块 |
+| `setupSiriTouchLayer` | 球顶「抓取条」：拖球 / 单击钉住（文字区留给滚动） |
+
+### 关键实现点
+
+1. **内容高度是量出来的，不是猜的**：`rebuildMarkdown()` 里
+   `mdColumn.measure(EXACTLY(宽), UNSPECIFIED)` → `getMeasuredHeight()`，
+   单位就是物理像素，和球的几何同一套坐标（WebView 时代这里要靠页面 JS 回报 + 缩放换算，
+   踩了 6 个坑）。
+2. **指纹去抖**：`mdBuiltFor = 文字长度 | 宽度 | 字号`，没变就不重建 —— 避免
+   "同一内容反复重排"导致的脉动/闪烁。
+3. **表格**：每行一个横向 `LinearLayout`、每列一个定宽 `TextView`，列宽按各列最长内容
+   加权分配（**不画网格线**，只画表头下一条细线 —— 球内是玻璃背景，网格线很脏）。
+4. **行内格式解析失败就原样显示**（`try/catch` 兜底）：排版出点错远好过把球搞崩。
+5. **超长截断**：只留最后 `MAX_CHARS = 2500` 字（结论通常在最后）。
+6. **字号** = 设置页「Siri 字号」×「球内回复字号比例」（滑块，默认 0.25 ≈ 18px）。
+7. **触摸让路**：文字层要能滚动所以是可触摸的，会挡住下面 App 的手势；
+   `applyTextTouchGate()` 在 `agentActing` 为真时给它设 `FLAG_NOT_TOUCHABLE`。
+
+## 球内富文本：WebView + 自写 markdown（2026-10-16 大改，重点看）
+
+**用户要求**：① 方形玻璃高度限制在屏高 55%；② 文字永远被束缚在玻璃里，满了像记事本一样
+上下滑；③ AI 回复要和 DSH 网页一样支持表格之类的 markdown；④ 不要打字机效果。
+
+### 结构
+
+| 位置 | 说明 |
+|---|---|
+| `BallMarkdown.java` | markdown → HTML（表格/标题/列表/引用/代码块/行内样式）＋页面 CSS/JS。纯静态、零依赖 |
+| `FloatingBallService.siriText` | 从 `TextView` 换成 **`WebView`**（透明背景，压在玻璃黑区上） |
+| `setupSiriTouchLayer` | 原来那张「和文字等大的透明触摸层」改成**球顶一条抓取条**（文字区要能滚） |
+
+几何：宽度固定 85% 屏宽、高度 = 内容高度（封顶 55% 屏高），
+内容比视口高时 WebView 内部滚动（`overflow` 默认行为，不需要额外代码）。
+
+### 六个必须记住的坑（都实测踩过）
+
+1. **CSS 数值必须除以 density**。Android WebView 里 `font-size:27px` 画出来是 **71 物理像素**
+   （27 × density 2.625）；`setInitialScale` 和 viewport meta 里的 `initial-scale`
+   **都不认**（页面探针量出来永远是 1，因为 DOM 报的就是 CSS px）。所以 Java 侧写 CSS 时
+   全部除以 `mdScale`（= density），字号用 `siriTextPx * MD_FONT_RATIO / mdScale`。
+2. **`#md` 外层 div 不能被 innerHTML 换掉**。宽度/字号/顶部留白挂在 `#md` 上的
+   CSS 变量（`--w/--fs/--pt`），流式更新只能 `#md.innerHTML = 片段`。
+   早期把外层 div 一起写进片段 → 每次渲染都把设置换没了，`--fs` 失效退回 16px、
+   宽度丢失，一段 500 字的回复被量成 **6155px** 高、球一直顶着上限。
+3. **不要给内容设 `min-height = 视口高`**。那样 `scrollHeight` 变成「内容/视口」的较大者，
+   量出来的"内容高度"被视口撑大 → 球越算越大。内容从顶部排、超出滚动，本来就不需要它。
+4. **页面的 JS 每次改完必须做语法体检**。一个 `+ " 生效后 fs=" +` 这种字符串拼接错误
+   会让整段脚本 `Uncaught SyntaxError` 静默失效（表现只是"字号/宽度都对不上"）。
+   现成的体检脚本：`java -cp .build/classes:.build/javac-check DumpJs && node --check .build/page.js`
+   （`DumpJs` 用反射把 `BallMarkdown.JS` 抽成 `.build/page.js`）。
+5. **文字窗必须按玻璃的「真实屏幕矩形」摆**，不能用 `renderer.winX/winY`（500ms 才刷一次，
+   窗口刚变大时是过期值）。实测拿过期值算，文字窗底部跑到 **2508**（屏只有 2296）——
+   就是用户说的「文字跑出玻璃/贴屏幕底」。现在用 `glView.getLocationOnScreen()`，
+   并且夹取保证 `y + sysDy + 高度 ≤ 屏高`。
+6. **`clampBallOnScreen` 有收敛守卫**（`clampLastWant*/clampLastLoc*`）。球顶到最大高度时
+   它在屏幕上的实际位置就是被夹住的位置，于是每帧都算出「要挪」→ `updateViewLayout` →
+   `winSync` → `clamp` 无限互相触发：实测 **11ms 内 18715 条日志**、主线程被塞满，
+   表现就是用户报的**卡死**。两个值都没变就直接 return。
+
+### 位置：球长高时往上躲（2026-10-16 用户反馈）
+
+用户原话：「弹出位置为什么老挤在下面影响我打字」。真因：方形态是**钉住球顶往下长**
+（当初用户要的是"高度随文字往下涨"），长到上限时底边到 `home + 1327`，正好压在输入框/键盘上。
+
+修法：`ballTopOnScreen(halfH)` —— 球顶的**唯一**竖直定位点：
+球底超过 `screenH × SIRI_SAFE_BOTTOM_RATIO(0.66)` 就把整颗球上移，让底边停在安全线上。
+玻璃窗口（`updateSiriWindow`）和文字层（`updateSiriTextPos`）**都必须调它**
+（以前各自用 `sy ± halfH` 算，一旦上移就会玻璃走了、文字没走 → 文字掉出球外）。
+
+### 离线测试（不依赖 DSH，2026-10-16 用户要求）
+
+调字号/排版时不必等真实回复。三个入口，效果一样（都灌一段示例 markdown 并**钉住**，
+不会 4 秒后自己散掉）：
+
+| 入口 | 怎么用 |
+|---|---|
+| 设置页按钮 | 「Siri 模式」区块 → **离线预览球内排版** / **结束预览** |
+| 文件钩子 | `touch files/state-PREVIEW` / `touch files/state-PREVIEWOFF`（一次性，用完自删） |
+| 假审批 | 设置页「叫一条假审批 / 假提问」+ 「审批面板字号」滑块（调审批卡片用这个） |
+
+示例文本来源：`files/md-sample.md`（现场想改样例就编辑它，**不用重装**）；
+文件不存在则用代码里的内置样例。样例刻意包含表格 / 标题 / 有序无序列表（带嵌套）/
+引用 / 代码块 / 长段落 —— 这几种是最容易撑爆玻璃的。
+
+字号滑块（设置页，即时生效、存 prefs）：
+- **球内回复字号比例** `md_font_ratio_pct`（5~120，默认 25 = 0.25）
+- **审批面板字号** `ap_scale_pct`（20~150，默认 55 = 0.55）
+
+### 调试口子（回归用）
+
+- `files/ballshot` 写文字 → 球显示它并截一帧（`files/ball-capture.png`）。
+  想看**排版**（不是玻璃）时，先 `touch files/md-show`：文字层不再排除出抓屏，
+  普通截图/录屏就能看到球内 markdown 的真实观感（删掉该文件即恢复排除）。
+- `logcat | grep "md geom"` → `内容=1688px 视口=1243px 球高上限=1327px(55%屏高) 球宽=918px`：
+  一眼看出"球是不是封顶了、内容会不会滚、上限比例对不对"。
+- 越界兜底会打 `文字窗越界！`（正常情况下不该出现）。
+
+### 验收记录（2026-10-16 真机）
+
+```
+球窗口      1044x1453  → 玻璃 1044x1327 = 屏高 2412 的 55% ✅
+文字窗      (215,1142) 813x1158，完全落在玻璃矩形 (99,1022)-(1143,2349) 内 ✅
+内容 1688px > 上限 1327px → 球封顶、内容在玻璃内滚动 ✅
+真实 DSH 回复（含表格、147 字）：内容 930px < 上限 → 球按内容定高、不滚动、不截断 ✅
+```
 
 ## DSH 接口速查（改客户端时用）
 

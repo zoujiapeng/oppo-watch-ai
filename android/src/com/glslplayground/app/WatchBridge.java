@@ -289,6 +289,47 @@ public class WatchBridge {
         });
     }
 
+    /** 球内富文本正文字号比例（百分数，25 = 0.25）。 */
+    @JavascriptInterface
+    public int getMdFontRatioPct() {
+        return act.getMdFontRatioPct();
+    }
+
+    @JavascriptInterface
+    public void setMdFontRatioPct(final int pct) {
+        ui(new Runnable() {
+            public void run() { act.setMdFontRatioPct(pct); }
+        });
+    }
+
+    /** 审批面板整体缩放（百分数，55 = 0.55）。 */
+    @JavascriptInterface
+    public int getApScalePct() {
+        return act.getApScalePct();
+    }
+
+    @JavascriptInterface
+    public void setApScalePct(final int pct) {
+        ui(new Runnable() {
+            public void run() { act.setApScalePct(pct); }
+        });
+    }
+
+    /** 离线预览球内排版 / 结束预览。 */
+    @JavascriptInterface
+    public void previewSiriText() {
+        ui(new Runnable() {
+            public void run() { act.previewSiriText(); }
+        });
+    }
+
+    @JavascriptInterface
+    public void previewSiriTextStop() {
+        ui(new Runnable() {
+            public void run() { act.previewSiriTextStop(); }
+        });
+    }
+
     @JavascriptInterface
     public int getSiriBlackStep() {
         return act.getSiriBlackStep();

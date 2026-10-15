@@ -211,6 +211,8 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (askInFlight) return;
                         mirrorBuf.setLength(0);
+                        turnSettled = false;         // 新一轮：还没结束，方形态保持住
+                        shapeBackSent = false;
                         // 新一轮开始 → 方形态的「出波闸门」先关上（只有整轮结束才重新打开）
                         FloatingBallService.setAssistantTurnEnded(false);
                         // 模型开始生成了 —— 这一刻才算「思考中」
@@ -263,6 +265,7 @@ public final class SiriAssistant {
                         }
                         // 整轮结束：球里若还挂着这轮的回答文字，就在球底出一道"进了玻璃的"波
                         // （用户要求：方形态只有最终结果时才出波，且这道波要与背景同一套折射）
+                        turnSettled = true;          // ★ 只有这里算"最终回复"
                         FloatingBallService.setAssistantTurnEnded(true);
                         speakOnce(textToSpeak);
                     }
@@ -452,6 +455,7 @@ public final class SiriAssistant {
                         askInFlight = false;
                         lastAnswer = full == null ? "" : full;
                         if (!lastAnswer.isEmpty()) sayTyped(lastAnswer);   // 交给打字机把剩下的字弹完
+                        turnSettled = true;          // 这条流自己收完了 → 算最终回复
                         setState(State.IDLE);
                         if (speakReplies && !lastAnswer.isEmpty()) speakOnce(lastAnswer);
                     }
@@ -552,6 +556,16 @@ public final class SiriAssistant {
     // 用户要求「出现文字时停留时间长一点」：安静这么久才把球内文字清掉。
     // 注意球侧 IDLE_SETTLE_MS（几何/动画回初始）要比它略长，让「文字消失 → 球回圆球」有先后。
     private static final long IDLE_CLEAR_MS = 4000;
+    /**
+     * 「最终回复」安静多久把方形态收回初始圆球（用户要求 **1.5 秒**）。
+     * 与 IDLE_CLEAR_MS 的分工：1.5s 收**形状**，4s 是清**文字**的兜底。
+     * 关键：只在回合**真的结束**之后才计时 —— 处理中的短回复/多步工具调用一律保持方形。
+     */
+    private static final long FINAL_SHAPE_BACK_MS = 1500;
+    /** 本轮是否已收到结束信号（turn/end 或本地流收完）。 */
+    private volatile boolean turnSettled = false;
+    /** 是否已经发过"收形状"，避免重复触发。 */
+    private volatile boolean shapeBackSent = false;
 
     /** 最近一次球内文字有变化的时间（打字机每弹一个字都会刷新）。 */
     private volatile long lastTextAt = android.os.SystemClock.uptimeMillis();
@@ -562,6 +576,14 @@ public final class SiriAssistant {
             long quiet = android.os.SystemClock.uptimeMillis() - lastTextAt;
             // 打字机队列里还有没弹完的字 → 重排计时，别在半途把字清掉
             if (targetText.length() > shownText.length()) { armQuiet(); return; }
+            // 用户正在球里翻阅 → 不清、不收，继续等
+            if (FloatingBallService.isTextBeingScrolled()) { armQuiet(); return; }
+            // ① 最终回复：安静 1.5s → 收形状（回初始圆球）
+            if (turnSettled && quiet >= FINAL_SHAPE_BACK_MS && !shapeBackSent) {
+                shapeBackSent = true;
+                FloatingBallService.releaseHoldForFinalReply();
+            }
+            // ② 更久（4s）才做"清文字"的兜底
             if (quiet < IDLE_CLEAR_MS) { main.postDelayed(this, 200); return; }
             if (shownText != null && !shownText.isEmpty()) sayNow("");   // 文字消散，球自己缩回原样
             // 不管有没有字：球不该一直挂着「回答中/思考中」的光效
