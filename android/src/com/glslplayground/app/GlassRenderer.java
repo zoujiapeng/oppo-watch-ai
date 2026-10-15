@@ -42,7 +42,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
     public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
-    public float blur = 1.8f;   // 与 float_params 的现存值对齐：避免参数丢失时外观突变
+    public float blur = 0.3f;
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
@@ -325,7 +325,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.r = texture2D(iBlur, suv + disp).r;\n" +
         "  col.g = texture2D(iBlur, suv).g;\n" +
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
-        "  col = vec3(1.0, 0.0, 0.0);   // 【决定性实验】纯红：若球真的被画出来，屏幕上应出现红球\n" +
+        "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
