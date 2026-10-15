@@ -27,6 +27,7 @@ import android.view.SurfaceControl;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 
@@ -684,10 +685,10 @@ public class FloatingBallService extends Service {
         if (asstTextPinned == pinned) return;
         asstTextPinned = pinned;
         main.removeCallbacks(togglePin);
-        if (siriText != null) {
-            // 钉住时显示一个图钉，解除后去掉；文字本体不变（siriStr 不动）
-            siriText.setText(displayTextOf(siriStr));
-        }
+        // 钉住状态不再往正文里插图钉（原生渲染下没必要，还会破坏排版）；
+        // 视觉提示由球顶抓取条的抓取标记/日志承担。这里只需让助手侧知道"别清空"。
+        mdBuiltFor = "";          // 重建一次（displayTextOf 可能带钉住标记）
+        rebuildMarkdown();
         if (!pinned) armQuietFromBall();      // 解除干预 → 安静计时重新开始，该消失就消失
         Log.i("FloatingBall", "assistant text " + (pinned ? "PINNED（不再自动清空）" : "unpinned（恢复自动清空）"));
     }
@@ -2060,8 +2061,47 @@ public class FloatingBallService extends Service {
     private static String round3(float v) { return String.valueOf(Math.round(v * 1000f) / 1000f); }
 
     // ── Siri 模式：球弹出、文字从球内出现、球随文字实时变宽变高、圆角变小 ──
+    /** 方形态宽度 = 屏宽 × 该比例（不再随文字/字号变）。 */
+    private static final float SIRI_W_RATIO = 0.78f;
+    /** 方形态高度上限 = 屏高 × 该比例（用户要求 55%）。 */
+    private static final float SIRI_H_RATIO = 0.55f;
     private boolean siriEnabled = false;
-    private android.widget.TextView siriText;
+    /**
+     * 球内文字层：`ScrollView`（原生，取代原来的 TextView / WebView 两代方案）。
+     *
+     * 演进口径：TextView（纯文本）→ WebView（能渲染真表格，但真机上出现"有球无字"+
+     * 一次 native 崩溃，且被 SKIP_SCREENSHOT 挡住没法自证）→ **现在这套原生 View 树**。
+     * 原生方案的高度/字号都能在 Java 里直接量，可见性肉眼可验，且不会崩。
+     */
+    private android.widget.ScrollView siriText;
+    /** 球内内容列（markdown 渲染成一棵 View 树放在这里）。 */
+    private android.widget.LinearLayout mdColumn;
+    /** 上一次建内容时的指纹（文字|宽度|字号）—— 没变就不重建。 */
+    private String mdBuiltFor = "";
+    /** 内容高度（px）：由 {@code mdColumn.measure()} 直接量出，不再是"猜"或"等页面回报"。 */
+    private volatile int mdContentH = 0;
+    /** 排版宽度（px）：方形态固定内宽，与窗口此刻多宽无关。 */
+    private volatile int mdLayoutW = 0;
+    /** 用户正在球里翻阅：这段时间不许缩回初始形状、也不许清空文字。 */
+    private volatile boolean mdScrolling = false;
+    private volatile long mdScrollAt = 0L;
+    /** 松手多久之后才允许恢复自动收起（用户要求 1.5 秒）。 */
+    private static final long MD_SCROLL_HOLD_MS = 1500;
+    /** 文字层当前是否可触摸（内容超出视口才 true —— 装得下时手势归球）。 */
+    private volatile boolean siriTextTouchable = false;
+    /** 文字区视口高度（= 文字窗高度）。 */
+    private volatile int siriViewportH = 0;
+    /** 球内正文字号 = 设置页「Siri 字号」× 该比例（用户真机定档 0.25 ≈ 18px）。 */
+    private float mdFontRatio() {
+        int pct = prefs().getInt("md_font_ratio_pct", 25);
+        return Math.max(0.05f, Math.min(1.2f, pct / 100f));
+    }
+
+    /** 审批/提问面板整体缩放（设置页滑块，默认 0.55）。 */
+    private float apScale() {
+        int pct = prefs().getInt("ap_scale_pct", 55);
+        return Math.max(0.2f, Math.min(1.5f, pct / 100f));
+    }
     private WindowManager.LayoutParams siriParams;
     private volatile String siriStr = "";
     // 文字窗上一次真正落下去的位置/尺寸（用来跳过无变化的 updateViewLayout）
@@ -2103,10 +2143,8 @@ public class FloatingBallService extends Service {
     private void applySiriTextSize(int sp) {
         sp = Math.max(10, Math.min(120, sp));
         siriTextPx = dp(sp);
-        if (siriText != null) {
-            siriText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, siriTextPx);
-        }
-        if (siriEnabled) measureSiriTargets(siriStr);
+        mdBuiltFor = "";          // 字号变了 → 重建内容并重量高度
+        rebuildMarkdown();
     }
 
     /** 每多一行黑区整体下移量（百分之一单位，35=0.35），实时生效。 */
@@ -2207,33 +2245,105 @@ public class FloatingBallService extends Service {
     private void setupSiriText() {
         if (siriText != null || wm == null) return;
         if (siriTextPx <= 0) siriTextPx = dp(34);
-        android.widget.TextView tv = new android.widget.TextView(this);
-        tv.setTextColor(0xFFF4F5F7);
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, siriTextPx);
-        tv.setSingleLine(false);
-        tv.setIncludeFontPadding(false);
-        tv.setGravity(Gravity.CENTER);
-        tv.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-        tv.setAlpha(0f);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setHorizontalScrollBarEnabled(false);
+        sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        sv.setFillViewport(false);
+        mdColumn = new android.widget.LinearLayout(this);
+        mdColumn.setOrientation(android.widget.LinearLayout.VERTICAL);
+        sv.addView(mdColumn, new android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        sv.setAlpha(0f);
+        // 用户翻阅时保持方形态：原生 ScrollView 能直接给我们触摸/滚动事件
+        // （WebView 时代得靠 JS 回调，那条路踩崩过）。
+        sv.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, android.view.MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        mdScrolling = true;
+                        mdScrollAt = android.os.SystemClock.uptimeMillis();
+                        break;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        mdScrollAt = android.os.SystemClock.uptimeMillis();
+                        break;
+                    default: break;
+                }
+                return false;      // 不消费，交给 ScrollView 自己滚
+            }
+        });
+        sv.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+            @Override public void onScrollChange(View v, int x, int y, int ox, int oy) {
+                mdScrollAt = android.os.SystemClock.uptimeMillis();
+            }
+        });
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
         siriParams = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, type,
+                2, 2, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         siriParams.gravity = Gravity.TOP | Gravity.START;
         try {
-            wm.addView(tv, siriParams);
-            makeTouchTransparent(tv);   // 同上：不用 FLAG_NOT_TOUCHABLE，否则文字也被压到 0.8
-            siriText = tv;
-            tv.post(this::applyTextSkipScreenshot);   // 文字也不许出现在截屏里（玻璃已排除，文字以前漏了）
+            wm.addView(sv, siriParams);
+            siriText = sv;
+            mdBuiltFor = "";
+            sv.post(this::applyTextSkipScreenshot);
             setupSiriTouchLayer();
+            rebuildMarkdown();
         } catch (Exception e) {
-            Log.w("FloatingBall", "add siri text failed: " + e);
+            Log.w("FloatingBall", "add siri text (native) failed: " + e);
         }
+    }
+
+    /**
+     * 按当前文字重建球内内容（原生 View 树），并**直接量出内容高度**。
+     *
+     * 这是原方案里最绕的一块（WebView 要靠页面 JS 回报高度 + 猜缩放），
+     * 换成原生之后就是一次 measure：宽度给定、高度立刻出来，单位就是物理像素。
+     */
+    private void rebuildMarkdown() {
+        if (mdColumn == null) return;
+        String src = displayTextOf(siriStr);
+        int width = Math.max((int) dp(120), mdLayoutWidthPx());
+        String key = src.length() + "|" + width + "|" + Math.round(siriTextPx)
+                + "|" + Math.round(mdFontRatio() * 1000) + "|" + siriTextDy;
+        if (key.equals(mdBuiltFor)) return;
+        mdBuiltFor = key;
+
+        BallMarkdownView.Style st = new BallMarkdownView.Style();
+        st.bodyPx = Math.max(9f, siriTextPx * mdFontRatio());
+        st.headPx = st.bodyPx * 1.06f;
+        st.codePx = st.bodyPx * 0.94f;
+        st.padH = (int) dp(20);
+        st.padTop = Math.max(0, siriTextDy) + (int) dp(6);
+        st.padBottom = (int) dp(10);
+        st.gap = Math.round(st.bodyPx * 0.55f);
+
+        mdColumn.removeAllViews();
+        BallMarkdownView.Result r = BallMarkdownView.build(this, src, st);
+        mdColumn.addView(r.view, new android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        int wSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY);
+        int hSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        mdColumn.measure(wSpec, hSpec);
+        mdContentH = Math.max(1, mdColumn.getMeasuredHeight());
+        mdLayoutW = width;
+        Log.i("FloatingBall", "md rebuild: 内容=" + mdContentH + "px 宽=" + width
+                + " 字号=" + Math.round(st.bodyPx) + "px len=" + src.length()
+                + (r.truncated ? "（超长已截断）" : ""));
+        if (siriEnabled) measureSiriTargets(siriStr);
+    }
+
+    /** 球内内容的排版宽度（方形态固定内宽）。 */
+    private int mdLayoutWidthPx() {
+        return Math.round(siriMaxBallW() - 2f * dp(20));
     }
 
     // ── 文字上的「点击区」：一个透明层，压在文字窗之上 ────────────────────────
@@ -2797,8 +2907,8 @@ public class FloatingBallService extends Service {
         if (approvalShown || approvalClosing) return;
         String prev = siriStr;
         siriStr = text == null ? "" : text;
-        if (siriText != null) siriText.setText(displayTextOf(siriStr));
-        measureSiriTargets(siriStr);
+        mdBuiltFor = "";          // 内容变了 → 重建（内部会量高度并触发几何重算）
+        rebuildMarkdown();
         refreshFinalWave();      // 字没了 → 收掉球底那道波；字又来了 → 按 turnEnded 决定要不要出
         boolean prevEmpty = prev == null || prev.trim().isEmpty();
         boolean nowEmpty = siriStr.trim().isEmpty();
@@ -2808,8 +2918,13 @@ public class FloatingBallService extends Service {
     }
 
     /** 球宽上限：屏幕宽度的 85%。 */
+    /** 方形态高度上限：屏高 55%（用户 2026-10-16 要求从 85% 收到 55%）。 */
+    private float siriMaxBallH() {
+        return screenH * SIRI_H_RATIO;
+    }
+
     private float siriMaxBallW() {
-        return screenW * 0.85f;
+        return screenW * SIRI_W_RATIO;
     }
 
     // ── 回合内几何保持（textHold）：本轮只要出现过文字，就一直保持「近方形」─────────
@@ -2911,83 +3026,17 @@ public class FloatingBallService extends Service {
         if (siriTextPx <= 0) siriTextPx = dp(34);
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
-        int textMaxW = siriTextMaxW();
 
-        // 换行行数
-        int lines;
-        {
-            android.text.TextPaint lp = new android.text.TextPaint();
-            lp.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-            lp.setTextSize(siriTextPx);
-            android.text.StaticLayout sl = android.text.StaticLayout.Builder
-                    .obtain(s, 0, s.length(), lp, textMaxW)
-                    .setIncludePad(false)
-                    .build();
-            lines = sl.getLineCount();
-        }
-        // 黑区下移量不在这里算：它必须由「文字实际有多高」决定，见下面 hypx 定下来之后。
-        // 第 3 行起内边距改大（大圆角方形，留白更足）
-        float padX = lines >= 3 ? dp(58) : dp(42);
-        float padY = lines >= 3 ? dp(44) : dp(34);
-
-        float tw, th;
-        // 高度上限（屏幕 70%）：先算出来，才能把文字按「装得下几行」截断
-        // 高度上限：屏幕的 85%（用户 2026-10-16 要求"高度也限制在屏幕 85%，且上下都不能超出屏幕"）。
-        // 不能再用 winH —— 方形态的窗口高度是随文字长的，套进上限里会把球锁死在当前高度。
-        // 0.85 屏高 ⇒ 球的半高最大 0.425 屏高，clampBallOnScreen() 的夹取区间 [halfH, screenH-halfH]
-        // 永远有效 ⇒ 球必然完整落在屏幕内。
-        float maxBallH = screenH * 0.85f;
-        if (siriText != null) {
-            // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配；
-            // 封顶后放不下的行用省略号截掉 —— 文字永远待在球里，既不溢出也不占满屏
-            float maxHalfText = Math.max(dp(20), maxBallH / 2f - padY - dp(16));
-            float lineH = siriTextPx * 1.25f;
-            try {
-                android.graphics.Paint.FontMetrics fm = siriText.getPaint().getFontMetrics();
-                if (fm != null && fm.descent - fm.ascent > 1f) lineH = fm.descent - fm.ascent;
-            } catch (Throwable ignored) { }
-            int maxLines = Math.max(1, (int) Math.floor(maxHalfText * 2f / Math.max(1f, lineH)));
-            siriText.setMaxLines(maxLines);
-            siriText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            siriText.setText(s);
-            siriText.setMaxWidth(textMaxW);
-            siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            // 兜底：极端情况下（超大字号 / 超长文本）measured 高度仍可能超过球的上限，
-            // 那就继续减行数 —— 文字必须待在球里，绝不能糊到球外面去。
-            for (int guard = 0; guard < 64 && maxLines > 1
-                    && siriText.getMeasuredHeight() > maxHalfText * 2f; guard++) {
-                maxLines--;
-                siriText.setMaxLines(maxLines);
-                siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            }
-            tw = siriText.getMeasuredWidth();
-            th = siriText.getMeasuredHeight();
-            showSiriTextNow();          // 有字 → 确保文字层可见（之前可能被藏起来过）
-            if (th > maxHalfText * 2f + 1f) {
-                Log.w("FloatingBall", "siri text still too tall: h=" + th
-                        + " limit=" + (maxHalfText * 2f) + " lines=" + maxLines);
-            }
-            if (s.length() > 60) {
-                Log.i("FloatingBall", "siri text len=" + s.length() + " lines=" + maxLines + " h=" + th);
-            }
-        } else {
-            android.text.TextPaint p = new android.text.TextPaint();
-            p.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
-            p.setTextSize(siriTextPx);
-            android.text.StaticLayout layout = android.text.StaticLayout.Builder
-                    .obtain(s, 0, s.length(), p, textMaxW)
-                    .setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
-                    .setIncludePad(false)
-                    .build();
-            float maxLineW = 0;
-            for (int i = 0; i < layout.getLineCount(); i++) {
-                maxLineW = Math.max(maxLineW, layout.getLineWidth(i));
-            }
-            tw = maxLineW;
-            th = layout.getHeight();
-        }
+        // ── 文字高度从哪来 ────────────────────────────────────────────────────
+        // 不再在 Java 里"猜"换行（StaticLayout 对表格/列表本来也不准），
+        // 也不用 WebView 的 JS 回报 —— 原生渲染器已经 measure 过了，直接读。
+        float th = Math.max(dp(20), mdContentH > 0 ? mdContentH : dp(40));
+        float tw = mdLayoutW > 0 ? mdLayoutW : siriTextMaxW();
+        // 上下留白（黑区/球高的余量）：字号大就多留一点
+        float padY = Math.max(dp(12), siriTextPx * mdFontRatio() * 0.5f);
+        // 方形态高度上限 = 屏高 55%（用户要求）
+        float maxBallH = siriMaxBallH();
+        showSiriTextNow();          // 有字 → 确保文字层可见（方形态才允许出现，见 squareFormActive）
 
         float maxBallW = siriMaxBallW();
         // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
@@ -2996,7 +3045,7 @@ public class FloatingBallService extends Service {
         //     用户原话：「方形不是说是正方形，且方形的宽要固定好（屏幕宽度的 85%）不可变，
         //     高度随文字往下涨的体积变化（不限字号）」。
         float hxpx = maxBallW / 2f;
-        float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
+        float hypx = Math.max(base * minHalfY, th / 2f + padY);
         hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 88%（物理上限）
         // 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，方框不缩回去。
         if (textHold) {
@@ -3201,33 +3250,10 @@ public class FloatingBallService extends Service {
         // 这里**不调用 setMaxWidth**（那会污染球的测量结果），只用 AT_MOST 量一次用于排版/居中。
         float ballHalfW = base * aHalfX * aMaster;
         int textMaxW = Math.max(1, Math.round(2f * ballHalfW - 2f * dp(28)));
-        // ⚠️ 这段 measure 只在「文字 / 字号 / 可用宽度」变了才做一次。
-        // 它跑在 16ms 的 tick 上，而方形态的文本动辄上千像素高、几十行 —— 每帧重量一次
-        // 足以把主线程吃满，渲染节拍被挤到 ~50ms（实测：方形态 50ms vs 圆球态 32ms，
-        // 屏幕上就是用户说的"卡顿、像 LED 一闪一闪"）。测量结果只用于居中/贴顶，缓存完全够用。
-        if (textMeasuredMaxW != textMaxW || !siriStr.equals(textMeasuredStr)
-                || textMeasuredPx != siriTextPx) {
-            siriText.measure(View.MeasureSpec.makeMeasureSpec(textMaxW, View.MeasureSpec.AT_MOST),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            textMeasuredW = siriText.getMeasuredWidth();
-            textMeasuredStr = siriStr;
-            textMeasuredPx = siriTextPx;
-            textMeasuredMaxW = textMaxW;
-            // 补偿字体上方留白(ascent 空白)，让首行字形真正贴近球顶，视觉间距 ≈ 5dp
-            float gap = 0f;
-            try {
-                android.text.TextPaint tp = new android.text.TextPaint(siriText.getPaint());
-                tp.setTextSize(siriTextPx);
-                android.graphics.Paint.FontMetricsInt fm = tp.getFontMetricsInt();
-                android.graphics.Rect rb = new android.graphics.Rect();
-                String first = (siriStr == null || siriStr.isEmpty()) ? "字" : siriStr.substring(0, 1);
-                tp.getTextBounds(first, 0, first.length(), rb);
-                gap = -fm.ascent + rb.top;     // TextView 顶 → 首行字形顶
-            } catch (Throwable ignored) { }
-            textTopGap = gap;
-        }
-        int tw = Math.min(textMeasuredW > 0 ? textMeasuredW : textMaxW, textMaxW);
-        float topGap = textTopGap;
+        // 原生方案：宽度/高度都由渲染器量好了，这里直接用
+        // （不再每帧 measure 文本，也不需要 textMeasured* 那套缓存 —— 旧方案的性能包袱）。
+        int tw = Math.max((int) dp(40), mdLayoutW > 0 ? mdLayoutW : textMaxW);
+        float topGap = 0f;
         float ballHalfH = base * aHalfY * aMaster;
         float ballTop = sy - ballHalfH;
         float ballBottom = sy + ballHalfH;

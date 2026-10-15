@@ -108,6 +108,18 @@
       <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
       <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
       <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
+      <div class="row" style="margin-top:10px"><label>球内回复字号比例</label><span class="v" id="vMdRatio">0.25</span></div>
+      <input type="range" id="mdRatio" min="5" max="120" step="1" value="25">
+      <div class="muted" style="margin-top:6px">球里那段 <b>AI 回复（富文本）</b>的正文字号 =
+        「Siri 字号」× 这个比例（默认 0.25 ≈ 18px）。<b>拖动即时生效</b>，不用重装。<br>
+        想让球里一屏看更多字就往左拉；想更醒目就往右拉。表格/代码块会跟着等比缩放。</div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnMdPreview">离线预览球内排版</button>
+        <button id="btnMdPreviewStop">结束预览</button>
+      </div>
+      <div class="muted" style="margin-top:6px">「离线预览」会往球里灌一段<b>示例 markdown</b>（表格 / 标题 / 列表 / 引用 / 代码块全都有）并
+        <b>钉住不消散</b>，这样不用等 DSH 回话就能拖上面的滑块调字号。<br>
+        想改示例内容：编辑 <code>/sdcard/Android/data/com.glslplayground.app/files/md-sample.md</code> 再点一次预览。</div>
       <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
       <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
       <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
@@ -167,6 +179,10 @@
         <button id="btnQDemo">叫一条假提问（多选项+输入）</button>
         <button id="btnApprDismiss">撤掉球上的审批</button>
       </div>
+      <div class="row" style="margin-top:10px"><label>审批面板字号</label><span class="v" id="vApScale">0.55</span></div>
+      <input type="range" id="apScale" min="20" max="150" step="1" value="55">
+      <div class="muted" style="margin-top:6px">审批 / 提问那张卡片的<b>整体缩放</b>（字号、内边距、按钮高全跟着变）。
+        拖动后<b>下一次弹面板</b>就是新尺寸；正挂着的话会当场重排。</div>
       <div class="muted" style="margin-top:6px">连接：<b id="apprState">—</b> · 球上正挂着：<b id="apprPending">—</b></div>
     </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
@@ -528,6 +544,35 @@
   siriSz.addEventListener('input', function () {
     vSiriSz.textContent = siriSz.value;
     try { W.setSiriTextSp(parseInt(siriSz.value, 10)); } catch (e) {}
+  });
+
+  // 离线预览球内排版
+  var btnMdPreview = document.getElementById('btnMdPreview');
+  if (btnMdPreview) btnMdPreview.addEventListener('click', function () {
+    try { W.previewSiriText(); } catch (e) { alert('预览失败：' + e); }
+  });
+  var btnMdPreviewStop = document.getElementById('btnMdPreviewStop');
+  if (btnMdPreviewStop) btnMdPreviewStop.addEventListener('click', function () {
+    try { W.previewStop(); } catch (e) {}
+  });
+
+  // 球内回复字号比例（百分数 ↔ 小数）
+  var mdRatio = document.getElementById('mdRatio'), vMdRatio = document.getElementById('vMdRatio');
+  function fmtRatio(pct) { return (pct / 100).toFixed(2); }
+  try { var curMd = W.getMdFontRatioPct(); if (curMd) { mdRatio.value = curMd; } } catch (e) {}
+  vMdRatio.textContent = fmtRatio(parseInt(mdRatio.value, 10));
+  mdRatio.addEventListener('input', function () {
+    vMdRatio.textContent = fmtRatio(parseInt(mdRatio.value, 10));
+    try { W.setMdFontRatioPct(parseInt(mdRatio.value, 10)); } catch (e) {}
+  });
+
+  // 审批面板整体缩放
+  var apScale = document.getElementById('apScale'), vApScale = document.getElementById('vApScale');
+  try { var curAp = W.getApScalePct(); if (curAp) { apScale.value = curAp; } } catch (e) {}
+  vApScale.textContent = fmtRatio(parseInt(apScale.value, 10));
+  apScale.addEventListener('input', function () {
+    vApScale.textContent = fmtRatio(parseInt(apScale.value, 10));
+    try { W.setApScalePct(parseInt(apScale.value, 10)); } catch (e) {}
   });
 
   var siriBlack = document.getElementById('siriBlack'), vSiriBlack = document.getElementById('vSiriBlack');

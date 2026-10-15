@@ -396,7 +396,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
      * 一轮长任务的助手输出可以到几万字，原样攒下去会一起灌进球里（球内糊成一整面墙）。
      * 这里只保留「最近这一段」，配合 SiriAssistant.clipToBall 的显示上限。
      */
-    private static final int MIRROR_BUF_MAX = 1200;
+    // 镜像缓存上限：和球内文字上限同量级（球内可滚动，放宽到 2500 字；
+    // 球侧还会再按 FloatingBallService.BALL_TEXT_MAX 截一次尾巴）。
+    private static final int MIRROR_BUF_MAX = 2500;
 
     static void capBuffer(StringBuilder buf, int max) {
         int over = buf.length() - max;
