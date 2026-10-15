@@ -27,6 +27,7 @@ import android.view.SurfaceControl;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 
 import org.json.JSONObject;
@@ -340,6 +341,15 @@ public class FloatingBallService extends Service {
     /** 选项多/文案长时，交互层自己滚 —— 绝不能压到上面的文字块上去。 */
     private android.widget.ScrollView approvalActionsScroll;
     private WindowManager.LayoutParams approvalActionsParams;
+    /**
+     * 自由输入行**单独一个悬浮窗**。原因：按钮那个窗口带 FLAG_NOT_FOCUSABLE，
+     * 窗口本身拿不到焦点 → 里面的 EditText 永远收不到输入法（用户报「点输入框无效」）。
+     * 所以输入行拆出来，去掉 NOT_FOCUSABLE，并允许 IME 调整尺寸。
+     */
+    private android.widget.LinearLayout approvalInputRow;
+    private WindowManager.LayoutParams approvalInputParams;
+    private int apInputW, apInputH, apInputY;
+    private boolean apImeUp = false;
     private android.widget.EditText approvalInput;
     private android.widget.TextView approvalSend;
     /** 选项按钮：label / 选中态 / 视图。 */
@@ -376,6 +386,13 @@ public class FloatingBallService extends Service {
     private float apSaveAHalfX, apSaveAHalfY, apSaveACorner, apSaveABlack, apSaveAMaster;
     private boolean apSaveWaveOn, apSaveSiriGeom;
     private float apSaveVoiceBoost;
+
+    /**
+     * 面板整体缩放：字号 / 按钮 / 内边距 / 间距全部乘这个系数（等比）。
+     * 用户反馈默认尺寸偏大（「整个界面和字体等比例缩小一半会好点」），所以给一个总开关，
+     * 想再大再小只改这一个数。
+     */
+    private static final float AP_SCALE = 0.55f;
 
     private int apPadX, apPadY, apGap, apTitlePx, apBodyPx, apOptPadX, apOptPadY, apOptGap;
     private static final int AP_PAD_X_DP = 30, AP_PAD_Y_DP = 26;
@@ -427,7 +444,7 @@ public class FloatingBallService extends Service {
         renderer.waveOn = false;          // 面板不带 Siri 波（退出时按存档还原）
         renderer.voiceBoost = 0f;
 
-        float d = getResources().getDisplayMetrics().density;
+        float d = getResources().getDisplayMetrics().density * AP_SCALE;   // 面板整体等比缩放
         apPadX = Math.round(AP_PAD_X_DP * d);
         apPadY = Math.round(AP_PAD_Y_DP * d);
         apGap = Math.round(AP_GAP_DP * d);
@@ -605,7 +622,7 @@ public class FloatingBallService extends Service {
             approvalInput.setHint("或者在这里自己写…");
             approvalInput.setHintTextColor(0x8AFFFFFF);
             approvalInput.setTextColor(0xFFF2F5FA);
-            approvalInput.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+            approvalInput.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d * AP_SCALE);
             approvalInput.setBackgroundColor(0x00000000);
             approvalInput.setPadding(0, Math.round(6 * d), Math.round(8 * d), Math.round(6 * d));
             approvalInput.setMaxLines(4);
@@ -625,7 +642,7 @@ public class FloatingBallService extends Service {
             approvalSend = new android.widget.TextView(this);
             approvalSend.setText("发送");
             approvalSend.setTextColor(0xFFF4F8FF);
-            approvalSend.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+            approvalSend.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d * AP_SCALE);
             approvalSend.setTypeface(android.graphics.Typeface.create("sans-serif-medium",
                     android.graphics.Typeface.NORMAL));
             approvalSend.setGravity(Gravity.CENTER);
@@ -636,7 +653,7 @@ public class FloatingBallService extends Service {
                 @Override public void onClick(View v) { submitCustomAnswer(); }
             });
             row.addView(approvalSend);
-            col.addView(row, rowLp);
+            approvalInputRow = row;      // 不进 col：它有自己的窗口（要焦点）
         }
 
         approvalActions = col;
@@ -652,6 +669,103 @@ public class FloatingBallService extends Service {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+
+        if (approvalInputRow != null) {
+            // 故意**不带** FLAG_NOT_FOCUSABLE：窗口能拿焦点，EditText 才能拉起输入法。
+            // ADJUST_RESIZE 让键盘弹出时我们收到 inset，好把面板整体上移。
+            approvalInputParams = overlayParams(
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            approvalInputParams.softInputMode =
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+            // 键盘顶起来时把面板整体抬上去，别让输入框被键盘盖住
+            approvalInputRow.setOnApplyWindowInsetsListener(
+                    new View.OnApplyWindowInsetsListener() {
+                        @Override public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                            int bottom = insets.getSystemWindowInsetBottom();
+                            main.post(new Runnable() {
+                                @Override public void run() { onImeInset(bottom); }
+                            });
+                            return insets;
+                        }
+                    });
+            approvalInputRow.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { focusApprovalInput(); }
+            });
+            // 悬浮窗的焦点可能被系统/前台 App 抢走；一旦拿到就补一次输入法请求
+            approvalInputRow.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override public void onFocusChange(View v, boolean hasFocus) {
+                    Log.i("FloatingBall", "input window focus=" + hasFocus);
+                    if (hasFocus && apImeUp) {
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() { showImeNow(); }
+                        }, 60);
+                    }
+                }
+            });
+            approvalInput.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override public void onFocusChange(View v, boolean hasFocus) {
+                    if (hasFocus) focusApprovalInput();
+                }
+            });
+        }
+    }
+
+    /**
+     * 点输入框：给它焦点并主动拉起输入法（悬浮窗不会自动弹）。
+     *
+     * **必须延后到抬手之后**：键盘一弹出来，窗口会因为 ADJUST_RESIZE 整体上移，
+     * 于是同一串手势的 ACTION_UP 就落到了别的控件上（实测会把选项点掉、面板直接消失）。
+     * 所以这里只记一个「待聚焦」标志，由主线程延迟执行。
+     */
+    private void focusApprovalInput() {
+        if (approvalInput == null) return;
+        main.removeCallbacks(approvalFocusTask);
+        main.postDelayed(approvalFocusTask, 220);
+    }
+
+    private final Runnable approvalFocusTask = new Runnable() {
+        @Override public void run() { doFocusApprovalInput(); }
+    };
+
+    private void doFocusApprovalInput() {
+        if (approvalInput == null) return;
+        try {
+            if (approvalInputRow != null) approvalInputRow.requestFocus();   // 先让窗口拿焦点
+            approvalInput.setFocusableInTouchMode(true);
+            approvalInput.requestFocus();                                    // 再让 EditText 拿焦点
+            showImeNow();
+            Log.i("FloatingBall", "approval input focus requested");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "focus input failed: " + t);
+        }
+    }
+
+    /** 单独一件事：把输入法叫起来（窗口焦点不够时会失败，所以会被补发几次）。 */
+    private void showImeNow() {
+        if (approvalInput == null) return;
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+            boolean ok = imm.showSoftInput(approvalInput, 0);
+            Log.i("FloatingBall", "showImeNow ok=" + ok
+                    + " winFocus=" + (approvalInputRow != null && approvalInputRow.hasWindowFocus()));
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "showImeNow failed: " + t);
+        }
+    }
+
+    /** 键盘高度变化：>120dp 视为弹出 → 整块面板上移，保证输入框在键盘之上。 */
+    private void onImeInset(int bottomPx) {
+        float d = getResources().getDisplayMetrics().density;
+        boolean up = bottomPx > Math.round(120 * d);
+        if (up == apImeUp) return;
+        apImeUp = up;
+        apLayoutKey = Integer.MIN_VALUE;      // 强制重排
+        Log.i("FloatingBall", "ime inset=" + bottomPx + " up=" + up);
     }
 
     /** 加一段文字，返回这个 TextView（调用方可以再改 LayoutParams）。 */
@@ -684,12 +798,12 @@ public class FloatingBallService extends Service {
         item.setPadding(apOptPadX, apOptPadY, apOptPadX, apOptPadY);
         item.setBackground(optionBackground(withAlpha(accent, 0x33)));
         item.setClickable(true);
-        item.setMinimumHeight(Math.round(AP_OPT_MIN_H_DP * d));
+        item.setMinimumHeight(Math.round(AP_OPT_MIN_H_DP * d * AP_SCALE));
 
         android.widget.TextView lab = new android.widget.TextView(this);
         lab.setText(label);
         lab.setTextColor(0xFFF4F8FF);
-        lab.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+        lab.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d * AP_SCALE);
         lab.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
         lab.setMaxLines(3);
         lab.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -699,7 +813,7 @@ public class FloatingBallService extends Service {
             android.widget.TextView dv = new android.widget.TextView(this);
             dv.setText(desc.trim());
             dv.setTextColor(0xFF9AA5B4);
-            dv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 12.5f * d);
+            dv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 12.5f * d * AP_SCALE);
             dv.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
             dv.setMaxLines(3);
             dv.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -736,7 +850,7 @@ public class FloatingBallService extends Service {
         float d = getResources().getDisplayMetrics().density;
         android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
         g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
-        g.setCornerRadius(16f * d);
+        g.setCornerRadius(16f * d * AP_SCALE);
         g.setStroke(Math.max(1, Math.round(d)), withAlpha(color, 0x7A));
         g.setColors(new int[]{ blend(color, 0x3A), blend(color, 0x1C) });
         g.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
@@ -770,7 +884,7 @@ public class FloatingBallService extends Service {
     private android.graphics.drawable.Drawable panelBackground() {
         android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
         g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
-        g.setCornerRadius(26f * getResources().getDisplayMetrics().density);
+        g.setCornerRadius(26f * getResources().getDisplayMetrics().density * AP_SCALE);
         g.setColor(AP_PANEL_BG);
         return g;
     }
@@ -794,9 +908,13 @@ public class FloatingBallService extends Service {
         if (approvalActionsScroll != null && wm != null) {
             try { wm.removeView(approvalActionsScroll); } catch (Throwable ignored) { }
         }
+        if (approvalInputRow != null && wm != null) {
+            try { wm.removeView(approvalInputRow); } catch (Throwable ignored) { }
+        }
         approvalContent = null;
         approvalActions = null;
         approvalActionsScroll = null;
+        approvalInputRow = null;
         approvalBodyView = null;
         approvalInput = null;
         approvalSend = null;
@@ -811,6 +929,7 @@ public class FloatingBallService extends Service {
     private void hideApprovalWindows() {
         if (approvalContent != null) approvalContent.setVisibility(View.GONE);
         if (approvalActionsScroll != null) approvalActionsScroll.setVisibility(View.GONE);
+        if (approvalInputRow != null) approvalInputRow.setVisibility(View.GONE);
     }
 
     private int approvalMaxContentW() {
@@ -917,6 +1036,9 @@ public class FloatingBallService extends Service {
     }
 
     private void hideKeyboard() {
+        main.removeCallbacks(approvalFocusTask);
+        try { if (approvalInput != null) approvalInput.clearFocus(); } catch (Throwable ignored) { }
+        apImeUp = false;
         try {
             if (approvalInput != null) {
                 android.view.inputmethod.InputMethodManager imm =
@@ -949,7 +1071,7 @@ public class FloatingBallService extends Service {
             View c = approvalContent.getChildAt(i);
             if (c instanceof android.widget.TextView) ((android.widget.TextView) c).setMaxWidth(textMaxW);
         }
-        apBodyPx = Math.round(14f * d);
+        apBodyPx = Math.round(14f * getResources().getDisplayMetrics().density * AP_SCALE);
         approvalBodyClipped = false;
         if (approvalBodyView != null) {
             approvalBodyView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, apBodyPx);
@@ -960,7 +1082,9 @@ public class FloatingBallService extends Service {
         // 放不下就压：先压交互层（说明文字行数 → 内边距），再压正文
         for (int guard = 0; guard < 8; guard++) {
             measureActions(actMaxW, Integer.MAX_VALUE);
-            float total = approvalContent.getMeasuredHeight() + apGap + approvalActions.getMeasuredHeight();
+            measureInput(actMaxW);
+            float total = approvalContent.getMeasuredHeight() + apGap
+                    + approvalActions.getMeasuredHeight() + (apInputH > 0 ? apGap + apInputH : 0);
             if (total <= cap) break;
             if (apOptPadY > Math.round(7 * d)) {
                 apOptPadY = Math.max(Math.round(7 * d), apOptPadY - Math.round(2 * d));
@@ -986,16 +1110,20 @@ public class FloatingBallService extends Service {
         // **绝不允许压到文字块上**（之前没夹高度，选项直接盖住了说明文字）。
         int actBudget = Math.max(Math.round(120 * d),
                 (int) (cap - apTextH - apGap - apPadY / 2f));
-        measureActions(actMaxW, actBudget);
+        // 先给输入行留出它自己的高度，按钮层的预算再扣掉它
+        measureInput(actMaxW);
+        int actBudget2 = Math.max(Math.round(120 * d), actBudget - (apInputH > 0 ? apInputH + apGap : 0));
+        measureActions(actMaxW, actBudget2);
         View actBox = approvalActionsScroll != null ? (View) approvalActionsScroll : approvalActions;
-        apActW = Math.min(actBox.getMeasuredWidth(), actMaxW);
-        apActH = Math.min(actBox.getMeasuredHeight(), actBudget);
+        apActW = Math.min(Math.max(actBox.getMeasuredWidth(), apInputW), actMaxW);
+        apActH = Math.min(actBox.getMeasuredHeight(), actBudget2);
 
         // 球：接近方形（取文字块与交互层里更宽的那个），高度装下两块 + 留白
         float innerW = Math.max(apTextW, apActW);
         float halfW = Math.max(base * minHalfX, innerW / 2f + apPadX / 2f + dp(4));
+        float blockTotal = apTextH + apGap + apActH + (apInputH > 0 ? apGap + apInputH : 0);
         float halfH = Math.max(base * minHalfY,
-                (apTextH + apGap + apActH) / 2f + apPadY / 2f + dp(6));
+                blockTotal / 2f + apPadY / 2f + dp(6));
         float maxHalfW = screenW * 0.92f / 2f;
         float maxHalfH = screenH * 0.68f / 2f;
         halfW = Math.min(halfW, maxHalfW);
@@ -1010,11 +1138,21 @@ public class FloatingBallService extends Service {
         aprHalfX = halfW / base;
         aprHalfY = halfH / base;
 
-        float contentBottomPx = apTextH + apGap + apActH + dp(8);
+        float contentBottomPx = apTextH + apGap + apActH
+                + (apInputH > 0 ? apGap + apInputH : 0) + dp(8);
         float ny = 1f - contentBottomPx / Math.max(1f, halfH);
         float gap = Math.max(0f, Math.min(0.25f, siriBlackStep / 1000f));
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
         aprBlack = Math.max(0f, Math.min(1.5f, black1Base - (ny - gap)));
+    }
+
+    /** 量输入行（它现在是独立悬浮窗，必须单独参与尺寸计算）。 */
+    private void measureInput(int maxW) {
+        if (approvalInputRow == null) { apInputW = 0; apInputH = 0; return; }
+        approvalInputRow.measure(View.MeasureSpec.makeMeasureSpec(Math.max(1, maxW), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        apInputW = Math.min(approvalInputRow.getMeasuredWidth(), maxW);
+        apInputH = approvalInputRow.getMeasuredHeight();
     }
 
     private void remeasure(View v, int maxW) {
@@ -1050,8 +1188,13 @@ public class FloatingBallService extends Service {
             try { wm.addView(approvalActionsScroll, approvalActionsParams); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval actions failed: " + t); }
         }
+        if (approvalInputRow != null && approvalInputRow.getParent() == null) {
+            try { wm.addView(approvalInputRow, approvalInputParams); }
+            catch (Throwable t) { Log.w("FloatingBall", "add approval input failed: " + t); }
+        }
         if (approvalContent != null) approvalContent.setVisibility(View.VISIBLE);
         if (approvalActionsScroll != null) approvalActionsScroll.setVisibility(View.VISIBLE);
+        if (approvalInputRow != null) approvalInputRow.setVisibility(View.VISIBLE);
         // 拖动层必须藏起来（它在按钮之上且铺满屏，会吃掉点击）
         if (approvalTouch != null) approvalTouch.setVisibility(View.GONE);
         if (approvalTouch == null) {
@@ -1110,14 +1253,16 @@ public class FloatingBallService extends Service {
         float ballTop = sy - hypx;
         float sysOffset = winYnow - params.y;
 
-        float blockH = apTextH + apGap + apActH;
+        float blockH = apTextH + apGap + apActH + (apInputH > 0 ? apGap + apInputH : 0);
         float topPad = Math.max(dp(4), (hypx - Math.max(0f, aBlack) * hypx - blockH) / 2f);
+        if (apImeUp) topPad = dp(6);      // 键盘弹起：内容顶到球顶，尽量离键盘远一点
         int textX = Math.round(winXnow + winW / 2f - apTextW / 2f);
         int textY = Math.round(ballTop + topPad - sysOffset);
         int actX = Math.round(winXnow + winW / 2f - apActW / 2f);
         int actY = Math.round(textY + apTextH + apGap);
 
-        int key = textX * 31 + textY * 17 + actX * 7 + actY * 3 + apTextW + apActW + apActH;
+        int key = textX * 31 + textY * 17 + actX * 7 + actY * 3
+                + apTextW + apActW + apActH + apInputH + (apImeUp ? 1 : 0);
         if (key == apLayoutKey) return;
         apLayoutKey = key;
 
@@ -1137,6 +1282,20 @@ public class FloatingBallService extends Service {
         approvalActionsParams.x = actX;
         approvalActionsParams.y = actY;
         try { wm.updateViewLayout(actBox, approvalActionsParams); } catch (Throwable ignored) { }
+
+        // 输入行：自己一个窗口，接在按钮层下面
+        if (approvalInputRow != null && apInputH > 0) {
+            int inX = Math.round(winXnow + winW / 2f - apInputW / 2f);
+            int inY = actY + apActH + apGap;
+            if (approvalInputParams.width != apInputW || approvalInputParams.height != apInputH) {
+                approvalInputParams.width = Math.max(1, apInputW);
+                approvalInputParams.height = Math.max(1, apInputH);
+            }
+            approvalInputParams.x = inX;
+            approvalInputParams.y = inY;
+            apInputY = inY;
+            try { wm.updateViewLayout(approvalInputRow, approvalInputParams); } catch (Throwable ignored) { }
+        }
     }
 
     private void updateApprovalTouchLayer(float hxpx, float hypx, float winXnow, float winYnow) {

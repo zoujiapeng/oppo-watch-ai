@@ -268,6 +268,24 @@ selected: custom === "" || item.multiSelect === true ? value.selected : [],
    - `uPanelAccent` 只填不用；普通球 `uPanelMode = 0` 完全不受影响。
    - **选项按钮保持语义色**（批准=淡绿、拒绝=淡红、提问选项=蓝）—— 用户要求按钮不变。
 
+9. **自由输入（custom）要能真的打字，有三个坑**（用户报过「点输入框无效」）：
+   1. **窗口必须可聚焦**：`FLAG_NOT_FOCUSABLE` 的悬浮窗里 EditText 永远收不到输入法。
+      所以输入行**单独一个窗口**，去掉该 flag，并设 `softInputMode = SOFT_INPUT_ADJUST_RESIZE`。
+   2. **焦点/键盘要延后到抬手之后**（`main.postDelayed(approvalFocusTask, 220)`）：
+      键盘一弹窗口就上移，同一串手势的 ACTION_UP 会落到别的控件上 —— 实测直接把选项点掉、
+      面板消失。
+   3. **窗口焦点会被抢**（`dumpsys` 里 `mCurrentFocus=null`），这时 `showSoftInput` 会被静默丢掉。
+      所以再挂一个窗口焦点监听，拿到焦点后**补发一次** `showImeNow()`。
+   排查手法：`InputMethodManager: showSoftInput() view=android.widget.EditText{... .F...I.}`
+   里那个 `I` 就是「EditText 拿到了 IME 焦点」，能区分「没聚焦」和「聚焦了但键盘没起来」。
+
+### 面板整体缩放（`AP_SCALE`）
+
+用户说默认尺寸偏大，现在的总开关是 `FloatingBallService.AP_SCALE = 0.55f`：
+**字号 / 按钮最小高 / 内边距 / 间距 / 圆角全部乘它**，等比缩放。
+想更大更小只改这一个数（`1.0` = 早期那版大尺寸）。
+实测 0.55 的效果：文字块 648×340 → 464×161，按钮层 602×415 → 336×229，输入行 602×141 → 336×99。
+
 ### 权限预设：没有「会问」的档就永远不会有审批
 
 审批只在会话的 `approval=ask` 时才产生。本机 `web` profile 已经改过
@@ -317,8 +335,8 @@ SELinux 禁区，所以只能用 127.0.0.1 上的小服务当信箱。安卓侧�
 - ✅ **「点了批准没反应」已定位并修掉**：是全屏拖动层吃掉了点击（见上面第 7 条）。
   修完实测 `option DOWN raw=540,1420` → `approval tap → allowed-once` → 调试回路
   `★ 球上点了： "allowed-once"`，整条通了。
-- ⚠️ **自由输入（custom）还没在真机上提交验证过**（只验证了选选项那条路）。
-  点输入框会拉起软键盘；球是 `TYPE_APPLICATION_OVERLAY` 悬浮窗，键盘遮挡时可能要拖一下球。
+- ✅ **自由输入（custom）已在真机验通**（用户确认「已经成功输入了」）。
+  实现细节与三个坑见上面第 9 条。
 - ⚠️ 多选（`multiSelect`）逻辑写了（勾选 + 发送），但还没拿到一条真的多选问题来验。
 - ⚠️ 没验证过的还有：选项特别多（>6）时球会封顶、内容压缩的顺序好不好看。
 - ⚠️ 调试回路的 `debug fetch #n → HTTP 204` 每 250ms 一条日志，比较吵；
