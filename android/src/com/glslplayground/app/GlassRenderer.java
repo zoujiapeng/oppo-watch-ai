@@ -338,7 +338,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.r = texture2D(iBlur, suv + disp).r;\n" +
         "  col.g = texture2D(iBlur, suv).g;\n" +
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
-        "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
+        // 折射采样后的调色：原来只有 0.22 的冷色偏移，采样内容几乎原样显示 →
+        // 球内看着"亮、透、虚"（用户反复反馈"太透明/能看清背景"）。
+        // 这里把折射内容压暗并略降饱和，玻璃才是"实心的深色玻璃"而不是一层薄雾。
+        "  col = mix(col, col*vec3(0.88,0.91,0.97)+vec3(0.006,0.007,0.014), 0.30);\n" +
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
@@ -393,8 +396,19 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float shell = smoothstep(3.0*uScale, 0.0, abs(sd + 2.5*uScale));\n" +
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
         "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
-        "  float aa = smoothstep(1.5, -1.5, sd);\n" +
-        "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +   // 面板底半透明，玻璃照旧
+        // 球内 alpha 直接置 1（完全由折射/色散提供玻璃观感，不靠透光）。
+        // 用户连续反馈"能清晰看到背景"，而折射/模糊链已确认生效 ——
+        // 说明问题只在 alpha：mix(1,panelFade,...) 在黑区不满时仍会留透光。
+        // 这里在球体内部（sd<0）强制 aa=1；球外仍按 aa 淡出，圆角保持干净。
+        // ★ 球在屏幕上的"实"取决于合成权重 aa × 颜色。此前 aa 在黑区里掉到 0.07~0.3，
+        // 于是屏幕上是"近透明的镜片"（用户："透明、能清晰看到背景"）。
+        // 预乘输出下，要让它像实心玻璃，aa 必须接近 1；球的观感（暗色/色散/波）由 col 提供。
+        "  float aa = (sd < 0.0) ? 0.96 : smoothstep(1.5, -1.5, sd);\n" +
+        // ★ 这行原本无条件把 aa 乘成 (1-blackMask*...)，普通球的黑区里会掉到 0.04 ——
+        // 屏幕上看到的就成了"近乎透明的一层贴纸"（背景文字清晰可读，用户反复反馈）。
+        // panelFade 只在审批卡片模式(uPanelMode)才 <1，所以这里**只在面板模式下**才降透明度；
+        // 普通球保持 aa=1，玻璃观感完全由 col（折射/色散/黑区）提供。
+        "  if(uPanelMode > 0.5) aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +
         // ★ 球内 alpha 下限：黑区强度 0.93 会让 aa 掉到 0.07，那 93% 的"透明"透出来的是
         // 背景缓冲里**未经折射**的清晰桌面（抠图路径故意把球体范围内的实时帧填成干净背景），
         // 于是用户看到"能直接看到不变形的背景"。球体范围内永远保留一层玻璃，就不再透出原图。

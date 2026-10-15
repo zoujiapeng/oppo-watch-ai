@@ -3040,9 +3040,22 @@ public class FloatingBallService extends Service {
                 m.invoke(tx, true);
             }
             txClass.getMethod("apply").invoke(tx);
+            try {
+                java.io.File f = new java.io.File(getExternalFilesDir(null), "skipshot.log");
+                java.io.FileOutputStream o = new java.io.FileOutputStream(f, true);
+                o.write((System.currentTimeMillis() + " OK\n").getBytes("UTF-8"));
+                o.close();
+            } catch (Throwable ignored) { }
             return true;
         } catch (Throwable t) {
             Log.w("FloatingBall", "setSkipScreenshot failed: " + t);
+            // 直接落盘：logcat 会被其他服务刷掉，这类"静默失败"必须写文件才看得到
+            try {
+                java.io.File f = new java.io.File(getExternalFilesDir(null), "skipshot.log");
+                java.io.FileOutputStream o = new java.io.FileOutputStream(f, true);
+                o.write((System.currentTimeMillis() + " FAIL " + t + "\n").getBytes("UTF-8"));
+                o.close();
+            } catch (Throwable ignored) { }
             return false;
         }
     }
@@ -3206,8 +3219,11 @@ public class FloatingBallService extends Service {
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
-        if (!renderer.selfExcluded && applySkipScreenshot()) {
-            renderer.selfExcluded = true;
+        // 调试开关 float_no_skipshot=1 可临时关掉它，让球出现在系统截图里（排查"球到底有没有被画出来"）。
+        if (!prefs().getBoolean("float_no_skipshot", false)) {
+            if (!renderer.selfExcluded && applySkipScreenshot()) {
+                renderer.selfExcluded = true;
+            }
         }
     }
 
@@ -3225,7 +3241,8 @@ public class FloatingBallService extends Service {
                 + "|" + prefs().getInt("float_orb_rim", 130)
                 + "|" + prefs().getInt("float_orb_radius", 90)
                 + "|" + prefs().getInt("float_black_opacity", 100)
-                + "|" + prefs().getInt("float_black_maxcover", 65);
+                + "|" + prefs().getInt("float_black_maxcover", 65)
+                + "|" + prefs().getString("float_blur_override", "");
         if (sig.equals(lastParamsJson)) return false;
         lastParamsJson = sig;
         if (s != null) applyParams(s);
@@ -3266,6 +3283,11 @@ public class FloatingBallService extends Service {
                 renderer.topDarken  = f(o, "topDarken", renderer.topDarken);
                 renderer.black0     = f(o, "black0", renderer.black0);
                 renderer.black1     = f(o, "black1", renderer.black1);
+                // 顺便支持"模糊值"等直接热改（原先只在启动读，改一次要重启服务）
+                String b = prefs().getString("float_blur_override", null);
+                if (b != null && !b.isEmpty()) {
+                    try { renderer.blur = Float.parseFloat(b); } catch (Throwable ignored) { }
+                }
                 renderer.edgeBleed  = f(o, "edgeBleed", renderer.edgeBleed);
                 renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
                 renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
