@@ -404,7 +404,12 @@ const P={};
 let floatPushPending=false;
 function pushFloatParams(){ if(floatPushPending)return; floatPushPending=true;
   setTimeout(sendFloatParams,0); }
+// ⚠️ 默认**不自动推参数**：这个页面以前一打开就把滑杆值 push 给悬浮球，
+// 于是"只是打开演示页看一眼"就会悄悄改掉球的外观（排查时踩过）。
+// 需要让球跟着这个页面走时，在控制台执行： window.__pushToBall = true
+let __pushToBall = false;
 function sendFloatParams(){ floatPushPending=false;
+  if(!__pushToBall) return;
   if(!(window.Watch && window.Watch.setFloatParams))return;
   try{ window.Watch.setFloatParams(JSON.stringify({
     master:P.master, posX:P.posX, posY:P.posY, halfX:P.halfX, halfY:P.halfY,
