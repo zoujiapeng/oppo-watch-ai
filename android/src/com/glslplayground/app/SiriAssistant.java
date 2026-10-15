@@ -656,6 +656,17 @@ public final class SiriAssistant {
         } catch (Throwable ignored) {}
     }
 
+    /** 排查用：把朗读过程直接写文件（logcat 会被别的服务刷掉，看不到）。 */
+    private void speakLog(String msg) {
+        Log.i(TAG, "SPEAK " + msg);
+        try {
+            java.io.File f = new java.io.File(app.getExternalFilesDir(null), "speak-trace.log");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
+            out.write((System.currentTimeMillis() % 100000 + " " + msg + "\n").getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable ignored) { }
+    }
+
     /** DSH 插件（dsh-plugin-speech）写的口播稿；球只读它，不碰 DSH 内部。 */
     private static final String SPOKEN_FILE = "spoken.txt";
     private static final long SPOKEN_FRESH_MS = 120000;   // 2 分钟内的才算这一轮
@@ -689,13 +700,6 @@ public final class SiriAssistant {
             return;
         }
         Log.i(TAG, "speak 请求: 原文 " + (text == null ? 0 : text.length()) + " 字");
-        String fromPlugin = pluginSpokenOrNull();
-        if (fromPlugin != null) {
-            // 用掉就删，避免下一轮重复念同一份稿子
-            try { new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE).delete(); } catch (Throwable ignored) { }
-            speakNow(fromPlugin, true);
-            return;
-        }
         if (speakUseModel) {
             // 交给大模型改写朗读稿（只在开启朗读时走；失败/超时自动回落规则清洗）
             SpeechRewriter.rewrite(text, speechApiKey, new SpeechRewriter.Cb() {
@@ -708,18 +712,74 @@ public final class SiriAssistant {
         speakNow(toSpeechText(text), false);
     }
 
-    private int lastSpokenHash = 0;
+    // 已念过的内容：只在时间窗内去重（原来是单个全局哈希，跨回合会误判"念过了"）
+    private final java.util.LinkedHashMap<Integer, Long> spokenHashes = new java.util.LinkedHashMap<>();
+    private static final long SPOKEN_DEDUPE_MS = 20000;
 
-    /** 同一段内容只朗读一次（mirror 与本地流两条路都会走到朗读点）。 */
+    /** 同一段内容在 20 秒内只朗读一次（mirror 与本地流两条路都会走到朗读点）。 */
     private void speakOnce(String text) {
         if (text == null) return;
-        String t = text.trim();
+        final String t = text.trim();
         if (t.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        java.util.Iterator<java.util.Map.Entry<Integer, Long>> it = spokenHashes.entrySet().iterator();
+        while (it.hasNext()) { if (now - it.next().getValue() > SPOKEN_DEDUPE_MS) it.remove(); }
         int h = t.hashCode();
-        if (h == lastSpokenHash) return;
-        lastSpokenHash = h;
-        Log.i(TAG, "speakOnce: " + t.length() + " 字");
-        speak(t);
+        if (spokenHashes.containsKey(h)) { speakLog("20 秒内已念过，跳过"); return; }
+        spokenHashes.put(h, now);
+        if (spokenHashes.size() > 20) {
+            java.util.Iterator<Integer> k = spokenHashes.keySet().iterator();
+            if (k.hasNext()) { k.next(); k.remove(); }
+        }
+        speakLog("speakOnce 进入: " + t.length() + " 字");
+        // 等一小会儿插件写的口播稿（它要跑一次模型，通常 1~3 秒）：
+        // 不等的话球会在插件写文件之前就把"规则清洗版"念完，好稿子白写。
+        new Thread(new Runnable() {
+            @Override public void run() {
+                long wait = waitPluginMs();
+                long t0 = System.currentTimeMillis();
+                speakLog("开始等插件口播稿（最多 " + wait + "ms）");
+                String plugin = waitForPluginSpoken(wait);
+                speakLog(plugin != null ? ("等到插件稿 " + plugin.length() + " 字（等了 " + (System.currentTimeMillis() - t0) + "ms）")
+                                        : ("没等到插件稿（等满 " + (System.currentTimeMillis() - t0) + "ms）→ 用规则清洗版"));
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (plugin != null) speakNow(plugin, true);
+                        else speak(t);
+                    }
+                });
+            }
+        }, "speak-wait").start();
+    }
+
+    // 等插件口播稿的时长（默认 15 秒，可用 prefs 的 speak_wait_ms 调）。
+    // 插件是在**回合结束**时才发模型请求，所以 3.5 秒远远不够：
+    // 实测 3.5s/6s 都会"等不到"，球就退化成念规则清洗版（听感就是原文）。
+    private long waitPluginMs() {
+        return prefs().getLong("speak_wait_ms", 15000L);
+    }
+    public void setSpeakWaitMs(long ms) {
+        prefs().edit().putLong("speak_wait_ms", Math.max(500L, Math.min(20000L, ms))).apply();
+    }
+    public long getSpeakWaitMs() { return waitPluginMs(); }
+
+    /**
+     * 等插件写下口播稿（轮询 spoken.txt）。等到就取走并删掉；超时返回 null。
+     * 在后台线程调用。
+     */
+    private String waitForPluginSpoken(long timeoutMs) {
+        if (!speakReplies) return null;
+        long until = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < until) {
+            String t = pluginSpokenOrNull();
+            if (t != null) {
+                try { new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE).delete(); } catch (Throwable ignored) { }
+                speakLog("轮询命中 spoken.txt: " + t.length() + " 字");
+                return t;
+            }
+            try { Thread.sleep(200); } catch (InterruptedException e) { return null; }
+        }
+        return null;
     }
 
     /** 真正送给 TTS 的那一步（规则清洗版与模型版都走这里）。 */
@@ -734,6 +794,7 @@ public final class SiriAssistant {
             out.close();
         } catch (Throwable ignored) { }
         if (spoken.isEmpty()) return;
+        speakLog("交给 TTS: " + spoken.length() + " 字（" + (byModel ? "插件口播稿" : "规则清洗") + "）");
         Log.i(TAG, "speak(" + spoken.length() + "字" + (byModel ? "，口播稿" : "，规则清洗") + "): "
                 + spoken.substring(0, Math.min(80, spoken.length())));
         try {

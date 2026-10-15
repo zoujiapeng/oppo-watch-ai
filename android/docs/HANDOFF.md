@@ -726,3 +726,26 @@ $ java SpeakTest < sample.md
 **如果哪天不想要它**：把 `dsh-plugin-speech` 从
 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 里删掉、重启 DSH 即可，
 App 侧会自动回落本地规则清洗（不需要改 App）。
+
+## 口播稿终于打通：三个真坑（2026-10-15 全部定位）
+
+前三轮一直"听不到改写稿"，靠**直接落盘的两份 trace**（球一份、插件一份）才逐层查清：
+
+| # | 坑 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | 事件形状：正文在 `event.data.message` | 插件取不到正文，静默 return | `messageOf()` 三层兜底 |
+| 2 | 模型默认带推理 | `chunks=304 blocks=reasoning 文本=0`，正文被 `max_tokens` 截断 | `reasoningEffort: "off"` + 额度重试 |
+| 3 | **`assistant/message` 是流式追加的** | 一回合来很多条（实测 0 → 20 → 26 字），**最后一条很短** → 我的 `MIN_TEXT=50` + 长度判重把它全挡掉，永远不触发 | 改为**按会话累积、`turn/end` 时改写一次**，并去掉最小长度门槛 |
+
+**球的等待时长也必须配套**：插件是在**回合结束**后才发模型请求，
+所以 3.5s / 6s 都不够（实测两次都"等满超时"→ 念规则清洗版），
+现在默认 **15 秒**（`speak_wait_ms` 可调）。
+
+**两份 trace 是这次能查清的关键**（`logcat` 在这台机器上会被别的服务刷掉）：
+
+- `files/speak-trace.log` —— 球：`speakOnce 进入 N 字` → `开始等插件口播稿` →
+  `等到插件稿 N 字（等了 Xms）` / `没等到插件稿（等满 Xms）` → `交给 TTS N 字（插件口播稿/规则清洗）`
+- `files/speech-plugin.log` —— 插件：`开始改写：本回合正文 N 字` → `口播稿 N 字已写入`
+
+**经验**：这类"跨进程 + 时序"的问题，别靠听感和 logcat，
+直接让两边各自把判断过程写文件，对照时间戳，一次就能定位。
