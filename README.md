@@ -34,6 +34,13 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | 接手改代码（现状 / 关键决定 / 未做完） | [`android/docs/HANDOFF.md`](android/docs/HANDOFF.md) |
 | DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
 | **Agent 操控手机时球不吃手势**（球让路协议 / 验证脚本） | [`android/docs/BALL_TOUCH_GUARD.md`](android/docs/BALL_TOUCH_GUARD.md) |
+| **朗读为什么好听**：用 DSH 自己的模型把回复改写成口播稿 | [`dsh-plugin-speech/README.md`](dsh-plugin-speech/README.md) |
+
+**朗读回答**：球念的不是原文，而是一份「口播稿」—— 一个 DSH 插件
+（[`dsh-plugin-speech`](dsh-plugin-speech/README.md)）在每回合结束时，用你**当前会话的模型**
+把回复压成一句到三句（≤100 字）再交给 TTS。所以 **不需要第二份 API key**，
+DSH 那边也不改一行代码；插件挂了或没装，球会自动回落到本地的规则清洗（去掉 markdown /
+代码块 / 表格 / emoji，路径与时间戳保持完整），朗读不会因此停摆。
 
 一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，但没有语音助手）。
 
