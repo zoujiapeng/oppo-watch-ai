@@ -3215,10 +3215,22 @@ public class FloatingBallService extends Service {
     /** float_params 有变化就重新应用；返回 true 表示这轮只做了重载（不抓帧）。 */
     private boolean pumpParamsReload() {
         String s = prefs().getString("float_params", null);
-        if (s == null || s.equals(lastParamsJson)) return false;
-        lastParamsJson = s;
-        applyParams(s);
-        Log.i("FloatingBall", "float_params 热重载（" + s.length() + " 字节）");
+        String sig = s + "|" + prefs().getInt("float_orb_gain", 110)
+                + "|" + prefs().getInt("float_orb_rim", 130)
+                + "|" + prefs().getInt("float_orb_radius", 90)
+                + "|" + prefs().getInt("float_black_opacity", 100)
+                + "|" + prefs().getInt("float_black_maxcover", 65);
+        if (sig.equals(lastParamsJson)) return false;
+        lastParamsJson = sig;
+        if (s != null) applyParams(s);
+        // 圆点/黑区那几个标量原先只在启动读一次，调"太亮/太实"时每次都得重装。
+        if (renderer != null) {
+            renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
+            renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
+            renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
+            renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
+        }
+        Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;
     }
 

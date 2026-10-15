@@ -225,7 +225,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float A1=0.30+0.01*low*6.0;\n" +
         "  float A2=A1+mid*0.05+high*0.06;\n" +
         "  float AB=2.6+mid*0.8+high*0.5;\n" +
-        "  float th=0.03*spread, inten=0.01*(2.0+low*1.5), soft=0.01*max(0.0,2.5+mid*0.4)*spread;\n" +
+        // 过曝修正：原来 inten 峰值把波带推到纯白（用户报"Siri 太亮"），整体 ×0.55
+        "  float th=0.03*spread, inten=0.0055*(2.0+low*1.5), soft=0.0055*max(0.0,2.5+mid*0.4)*spread;\n" +
         "  float yMain=A1*env*sin(p.x*1.1+drift);\n" +
         "  float bandAmt=1e-4*26000.0*inten;\n" +
         "  vec3 num=vec3(0.0),den=vec3(0.0);\n" +
