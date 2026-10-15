@@ -661,6 +661,12 @@ $ java SpeakTest < sample.md
 **核对**：`files/spoken.txt` 是否出现、`logcat -s SiriAssistant | grep speak` 里是
 「口播稿」（走了插件）还是「规则清洗」（回落）。
 
-**已验证**：插件可被 DSH 解析加载（`name=speech, inject=["llm"]`）、
-事件取值与原子写用同一份逻辑单测通过。**未验证**：真实回合里 `ctx.llm.stream` 的实际调用
-（需要重启 DSH 后跑一次真实对话）。
+**踩坑（第一次真实回合就翻车）**：`session.append(type, data)` 产生的事件是
+`{type, seq, time, data}`，**消息体在 `event.data.message`**，不是 `event.message`。
+写成后者 → 每次都在 `if (!text) return;` 静默返回：不报错、不写文件，
+表现是"插件好像装了但完全没工作"（那一轮球只能走规则清洗）。
+现在 `messageOf()` 按 `data.message → message → data` 兜底，并且拿不到 provider/model 时
+会打一行日志（不再静默）。
+
+**已验证**：插件可被 DSH 解析加载；用**真实事件结构**（`data.message` + `source`）驱动时，
+模型调用与原子写全部走通（`→ provider=… model=… 输入=25字` → `口播稿 8 字已写入`）。
