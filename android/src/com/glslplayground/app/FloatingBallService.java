@@ -2822,26 +2822,59 @@ public class FloatingBallService extends Service {
         clampBallOnScreen();          // 拖到屏幕边缘时把整颗球（含文字）夹回屏内
     }
 
-    /** 触摸层跟随文字区域（有文字才有触摸层，没文字就收起，球的手势完全不受影响）。 */
+    /**
+     * 球内文字层**要不要吃触摸**：只在"内容真的超出视口、需要滚动"时才吃。
+     *
+     * 用户反馈串起来的结果：抓取条删掉后拖球/点按都归球自己的触摸层；
+     * 但文字层若一直可触摸会挡住球中间一大片（"球正下方屏幕失灵"）；
+     * 完全不吃触摸又没法上下滑看长回复 → 折中：装得下就不吃，超出才吃。
+     */
     private void syncSiriTouchLayer() {
-        if (siriTouch == null || siriTouchParams == null || wm == null) return;
-        boolean show = siriTextShown && siriStr != null && !siriStr.trim().isEmpty()
-                && !approvalShown;      // 审批球在屏上时原球的文字触摸层必须让路
-        int wantVis = show ? View.VISIBLE : View.GONE;
-        if (siriTouch.getVisibility() != wantVis) {
-            siriTouch.setVisibility(wantVis);
-            Log.i("FloatingBall", "text touch layer " + (show ? "on" : "off"));
-        }
-        if (!show) return;
-        int w = Math.max(2, siriText.getMeasuredWidth());
-        int h = Math.max(2, siriText.getMeasuredHeight());
-        if (siriTouchParams.width == w && siriTouchParams.height == h
-                && siriTouchParams.x == siriParams.x && siriTouchParams.y == siriParams.y) return;
-        siriTouchParams.width = w;
-        siriTouchParams.height = h;
-        siriTouchParams.x = siriParams.x;
-        siriTouchParams.y = siriParams.y;
-        try { wm.updateViewLayout(siriTouch, siriTouchParams); } catch (Throwable ignored) { }
+        if (siriText == null || siriParams == null || wm == null) return;
+        boolean scrollable = siriTextShown && mdContentH > siriViewportH + 2;
+        if (scrollable == siriTextTouchable) return;
+        siriTextTouchable = scrollable;
+        if (scrollable) siriParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        else siriParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        try { wm.updateViewLayout(siriText, siriParams); } catch (Throwable ignored) { }
+        Log.i("FloatingBall", "球内文字层触摸: "
+                + (scrollable ? "开（内容超出，可上下滑）" : "关（装得下，手势归球）"));
+    }
+
+    /**
+     * 用户是否正在球里翻阅（触摸中、或刚滚过 {@link #MD_SCROLL_HOLD_MS}）。
+     * 翻阅期间：方形态保持不缩、文字不清空。
+     */
+    boolean isUserScrollingText() {
+        if (mdScrolling) return true;
+        return android.os.SystemClock.uptimeMillis() - mdScrollAt < MD_SCROLL_HOLD_MS;
+    }
+
+    /** 供助手侧查询：用户在翻阅时不要清空球内文字。 */
+    public static boolean isTextBeingScrolled() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.isUserScrollingText();
+    }
+
+    /**
+     * 结束本轮几何保持：把球从方形态放回初始圆球。
+     *
+     * 用户要求：「**只有最终回复**才会恢复，过程中（多步/短回复）都保持方形」。
+     * 所以只在"回合真的结束 + 安静 1.5 秒"时才被调用（见 SiriAssistant 侧）。
+     */
+    public static void releaseHoldForFinalReply() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                if (s.isUserScrollingText()) {          // 正在翻阅 → 不收回
+                    s.lastTextAt = android.os.SystemClock.uptimeMillis();
+                    return;
+                }
+                Log.i("FloatingBall", "最终回复安静 1.5s → 收起方形态，回初始圆球");
+                s.releaseTextHold();
+            }
+        });
     }
 
     /** 立刻把球内文字藏掉（不进布局）—— 球缩回最小形态时必须同一帧生效。 */
@@ -2873,12 +2906,29 @@ public class FloatingBallService extends Service {
             siriText.setVisibility(View.GONE);
             Log.i("FloatingBall", "siri text hidden (ball back to minimal)");
         }
+        if (siriText != null) siriText.scrollTo(0, 0);   // 下次出现从头看
         syncSiriTouchLayer();             // 没字 → 触摸层收起，球的手势完全不受影响
     }
 
     /** 有字要显示时再放出来。 */
+    /**
+     * 球当前是不是"方形态"（有内容时展开的那种）。
+     *
+     * 用户要求：「恢复到球的初始形状时**不允许**出现字和页面，只有方形才能出现」。
+     * 判据用"本轮已进入保持"或"目标几何已明显大于最小形态"—— 不能只看 getVisibility，
+     * 因为窗口/度量的更新是异步的。
+     */
+    private boolean squareFormActive() {
+        if (textHold) return true;
+        return tHalfX > minHalfX * 1.06f || tHalfY > minHalfY * 1.06f;
+    }
+
     private void showSiriTextNow() {
         if (siriText == null) return;
+        if (!squareFormActive()) {      // 圆球态：内容一律不出现
+            hideSiriTextNow();
+            return;
+        }
         siriTextShown = true;
         // 审批球在屏上时原球文字一律不露头（审批结束后 measureSiriTargets 会重新放出来）
         if (approvalShown) return;
@@ -2918,6 +2968,34 @@ public class FloatingBallService extends Service {
     }
 
     /** 球宽上限：屏幕宽度的 85%。 */
+    /** 方形态底边最多到屏高 66%（再往下就压到输入框/键盘了，用户反馈过）。 */
+    private static final float SIRI_SAFE_BOTTOM_RATIO = 0.66f;
+
+    /**
+     * 球顶的屏幕 y 坐标（**唯一**竖直定位点：玻璃窗口、文字层、黑区都用它）。
+     * 球底越过安全线时把整颗球上移 —— 用户原话「弹出位置老挤在下面影响我打字」。
+     */
+    private float ballTopOnScreen(float halfH) {
+        float hy0 = homeCySafe();
+        float minHalfH = winSize * 0.9f * minHalfY;
+        float top = hy0 - minHalfH;
+        float bottom = top + halfH * 2f;
+        float safeBottom = screenH * SIRI_SAFE_BOTTOM_RATIO;
+        if (bottom > safeBottom) top -= (bottom - safeBottom);
+        float minTop = Math.max(0f, winY0());
+        if (top < minTop) top = minTop;
+        return top;
+    }
+
+    /** 悬浮窗「请求 y → 实际屏幕 y」的系统 inset（本机 96px 状态栏）。 */
+    private float winY0() {
+        if (renderer != null && winH > 0 && renderer.winY > 0) {
+            float d = renderer.winY - params.y;
+            if (d >= 0 && d < screenH / 4f) return d;
+        }
+        return 0f;
+    }
+
     /** 方形态高度上限：屏高 55%（用户 2026-10-16 要求从 85% 收到 55%）。 */
     private float siriMaxBallH() {
         return screenH * SIRI_H_RATIO;
@@ -2944,6 +3022,12 @@ public class FloatingBallService extends Service {
     /** 兜底：助手在一次流式输出中途被关掉时可能没有 IDLE 事件，久静则自动释放保持。 */
     private void pumpTextHoldSafety() {
         if (!textHold || lastTextAt == 0) return;
+        // 用户正在球里翻阅 → 一直保持方形态（并且不断续命），松手 1.5s 后才走正常收起
+        if (isUserScrollingText()) {
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            return;
+        }
+        mdScrolling = false;
         long idleMs = android.os.SystemClock.uptimeMillis() - lastTextAt;
         if (idleMs > HOLD_SAFETY_MS) {
             Log.i("FloatingBall", "text hold: 兜底释放（出字后静了 " + idleMs + "ms）");
@@ -3223,10 +3307,9 @@ public class FloatingBallService extends Service {
         // 竖直：**家的球顶钉住，高度往下长**（用户要求"高度随文字往下涨"）。
         // 以前保持球心不动 → 文字一变长球就往上顶，观感是"球在往上跑、波也跟着上去"。
         // 窗口 = 球 + 四周 m 留白 ⇒ 窗口顶边 = 常态圆球的球顶 - m。
-        float minHalfH = winSize * 0.9f * minHalfY;
-        params.y = Math.round(hy0 - minHalfH - m);
+        params.y = Math.round(ballTopOnScreen(hypx) - m - winY0());
         Log.i("FloatingBall", "siri window place: home=(" + Math.round(hx0) + ","
-                + Math.round(hy0) + ") minHalfH=" + Math.round(minHalfH)
+                + Math.round(hy0) + ") 球顶=" + Math.round(ballTopOnScreen(hypx))
                 + " m=" + Math.round(m) + " -> params=(" + params.x + "," + params.y + ")"
                 + " size=" + W + "x" + H);
         try { wm.updateViewLayout(glView, params); } catch (Exception ignored) { }
@@ -3234,65 +3317,70 @@ public class FloatingBallService extends Service {
         clampBallOnScreen();          // 文字变长 → 球变大 → 可能要往屏内挪，否则文字出界
     }
 
+    /**
+     * 每帧把文字层摆进玻璃里。
+     *
+     * 用户要求「文字始终被束缚在液态玻璃里面」，所以这里三件事：
+     *   ① 宽度 = 方形态固定内宽（与窗口此刻多宽无关，避免换行变化导致抖动）；
+     *   ② 高度 = 球顶+留白 → 球底−16px（球底有圆角与波的锚点，收到球底会看起来"漏出球外"）；
+     *   ③ 位置以**玻璃的真实屏幕矩形**为准夹取（不能拿屏幕高当约束，那会把文字推出去）。
+     */
     private void updateSiriTextPos() {
         if (siriText == null || siriParams == null || wm == null) return;
-        if (siriText.getVisibility() != View.VISIBLE) return;   // 已藏起来（球回最小形态）就别再摆位置/改透明度
-        float winXnow = (renderer != null) ? renderer.winX : params.x;
-        float winYnow = (renderer != null) ? renderer.winY : params.y;
+        if (siriText.getVisibility() != View.VISIBLE) return;   // 藏起来（球回最小形态）就别再摆
+        if (glView == null) return;
+        // 玻璃的**真实屏幕矩形**是唯一可信基准：renderer.winX/winY 是 500ms 刷一次的缓存，
+        // 窗口刚变大时是过期值（拿它算会把文字整体推偏，实测推低到屏外）。
+        int[] gl = new int[2];
+        glView.getLocationOnScreen(gl);
+        float winXnow = gl[0], winYnow = gl[1];
+        int sysDy = Math.round(winYnow) - params.y;             // 请求坐标 → 屏幕坐标的系统 inset
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
+        float ballHalfH = base * aHalfY * aMaster;              // 当前球半高（缓动值）
         float sx = winXnow + winW * 0.5f;
-        float sy = winYnow + winH * 0.5f;
-        float hypx = base * aHalfY * aMaster;     // 当前球半高
-        // 宽度上限 = 当前球的实际内宽（每帧按当前几何算），而不是"文字最长时的球宽"。
-        // 坑：只在文字变化时量一次的话，球后来变小了、文字层还留着旧的大宽度 → 文字横向溢出玻璃
-        //（实测球 658 宽、文字层 697 宽，两侧各冒出去 19px）。
-        // 这里**不调用 setMaxWidth**（那会污染球的测量结果），只用 AT_MOST 量一次用于排版/居中。
-        float ballHalfW = base * aHalfX * aMaster;
-        int textMaxW = Math.max(1, Math.round(2f * ballHalfW - 2f * dp(28)));
-        // 原生方案：宽度/高度都由渲染器量好了，这里直接用
-        // （不再每帧 measure 文本，也不需要 textMeasured* 那套缓存 —— 旧方案的性能包袱）。
-        int tw = Math.max((int) dp(40), mdLayoutW > 0 ? mdLayoutW : textMaxW);
-        float topGap = 0f;
-        float ballHalfH = base * aHalfY * aMaster;
-        float ballTop = sy - ballHalfH;
-        float ballBottom = sy + ballHalfH;
-        siriParams.x = Math.round(sx - tw / 2f);
-        // 系统会给悬浮窗加一个顶部 inset 偏移（=球窗口实际 top − 请求 y，≈状态栏高度）；
-        // 必须减掉它，否则文字会被整体推低约一个状态栏的高度。
-        float sysOffset = winYnow - params.y;
-        siriParams.y = Math.round(ballTop + siriTextDy - Math.max(0f, topGap) - sysOffset);   // 字形顶相对球顶的偏移
-        // 兜底夹取：文字层的实际屏幕位置也要在屏内（x 留一点边距，y 夹在屏幕高度内）
-        int[] tloc = new int[2];
-        siriText.getLocationOnScreen(tloc);
-        int tdx = tloc[0] - siriParams.x;          // 请求 x → 实际 x 的差值（系统 inset）
-        int tdy = tloc[1] - siriParams.y;
-        int realX = siriParams.x + tdx;
-        int realY = siriParams.y + tdy;
-        int maxX = Math.max(0, screenW - tw);
-        int clampedX = Math.max(0, Math.min(maxX, realX));
-        int clampedY = Math.max(0, Math.min(Math.max(0, screenH - siriText.getMeasuredHeight()), realY));
-        if (clampedX != realX) siriParams.x += clampedX - realX;
-        if (clampedY != realY) siriParams.y += clampedY - realY;
-        // 垂直方向也要在玻璃轮廓内：文字块顶不低于球顶、底不高于球底（否则就是"文字跑出玻璃"）
-        int th = siriText.getMeasuredHeight();
-        int glassTop = Math.round(ballTop) + 2;
-        int glassBottom = Math.round(ballBottom) - 2;
-        int wantY = siriParams.y + tdy;                       // 当前实际屏幕 y
-        if (wantY < glassTop) siriParams.y += glassTop - wantY;
-        else if (wantY + th > glassBottom) siriParams.y += (glassBottom - th) - wantY;
-        // ⚠️ 只在真的变了才 updateViewLayout：这函数跑在 16ms 的 tick 上，
-        // 方形态的文字块又高又多行，每帧重摆窗口 = 每帧一次跨进程事务（方形态"卡卡的"一半来自这里）。
-        // 项目里"别每帧重摆窗口"这条教训对代理窗口写过，这里补上。
-        if (siriParams.x != siriTextLastX || siriParams.y != siriTextLastY
+        // 球顶/球底用**统一**的定位函数（含"躲开屏幕下部"的位移）：
+        // 不能各自用 sy±halfH 算，否则玻璃上移了、文字还留在原处 → 文字掉出球外。
+        float ballTop = ballTopOnScreen(ballHalfH) + winY0();
+        float ballBottom = ballTop + ballHalfH * 2f;
+
+        int topPad = Math.max(0, siriTextDy) + (int) dp(6);
+        int padBottomSafe = (int) dp(16);
+        int tw = Math.max((int) dp(40), mdLayoutWidthPx());
+        int availTop = Math.round(ballTop + topPad);
+        int availBottom = Math.round(ballBottom - padBottomSafe);
+        int th = Math.max((int) dp(40), availBottom - availTop);
+        siriViewportH = th;
+
+        int x = Math.max(0, Math.min(Math.max(0, screenW - tw), Math.round(sx - tw / 2f)));
+        int wantScreenY = Math.round(ballTop) + 2;
+        int maxScreenY = Math.round(ballBottom) - padBottomSafe - th;
+        if (maxScreenY < wantScreenY) maxScreenY = wantScreenY;  // 球比文字还矮：贴着球顶
+        int screenY = Math.max(wantScreenY, Math.min(maxScreenY, availTop));
+        int y = screenY - sysDy;
+
+        // ⚠️ 只在真的变了才 updateViewLayout（这函数跑在 16ms 的 tick 上，每帧重摆 = 每帧一次跨进程事务）
+        if (x != siriTextLastX || y != siriTextLastY
                 || tw != siriTextLastW || th != siriTextLastH) {
-            siriTextLastX = siriParams.x; siriTextLastY = siriParams.y;
+            siriTextLastX = x; siriTextLastY = y;
             siriTextLastW = tw; siriTextLastH = th;
-            try { wm.updateViewLayout(siriText, siriParams); } catch (Exception ignored) { }
+            siriParams.x = x; siriParams.y = y;
+            siriParams.width = tw; siriParams.height = th;
+            try { wm.updateViewLayout(siriText, siriParams); } catch (Throwable ignored) { }
+            // 越界自检（正常不该出现；出现过就是"文字漏出球外"）
+            int realBottom = y + sysDy + th;
+            if (realBottom > Math.round(ballBottom) + 2 && Math.abs(th - siriTextLogH) > 24) {
+                siriTextLogH = th;
+                Log.w("FloatingBall", "文字窗超出球底！文字底=" + realBottom
+                        + " 球底=" + Math.round(ballBottom) + " 高度=" + th);
+            }
         }
         syncSiriTouchLayer();
         siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
     }
+
+    /** 上一次打过"越界"告警的文字高度（抑制刷屏）。 */
+    private int siriTextLogH = -1;
 
     private float dp(float v) {
         return v * getResources().getDisplayMetrics().density;
