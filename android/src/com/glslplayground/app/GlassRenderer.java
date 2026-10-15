@@ -41,11 +41,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
     public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
-    public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
-    public float blur = 0.3f;
-    public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
+    // 折射/色散的默认值按"真实玻璃球"观感调过（用户对照物理世界提的）：
+    //   refraction 620：径向位移足够大，背景被明显放大+拉弯（原来 200 几乎看不出变形）
+    //   zoom 1.1：只做轻微收窄 —— 放大主要来自折射位移，zoom 太大会把 Siri 波坐标一起拉细
+    //   aberration 26：边缘色散更强，像真玻璃的彩虹边
+    //   edgeBleed 0.24：边缘亮环（全内反射的观感）
+    //   blur 1.9：玻璃体内的柔和失焦
+    public float refraction = 620f, band = 210f, zoom = 1.1f, dome = 0.35f, aberration = 26f;
+    public float blur = 1.9f;
+    public float topDarken = 0.40f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.24f;
     /** 黑区不透明度：1=完全不透光。用户反馈"太透明、能看到背后场景"就是它偏小。 */
-    public float blackOpacity = 1.0f;
+    public float blackOpacity = 0.28f;
     /** 球内最小不透明度：太小就会直接看到未经折射的清晰背景（用户报的现象）。 */
     public float glassFloor = 0.82f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
