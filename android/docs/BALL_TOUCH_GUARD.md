@@ -1,0 +1,260 @@
+# 悬浮球 × DSH 触摸门控（球让路协议）
+
+> 一句话：**agent 注入的点击/滑动永远不会落到球上，用户手指照常能点球、拖球。**
+> 做法不是"把球画得更透明"，而是：玻璃层只画不摸 + 球上只有一个贴身代理窗口接用户手势 +
+> agent 要注入触摸前先打招呼，那一刻连代理窗口也退出命中测试。
+
+## 1. 为什么会有这个问题
+
+DSH 的 mobile 工具注入触摸的链路是：
+
+```
+模型 → mobile 工具（dsh-preset-mobile-use）→ POST /api/action → vd_server
+     → /system/bin/input …（shell uid 的 INJECT_EVENTS）
+     → InputManagerService → InputDispatcher → **窗口命中测试** → 目标 App
+```
+
+关键是最后一步：**注入事件和真手指走的是同一套命中测试**，`MotionEvent` 里没有任何
+"这是注入的"标记，系统层面分不出谁是谁。而悬浮球是 `TYPE_APPLICATION_OVERLAY`、常驻屏幕
+中间、可触摸，于是：
+
+- 注入的 `ACTION_DOWN` 落在球上 → 球吃掉 → 底下 App 连 down 都收不到，滑动半途而废；
+- 更糟：球把这串手势**当成用户在操作**（双击 = 开始聆听、按住 = 挪球）。
+
+DSH 自己那套悬浮界面不吃手势，是因为：它要么是 `FLAG_NOT_TOUCHABLE` 的纯显示层
+（`GlowService` 的边缘光 + 触摸指示点），要么根本不在物理屏上（自动化在副屏跑），
+而且它不常驻。不是它"画得透明"。
+
+## 2. 协议
+
+```
+DSH 侧（要注入触摸时）                          球侧（每 60ms 轮询）
+──────────────────────────────────            ──────────────────────────────
+1. 原子写 nonce → <GATEDIR>/dsh-ball-act
+   （.tmp-<pid> + rename）
+                                               2. 读到 nonce ≠ 上次那个 → 从**本地时钟**起算
+                                                  让路窗口 ACT_HOLD_MS（1500ms）
+                                               3. 代理触摸窗口 |= FLAG_NOT_TOUCHABLE
+                                                  （玻璃层本来就 NOT_TOUCHABLE）
+                                               4. 写同一个 nonce → <GATEDIR>/dsh-ball-ack
+5. 读到 ACK 是自己的 nonce（最多等 500ms）
+6. 才真正 POST /api/action 注入触摸
+                                               7. 窗口到期 → 去掉 flag，球恢复可触摸
+```
+
+**GATEDIR = `/sdcard/Android/data/com.glslplayground.app/files`**（为什么是这个目录见 §5）。
+
+四条关键设计（都是踩出来的）：
+
+| 决定 | 为什么 |
+|---|---|
+| 只有 `click` / `swipe` / `key` 触发（`BALL_GUARD_TOUCH_ACTIONS`） | `observe` / `set_value` / `launch_app` / `switch_mode` / 审批 / 打字都不注入触摸，球这时该保持可交互 |
+| 用**内容比对**（nonce 变了）而不是 mtime 比对 | `/sdcard` 是 FUSE，App 看到的 mtime 有缓存延迟；同一秒内的连续写 mtime 可能不变 |
+| 让路窗口从**球自己看到新 nonce 的那一刻**起算（本地 `System.currentTimeMillis()`） | 实测球以为 mtime 比真实写时间早 ~700ms，1.5s 的窗口实际只剩 ~740ms；用本地时钟才稳 |
+| 信号必须**原子写**（`.tmp` + rename） | 球每 60ms 读一次，直接 `>` 重定向会先截断，球容易读到半个 nonce → ACK 永远对不上（实测 3 次坏 1 次） |
+
+还有：
+
+- **fail-open**：球没在跑 / 写不进信号 → 最多多等 500ms，动作照发（结果里会带一行 `[ball]` 提示）。
+- **总开关**：`touch <GATEDIR>/dsh-ball-guard-off`（或 `/data/local/tmp/dsh-ball-guard-off`）
+  → 球忽略信号，回到"永远可触摸"的老行为。
+- **ACK 写失败退避** 500ms，不会每 60ms 刷一条错误日志。
+- **遗留信号的豁免只看"文件够不够旧"**（`STALE_MS = 8000`）：只有"本次启动还没见过任何信号"
+  **且** 文件 mtime 超过 8 秒没动，才当成遗留物忽略。
+  ⚠️ 这里翻过一次车（一定要记住）：早先的版本是"启动后首读一律忽略"，结果球重启后首读把遗留
+  nonce 记成"已见"，而插件下一次点击生成的 nonce 恰好是同一个序列 → **真信号被当旧信号丢掉**，
+  球不让路、不回 ACK，那一次点击就被球吃掉（现象：`[ball] 让路确认未收到` + 点击无反应）。
+- **握手成功后插件顺手删掉信号文件**（`fs.unlinkSync(actPath)`），从根上不留遗留物。
+
+## 3. 落地位置（三处）
+
+| 位置 | 角色 |
+|---|---|
+| `android/src/.../FloatingBallService.java` | 球侧：`pumpAgentGate()` / `applyBallTouchability()` / `syncBallTouchWindow()` / `setupBallTouchLayer()` / `inBallAtRaw()` / `gateDir()` |
+| `~/dsh-preset-mobile-use/lib/index.js` | DSH 侧**主路径**：`waitForBallStandDown()`，在 `default:` 分支发 `/api/action` 之前调用 |
+| `patches/apply-vd-ball-guard-patch.sh` | CLI 路径：给 Magisk 模块里的 `/system/bin/vd` 的 tap/swipe/key 分支插 `ball_signal`（手动调试用） |
+
+### 3.1 窗口结构（这次改动）
+
+```
+玻璃层 GLSurfaceView   fl=NOT_FOCUSABLE NOT_TOUCHABLE LAYOUT_NO_LIMITS   ← 只画不摸
+      ↑ z 更低
+代理窗口 ballTouch     贴身包住球（+10dp 容错），唯一接用户手势的窗口
+      ↑ z 更高
+文字触摸层 / 审批按钮层 / 审批输入行   各自按需出现（原样没动）
+```
+
+**代理窗口尺寸 = 玻璃层当前矩形 + 每边 10dp**（`syncBallTouchWindow()`，数值没变就不动窗口）。
+早期版本按"球的最小形态"固定尺寸，结果 Siri 球宽在 ~700↔~1040 之间动画时，
+玻璃层变大、代理层没跟上 → 球两侧出现**死区**：触摸确实落在球上，却没被代理窗口盖住，
+事件被直接丢弃（实测：画布上那一笔凭空消失，且球的水平位置会跳变）。
+现在玻璃层每次改尺寸代理层都跟，窗口只在数值变化时更新。
+
+代理窗口用 `setTitle("dsh-ball-proxy")` 起过名字 → `dumpsys` 里就是
+`Window{<token> u0 dsh-ball-proxy}`，验证工具按**名字**认它，不靠"猜哪个窗口是代理层"
+（早期版本猜错过：文字触摸层 / 玻璃层都会带偏）。
+
+代理窗口是 `setupBallTouchLayer()` 在玻璃层 `addView` **之后立刻加**的 → z 序最低的触摸层，
+所以审批面板的文字/按钮/输入行照样压在它上面；面板期间球本来也不该抢手势
+（`approvalShown` 时直接 `return false`）。
+
+顺带修掉一个隐形坑：玻璃窗口比球本身大一圈（普通模式 `winSize` 方形 vs 球 `0.9×winSize`），
+`FLAG_LAYOUT_NO_LIMITS` 下窗口里那圈"看不见的透明边"同样在吞触摸。现在玻璃层不接触摸、
+代理窗口只包球，这个坑没有了。
+
+### 3.2 用户手势（手感没变）
+
+代理窗口的 `onTouch` 和原来 `glView` 上那套**完全同源**：单击不动、340ms 内两次 = 双击开听/结束、
+按住 480ms = 长按取消（录音中/问答中）、移动超过 10dp 转拖动（`moveBallDrag()`，夹取规则一致）。
+判断"按在球上"用同一个圆角矩形 SDF（`inSiriBall()`），这里多一步屏幕坐标 → 玻璃窗口本地坐标
+换算（`inBallAtRaw()`）。
+
+## 4. 验证（两个脚本，都不需要重启 DSH）
+
+### 4.1 球侧：`android/tools/ball-guard-verify.sh`
+
+```bash
+bash android/tools/ball-guard-verify.sh     # 球必须在跑
+```
+
+打 ACT 信号 → 断言代理窗口变 `notTouchable` + ACK 匹配 → 等 1.5s 断言自动恢复 → 打日志。
+实测（2026-10-15，LE2120 / Android 13）：
+
+```
+[ok] com.glslplayground.app pid=7707  信号目录=/sdcard/Android/data/com.glslplayground.app/files
+[ball] 信号前：touchable 710x497 at (185,1053) tok=d301016
+[ball] 信号后：notTouchable 719x499 at (180,1052) tok=d301016
+[ok] ACK 匹配：verify-1792069713862926920
+[ok] 代理窗口已退出命中测试（agent 的触摸不会落到球上）
+[ok] 球恢复可触摸（用户手指能点/拖）
+```
+
+### 4.2 插件侧贯通：`android/tools/ball-guard-plugin-e2e.mjs`
+
+```bash
+node android/tools/ball-guard-plugin-e2e.mjs click   # 也支持 swipe / key
+```
+
+它从 `~/dsh-preset-mobile-use/lib/index.js` **原样切出** `resolveBallGuardDir` +
+`waitForBallStandDown`（同一份源码，不是抄一份），在真机上调用，同时观察真实球窗口。
+所以**不用重启 DSH 也能验证插件那半边**：
+
+```
+[ball] 返回 ok=true reason=- nonce=1792069724479-14159-1-key 用时=54ms
+[ok] 球回了 ACK（握手成功，54ms）
+[ball] 现场状态：notTouchable 713x499 at (188,1052) tok=d301016
+[ok] 球此刻不接触摸 → agent 的触摸不会落到球上
+[ok] 球恢复可触摸（用户手指能点/拖）
+[ok] 拿不到信号目录时不阻塞（1ms，调用方照发动作）
+★ 全部通过
+```
+
+### 4.2b 真机"agent 穿球点击"验证（2026-10-15 实拍，DSH 重启后）
+
+重启 DSH（插件新代码生效）后，用 **mobile 工具**（就是 agent 走的那条路）点击一个
+**落在球里面**的便签：球的范围 `x 7–1080, y 989–1614`，点击目标 (540,1224)
+（便签列表第 4 条「底下垫着干净的东西…」）。
+
+```
+21:32:21.623 FloatingBall: agent act signal: 1792071141563-20615-5-click → 让路 1500ms
+21:32:21.624 FloatingBall: agent gate -> DISARM (球只显示)
+21:32:21.628 FloatingBall: agent gate ack: ... -> dsh-ball-ack
+21:32:23.164 FloatingBall: agent gate -> ARM (球可触摸)
+```
+
+结果：便签**详情页打开了**（`NoteViewRichEditActivity`，内容 109 字），
+且球没有被挪动（y 仍是 989；宽度变化是文字动画，不是拖动）。
+
+对照（同一位置、旧插件 / 无握手时）：
+- 点击被球吃掉 → 界面毫无反应（`[ball] 让路确认未收到`）；
+- 球**外面**的点击一直正常（`topResumedActivity` 变成详情页）→ 证明注入本身是通的。
+
+### 4.3 真机"透传"验证：在便签画布上穿过球画线（2026-10-15 实拍）
+
+步骤：便签 → 新建 → 涂鸦 → 从球上方起笔、竖着贯穿球体画到球下方 → 截图做像素比对。
+
+结果（球当时占 `x 120–959, y 989–1614`，截图坐标 ÷2）：
+
+```
+竖线暗像素连续段：y=214..991（长 778px）     ← 贯穿全画布
+球覆盖区（截图 y 494..807）内是否有断口：无
+球区内采样：y=500 -> 0, y=650 -> 4, y=800 -> 0   （0/4 = 纯黑笔画）
+```
+
+同一轮还确认了两件事：
+
+- **用户拖动没退化**：在球上按住往下拖 400px，球的 y 从 989 → 603（正常跟手）。
+- **球覆盖 App 控件时它会吃掉那次点击**（设计如此，不是 bug）：球停在顶部中央时盖住了
+  撤销/完成按钮，点撤销没反应 —— 球**可见范围内**本来就归球。想点被盖住的控件，
+  先把球挪开（拖一下即可）。
+
+辅助工具：`python3 android/tools/ball-proxy-state.py` → `touchable|notTouchable WxH at (x,y) tok=...`
+（两个脚本都靠它判状态，口径统一；代理窗口名 `dsh-ball-proxy` 就是给这一步用的）
+
+日志（`logcat -s FloatingBall`）：
+
+```
+gate dir = /sdcard/Android/data/com.glslplayground.app/files
+ball touch proxy added
+agent act signal: 1792069...-1-click @.../dsh-ball-act → 让路 1500ms
+agent gate -> DISARM (球只显示)
+agent gate ack: 1792069...-1-click -> .../dsh-ball-ack
+agent gate -> ARM (球可触摸)
+```
+
+## 5. 踩过的坑（别再回去）
+
+1. **球自己判断不了**：`MotionEvent` 没有"注入"标记，必须有外部信号。
+2. **`/data/local/tmp` 根下 App 只能读不能写**：目录是 `drwxrwx--x shell shell` + `shell_data_file`
+   标签，`untrusted_app` 域写 ACK 报 `EACCES`（实测；读 ACT 是成功的，所以很容易误判成"能写"）。
+3. **`/data/local/tmp/dsh-ball` 0777 子目录也不行**：连目录创建/写文件都被 SELinux 拒。
+   → 最终选 App 的**外部私有目录** `/sdcard/Android/data/<pkg>/files`：App 免权限可写，
+   root / shell / Termux 用户都读得到（`media_rw_data_file` 标签，实测 shell 写 OK）。
+   **别用内部私有目录 `/data/data/<pkg>/files` 当主路径**：C2S 写没问题，但不保证所有
+   SELinux 策略下非 root 进程读得到。
+4. **别每帧重摆窗口**：`syncBallTouchWindow()` 所有字段都比对过才 `updateViewLayout`。
+   这个项目已经被"每帧改窗口"咬过两次（审批面板"点了没反应"、面板几何打架）。
+5. **代理窗口只加 `FLAG_NOT_FOCUSABLE|FLAG_NOT_TOUCH_MODAL|FLAG_LAYOUT_NO_LIMITS`**：
+   它是不可聚焦的，不会抢输入法焦点；审批输入行是**另一个**可聚焦窗口，两者不冲突。
+6. **ACK 要原子写**（`.tmp` + rename），否则插件可能读到半个 nonce，永远等不到确认。
+7. **`/system/bin/vd` 要改 Magisk 模块里的那份**（`/data/adb/modules/agent_mobile_use/system/bin/vd`）；
+   `/system/bin` 在 Magisk 下是 **ro 挂载**，`cp` 过去会失败 —— 模块里改好，**重启后自动生效**。
+8. **`/sdcard`（FUSE）上的 mtime 不可信**：球读到的 mtime 可能比真实写时间早 ~700ms，
+   "mtime + 1.5s 内算新鲜"这种判定窗口会缩水（实测只剩 740ms）。判"有没有新信号"要用
+   **内容（nonce）比对**，窗口长度用**本地时钟**起算。
+9. **信号文件必须原子写**：球 60ms 读一次，`>` 重定向先截断再写，球会读到半个 nonce，
+   ACK 永远对不上 —— 表现为"球偶尔让路、偶尔不让路"。插件与 vd 脚本都已改成 `.tmp` + rename，
+   验证脚本同理。
+10. **别靠"猜哪个窗口是代理层"做验证**：文字触摸层（`697x102` 那种）和玻璃层都会把
+   "面积最大/最小"的启发式带偏。代理窗口已 `setTitle("dsh-ball-proxy")`，按名字找。
+11. **代理窗口不能按"球的最小形态"固定尺寸**：Siri 球宽动画到 ~1040px 时，固定尺寸的代理层
+   盖不住球的两侧 → 那一片成了死区（触摸落到球上却被 `inBallAtRaw()` 判成球外、直接丢弃），
+   症状是"某一笔凭空消失 / 球位置莫名跳变"。代理层要**跟玻璃层同尺寸**（+外扩）。
+12. **改代码别用"从 A 切到 B"的大块替换**：这次就是这么把 `syncBallTouchWindow` /
+   `inBallAtRaw` / `setupBallTouchLayer` 三个方法整段删掉过一次（编译报 symbol not found 才发现）。
+
+## 6. 已知限制
+
+- ACT 的 mtime 精度是**秒级**：同一秒内的两次信号可能 mtime 相同（日志去重会少打一行，判定不受影响）。
+- 用户手指正按着球时 agent 要注入触摸：球会在 ~60ms 内退出命中测试，用户那串手势会收到
+  `ACTION_CANCEL`（表现为球突然不跟手），这是设计取舍。
+- DSH 侧要**重启 DSH** 才会加载改过的插件（插件在启动时 import 进内存）。
+- 球被系统杀掉再打开（点「悬浮于桌面」）后重新开始轮询，无状态残留。
+
+## 7. 改动清单速查
+
+| 文件 | 改了什么 |
+|---|---|
+| `FloatingBallService.java` | 玻璃层加 `FLAG_NOT_TOUCHABLE`；新增代理窗口（`dsh-ball-proxy`，带 title）+ 门控（内容比对 + 本地时钟窗口 + ACK 退避 + 残留清理）；普通模式拖动夹取按球直径算 |
+| `~/dsh-preset-mobile-use/lib/index.js` | `waitForBallStandDown()`（原子写 + 唯一 nonce + 20ms 轮询 ACK）+ `default:` 分支只对 click/swipe/key 调用 + guidance 里加一句（**升级会覆盖，需重打**，备份在 `patches/preset-mobile-use/index.js.patched`） |
+| `/data/adb/modules/agent_mobile_use/system/bin/vd` | `ball_signal()`（原子写）+ tap/swipe/key 三处调用；`/system/bin` 是 Magisk ro 挂载，改模块里的文件、**重启后生效** |
+| `patches/apply-vd-ball-guard-patch.sh` | 幂等应用上面那条 vd 补丁（含备份 `vd.bak-ballguard`） |
+| `android/tools/ball-guard-verify.sh` | 球侧端到端验证（信号 → notTouchable + ACK → 恢复） |
+| `android/tools/ball-guard-plugin-e2e.mjs` | 插件侧贯通验证（切真实插件代码跑，含 fail-open 用例） |
+| `android/tools/ball-proxy-state.py` | 按窗口名读代理层触摸状态（两个脚本共用同一口径） |
+
+## 8. 还没做的
+
+- **一次真实 agent 手势的冒烟**：重启 DSH 后，让 agent 在球正上方做一次 swipe，确认
+  `logcat -s FloatingBall` 里出现 `让路 1500ms` + `DISARM`，并且球没被挪走。
+  （球侧与插件侧已各自端到端验证；这一步只是把两边接上真实会话再跑一遍。）

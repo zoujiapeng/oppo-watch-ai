@@ -111,6 +111,31 @@ public final class DshApprovalClient {
         public boolean isMultiSelect() { return multiSelect; }
     }
 
+    /** 一道题的答案（批量回传时用）。 */
+    public static final class Answer {
+        public final String questionId;
+        public final List<String> selected;
+        public final String custom;
+
+        public Answer(String questionId, List<String> selected, String custom) {
+            this.questionId = questionId == null ? "" : questionId;
+            this.selected = selected == null ? new ArrayList<String>() : selected;
+            this.custom = custom == null ? "" : custom;
+        }
+    }
+
+    /**
+     * 这道题是不是多选。**必须按题号查**：一批里可能混着单选和多选题，
+     * 只看 questions.get(0) 会把后面的多选题也当成单选处理。
+     */
+    private static boolean isMultiSelect(Request req, String questionId) {
+        if (req == null) return false;
+        for (Question q : req.questions) {
+            if (q.id != null && q.id.equals(questionId)) return q.isMultiSelect();
+        }
+        return !req.questions.isEmpty() && req.questions.get(0).isMultiSelect();
+    }
+
     /** 球侧实现。所有回调都在主线程。 */
     public interface Listener {
         /** 收到一条待答请求：把球变成审批形态。 */
@@ -414,26 +439,42 @@ public final class DshApprovalClient {
      * @param custom     自由输入的内容，空串表示没写
      */
     public void answerQuestion(String questionId, java.util.List<String> selected, String custom) {
+        java.util.List<Answer> batch = new java.util.ArrayList<Answer>();
+        batch.add(new Answer(questionId, selected, custom));
+        answerQuestions(batch);
+    }
+
+    /**
+     * 一次回一整批答案。DSH 的 `answers` 本来就是数组，一批问题要么一起回、
+     * 要么别回 —— 分成多次 POST 会把只答了一半的结果递上去。
+     *
+     * @param batch 每道题一条；空列表直接忽略
+     */
+    public void answerQuestions(java.util.List<Answer> batch) {
         final Request req = current;
-        if (req == null) return;
-        boolean multi = !req.questions.isEmpty() && req.questions.get(0).isMultiSelect();
-        String text = custom == null ? "" : custom.trim();
+        if (req == null || batch == null || batch.isEmpty()) return;
         try {
-            JSONObject item = new JSONObject();
-            item.put("id", questionId == null ? "" : questionId);
-            JSONArray picked = new JSONArray();
-            if (text.isEmpty() || multi) {                 // 单选 + 自由文本 → selected 清空
-                if (selected != null) for (String s : selected) picked.put(s);
-            }
-            item.put("selected", picked);
-            if (!text.isEmpty()) item.put("custom", text);
-            JSONObject answer = new JSONObject();
             JSONArray answers = new JSONArray();
-            answers.put(item);
+            for (Answer a : batch) {
+                if (a == null) continue;
+                String text = a.custom.trim();
+                boolean multi = isMultiSelect(req, a.questionId);
+                JSONObject item = new JSONObject();
+                item.put("id", a.questionId);
+                JSONArray picked = new JSONArray();
+                if (text.isEmpty() || multi) {             // 单选 + 自由文本 → selected 清空
+                    for (String s : a.selected) picked.put(s);
+                }
+                item.put("selected", picked);
+                if (!text.isEmpty()) item.put("custom", text);
+                answers.put(item);
+            }
+            if (answers.length() == 0) return;
+            JSONObject answer = new JSONObject();
             answer.put("answers", answers);
             decide(answer);
         } catch (Throwable t) {
-            Log.w(TAG, "answerQuestion build failed: " + t);
+            Log.w(TAG, "answerQuestions build failed: " + t);
         }
     }
 
@@ -495,16 +536,29 @@ public final class DshApprovalClient {
             JSONArray opts = o.optJSONArray("options");
             if (opts != null) {
                 Question q = new Question();
+                q.id = o.optString("id", "q1");
                 q.header = o.optString("header", "");
-                q.question = req.reason;
+                q.question = o.optString("question", req.reason);
+                q.detail = o.optString("detail", "");
+                // 探针要能复现真链路的两种形态：字符串数组，或 {label,description} 对象数组。
+                // 之前这里没解析 multiSelect，导致经调试回路喂进来的题**永远是单选**，
+                // 对着它验多选必然验不出来 —— 探针和真链路不一致就等于没验。
+                q.multiSelect = o.optBoolean("multiSelect", o.optBoolean("multi_select", false));
                 for (int i = 0; i < opts.length(); i++) {
-                    q.labels.add(opts.optString(i, ""));
-                    q.descriptions.add("");
+                    JSONObject oo = opts.optJSONObject(i);
+                    if (oo != null) {
+                        q.labels.add(oo.optString("label", ""));
+                        q.descriptions.add(oo.optString("description", ""));
+                    } else {
+                        q.labels.add(opts.optString(i, ""));
+                        q.descriptions.add("");
+                    }
                 }
                 req.questions.add(q);
             }
             Log.i(TAG, "debug approval request: title=" + req.title()
-                    + " options=" + optionCount(req));
+                    + " options=" + optionCount(req)
+                    + " multi=" + (!req.questions.isEmpty() && req.questions.get(0).isMultiSelect()));
             current = req;
             main.post(new Runnable() {
                 @Override public void run() { if (listener != null) listener.onRequest(req); }

@@ -290,6 +290,37 @@ ps -A | grep -i caplive
 
 ---
 
+## 9.5 Agent 操控手机时，别让球吃掉注入的手势（可选，但强烈建议）
+
+DSH 的 mobile 工具注入触摸（click/swipe/key）走 `/system/bin/input`，和真手指共用同一套
+窗口命中测试 —— 球盖在屏幕中间时，注入的 `ACTION_DOWN` 会被球吃掉。完整原理与实现见
+[`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)，这里只列**换机后要做的三件事**：
+
+```bash
+# 1) 建信号目录（球在这里写 ACK；不能放 /data/local/tmp：shell_data_file 标签，
+#    untrusted_app 只能读不能写，实测写 ACK 报 EACCES）
+mkdir -p /sdcard/Android/data/com.glslplayground.app/files
+
+# 2) DSH 侧插件（升级 dsh-preset-mobile-use 会覆盖，需重打）
+grep -n "waitForBallStandDown" ~/dsh-preset-mobile-use/lib/index.js
+
+# 3) vd CLI（手动 vd tap/swipe 调试那条路，重启后生效）
+bash ~/oppo-watch-ai/patches/apply-vd-ball-guard-patch.sh
+
+# 验证（球要在跑；两个脚本都不需要重启 DSH）
+bash ~/oppo-watch-ai/android/tools/ball-guard-verify.sh           # 球侧：信号→notTouchable+ACK→恢复
+node ~/oppo-watch-ai/android/tools/ball-guard-plugin-e2e.mjs key  # 插件侧贯通（切真实插件代码跑）
+```
+
+换包名 / 换机器时，**两边路径要一起改**：球侧 `FloatingBallService` 的 `gateDir()`（默认
+`getExternalFilesDir(null)`），DSH 侧 `lib/index.js` 的 `BALL_GUARD_DIR`（可用
+环境变量 `DSH_BALL_GUARD_DIR` 覆盖）。
+
+临时关掉联动：`touch /sdcard/Android/data/com.glslplayground.app/files/dsh-ball-guard-off`。
+
+两个别踩的坑（换机器也一样）：信号文件**必须原子写**（`.tmp` + `mv`，否则球会读到半个 nonce）；
+让路窗口要按**本地时钟**算，别用 `/sdcard` 上的 mtime（FUSE 缓存会让窗口缩水）。
+
 ## 10. 给 AI 的最短行动清单
 
 ```

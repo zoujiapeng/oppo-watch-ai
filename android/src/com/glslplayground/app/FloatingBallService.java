@@ -36,6 +36,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 
 /** 悬浮水晶球：TYPE_APPLICATION_OVERLAY 悬浮窗 + MediaProjection 抓屏 + GLSurfaceView 渲染。 */
 public class FloatingBallService extends Service {
@@ -68,6 +72,56 @@ public class FloatingBallService extends Service {
     private GLSurfaceView glView;
     private GlassRenderer renderer;
     private WindowManager.LayoutParams params;
+
+    // ═══════════════════ agent 触摸门控（球在 DSH 注入触摸时不参与命中测试）═══════════════════
+    //
+    // 背景：DSH 的 mobile 工具注入触摸走的是 `/system/bin/input`（shell uid 的 INJECT_EVENTS），
+    // 事件一样要过 InputDispatcher 的 **窗口命中测试**。球的悬浮窗常驻屏幕中间，注入的
+    // ACTION_DOWN 落在球上就会被球吃掉 —— 底下 App 连 down 都收不到（滑动半途而废），
+    // 更糟的是球会把这串手势当成用户在操作（双击开听、按住挪球）。
+    //
+    // 系统层面**分不出**「注入」和「真手指」，所以只能由 DSH 侧在动手之前先打个招呼：
+    //   · DSH 侧（dsh-preset-mobile-use）要发 click/swipe/key 时，先把一个 nonce 写进 ACT 文件；
+    //   · 球看到 ACT 文件变新 → 代理触摸窗口立刻设 FLAG_NOT_TOUCHABLE（球变成纯显示），
+    //     再把这个 nonce 写进 ACK 文件；DSH 侧等到 ACK（最多 ~500ms）才真正注入触摸；
+    //   · 之后 ACT 文件的 mtime 在 ACT_HOLD_MS 内保持「有 agent 在操作」→ 球继续不接触摸，
+    //     覆盖 observe→act→observe 的来回；超过这个窗口没有新信号就自动恢复可触摸。
+    //
+    // 结果：agent 的点击/滑动永远落不到球上，用户手指照常能点球/拖球（除注入那一刻）。
+    // 注意 ACT_HOLD_MS 必须大于 DSH 侧「收到 ACK → 真正注入」的往返时间，否则球会提前醒。
+    //
+    // 路径（踩过的坑，别改回去）：
+    //   ✗ /data/local/tmp 根下：目录是 drwxrwx--x shell shell + shell_data_file 标签，
+    //     untrusted_app 域**能读不能写** —— 实测读 ACT 成功、写 ACK 报 EACCES。
+    //   ✗ /data/local/tmp/dsh-ball（0777 子目录）：写文件同样被 SELinux 拒（目录创建也拒）。
+    //   ✓ App 外部私有目录 /sdcard/Android/data/<pkg>/files：App 免权限可写，
+    //     root/shell/普通 Termux 用户都读得到（实测 shell 写 OK，标签 media_rw_data_file）。
+    // 所以信号文件固定放这里；DSH 侧默认路径与之一致（可用 DSH_BALL_GUARD_DIR 覆盖）。
+    private static final String DIR_LEGACY = "/data/local/tmp";        // 兼容老版插件/老 vd 补丁
+    private static final String F_ACT = "dsh-ball-act";
+    private static final String F_ACK = "dsh-ball-ack";
+    private static final String F_GUARD_OFF = "dsh-ball-guard-off";
+    // 让路窗口长度：从**球自己看到新 nonce 的那一刻**起算（不是文件 mtime）。
+    // 为什么不看 mtime：信号目录在 /sdcard（FUSE），mtime 对 App 有缓存延迟 ——
+    // 实测球以为 mtime 比真实写时间早 700ms，1.5s 的窗口实际只剩 ~740ms。
+    // 必须大于 DSH 侧「收到 ACK → 真正注入」的往返（~100ms），1500ms 富余很大。
+    private static final long ACT_HOLD_MS = 1500;
+    private static final long GATE_POLL_MS = 60;
+    private static final long ACK_RETRY_MS = 500;
+    private static final long STALE_MS = 8000;   // 超过这么久没动过的信号文件 = 遗留物，不当新信号
+    private static final String PROXY_TITLE = "dsh-ball-proxy";   // dumpsys 里认这个名字（验证脚本用）
+
+    private View ballTouch;                                  // 唯一接用户手势的窗口（玻璃层只画不摸）
+    private WindowManager.LayoutParams ballTouchParams;
+    private volatile boolean agentActing = false;            // agent 正在发触摸（或刚发完）
+    private volatile String lastAckNonce = "";               // 已确认「球已让路」的 nonce
+    private long gateUntilMs = 0;                            // 让路截止时刻（本地时钟，不用文件 mtime）
+    private String lastActNonce = "";                        // 上一次处理过的信号 nonce
+    private File gateDir;                                    // 信号目录（惰性解析）
+    private File gateAckFile;
+    private File lastActFile;                                // 上一次读到信号的文件（写 ACK 前回读用）
+    private long lastAckTryAt = 0;
+    private long lastStaleScanAt = 0;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
@@ -598,7 +652,10 @@ public class FloatingBallService extends Service {
                 for (int i = 0; i < q.labels.size(); i++) {
                     String label = q.labels.get(i);
                     String desc = i < q.descriptions.size() ? q.descriptions.get(i) : "";
-                    addOption(col, (multi ? "☐ " : (i + 1) + ". ") + label, desc, AP_ACCENT_ASK,
+                    // 多选 = 复选框；一批多题时单选也要能看出「已点」= 单选框；
+                    // 只有「单题单选」才保留 1./2. 的编号（点了就走，无需交卷）
+                    String prefix = multi ? "☐ " : (batchMode() ? "○ " : (i + 1) + ". ");
+                    addOption(col, prefix + label, desc, AP_ACCENT_ASK,
                             q.id + "\u0000" + label);
                 }
             }
@@ -942,6 +999,30 @@ public class FloatingBallService extends Service {
 
     // ── 点击 → 回答案 ──────────────────────────────────────────────────
 
+    /**
+     * 某个选项属于哪道题。选项的 value 形如 `"<questionId>\0<label>"`，
+     * 所以题号可以从 value 里还原 —— 一批问题混着单选/多选时，必须按选项
+     * 自己的题号判定，不能拿 `questions.get(0)` 一刀切。
+     */
+    /**
+     * 一批里超过一道题吗。多题时必须由「发送」整批交卷 —— DSH 的 answers
+     * 是数组，点一下只回一条等于把没答的题一起结掉。
+     */
+    private boolean batchMode() {
+        return approvalReq != null && approvalReq.questions.size() > 1;
+    }
+
+    private DshApprovalClient.Question questionOfOption(int idx) {
+        if (approvalReq == null || idx < 0 || idx >= approvalOptValues.size()) return null;
+        String v = approvalOptValues.get(idx);
+        int sep = v.indexOf('\u0000');
+        String qid = sep < 0 ? "" : v.substring(0, sep);
+        for (DshApprovalClient.Question q : approvalReq.questions) {
+            if (q.id.equals(qid)) return q;
+        }
+        return approvalReq.questions.isEmpty() ? null : approvalReq.questions.get(0);
+    }
+
     private void onOptionTap(View v) {
         int idx = approvalOptViews.indexOf(v);
         if (idx < 0 || approvalReq == null) return;
@@ -964,9 +1045,23 @@ public class FloatingBallService extends Service {
         }
 
         // 提问：value = "<questionId>\0<label>"
-        boolean multi = approvalReq.questions.get(0).isMultiSelect();
-        if (multi) {                                  // 多选：点亮/取消，由「发送」提交
+        DshApprovalClient.Question q = questionOfOption(idx);
+        if (q != null && q.isMultiSelect()) {          // 多选：点亮/取消，由「发送」提交
             approvalOptChecked.set(idx, !approvalOptChecked.get(idx));
+            refreshOptionStyles();
+            return;
+        }
+        if (batchMode()) {
+            // 一批多题：一道题的答案不能独自交卷，否则 DSH 会拿着半截 answers
+            // 把整道 ask_user_question 结掉。这里只在题内做单选互斥，等「发送」。
+            for (int i = 0; i < approvalOptValues.size(); i++) {
+                if (i == idx) continue;
+                DshApprovalClient.Question oq = questionOfOption(i);
+                if (oq != null && oq.id.equals(q == null ? "" : q.id)) {
+                    approvalOptChecked.set(i, Boolean.FALSE);
+                }
+            }
+            approvalOptChecked.set(idx, !Boolean.TRUE.equals(approvalOptChecked.get(idx)));
             refreshOptionStyles();
             return;
         }
@@ -978,43 +1073,88 @@ public class FloatingBallService extends Service {
         hideApprovalPanel();
     }
 
-    /** 自由输入提交：单选时清掉 selected（照抄 DSH 客户端的语义）。 */
+    /**
+     * 提交：自由输入 + 已勾选的选项。
+     *
+     * 三条语义：
+     *   · 单选 + 写了自由文本 → selected 清空，两者互斥（照抄 DSH 客户端
+     *     `dsh-client-ui-user-questions/lib/client.js` 里
+     *     `selected: custom === "" || multiSelect ? selected : []`）；
+     *   · 多选 → selected 与 custom 可以并存；
+     *   · **多选允许「只勾选、不写字」** —— 之前这里开头就 `if (text.isEmpty()) return`，
+     *     导致纯选项的多选答案根本递不出去（注释却说「由发送提交」，名不副实）。
+     */
     private void submitCustomAnswer() {
         if (approvalReq == null) return;
         String text = approvalInput == null || approvalInput.getText() == null
                 ? "" : approvalInput.getText().toString().trim();
-        if (text.isEmpty()) return;
-        String qid = approvalReq.questions.isEmpty() ? "" : approvalReq.questions.get(0).id;
-        boolean multi = !approvalReq.questions.isEmpty() && approvalReq.questions.get(0).isMultiSelect();
-        java.util.List<String> picked;
-        if (multi) {
-            picked = new java.util.ArrayList<String>();
-            for (int i = 0; i < approvalOptValues.size(); i++) {
-                if (Boolean.TRUE.equals(approvalOptChecked.get(i))) {
-                    String v = approvalOptValues.get(i);
-                    int sep = v.indexOf('\u0000');
-                    picked.add(sep < 0 ? v : v.substring(sep + 1));
-                }
+
+        // 勾选项按题号归拢：一道题一条答案，别把别题的勾选算进来
+        java.util.LinkedHashMap<String, java.util.List<String>> byQuestion =
+                new java.util.LinkedHashMap<String, java.util.List<String>>();
+        for (int i = 0; i < approvalOptValues.size(); i++) {
+            if (!Boolean.TRUE.equals(approvalOptChecked.get(i))) continue;
+            DshApprovalClient.Question q = questionOfOption(i);
+            // 单选只有在一批多题时才靠勾选提交（单题单选是点了就走）
+            if (q == null || !(q.isMultiSelect() || batchMode())) continue;
+            String v = approvalOptValues.get(i);
+            int sep = v.indexOf('\u0000');
+            java.util.List<String> bucket = byQuestion.get(q.id);
+            if (bucket == null) {
+                bucket = new java.util.ArrayList<String>();
+                byQuestion.put(q.id, bucket);
             }
-        } else {
-            picked = java.util.Collections.emptyList();
+            bucket.add(sep < 0 ? v : v.substring(sep + 1));
         }
-        Log.i("FloatingBall", "question custom answer → " + qid + " = " + text
-                + (picked.isEmpty() ? "" : " (+" + picked.size() + " 个选项)"));
-        sendAnswer(qid, picked, text);
+
+        if (text.isEmpty() && byQuestion.isEmpty()) return;   // 既没写也没勾，没什么可发
+
+        java.util.List<DshApprovalClient.Answer> batch =
+                new java.util.ArrayList<DshApprovalClient.Answer>();
+        if (byQuestion.isEmpty()) {                           // 纯自由文本（单选）
+            String qid = approvalReq.questions.isEmpty() ? "" : approvalReq.questions.get(0).id;
+            batch.add(new DshApprovalClient.Answer(qid, null, text));
+        } else {
+            java.util.List<String> qids =
+                    new java.util.ArrayList<String>(byQuestion.keySet());
+            for (int i = 0; i < qids.size(); i++) {
+                // custom 只跟最后一条走，免得同一段文字被记到每道题上
+                String custom = i == qids.size() - 1 ? text : "";
+                batch.add(new DshApprovalClient.Answer(qids.get(i), byQuestion.get(qids.get(i)), custom));
+            }
+        }
+        for (DshApprovalClient.Answer a : batch) {
+            Log.i("FloatingBall", "question answer → " + a.questionId
+                    + " selected=" + a.selected + " custom=" + a.custom);
+        }
+        sendAnswers(batch);
         hideApprovalPanel();
     }
 
-    /** 把答案交给 DSH：审批是字符串，提问是 {answers:[…]} 对象。 */
-    private void sendAnswer(String questionId, java.util.List<String> selected, String custom) {
+    /** 把答案交给 DSH：审批是字符串，提问是 {answers:[…]} 对象（整批一次回）。 */
+    private void sendAnswers(java.util.List<DshApprovalClient.Answer> batch) {
         DshApprovalClient c = approvals();
-        if (c == null) return;
+        if (c == null || batch == null || batch.isEmpty()) return;
         if (c.debugMode()) {
-            c.writeDebugAnswer(custom != null && !custom.isEmpty()
-                    ? custom : String.valueOf(selected));
+            // 调试回路只看「点了什么」，把整批摊平打印，方便探针核对多选
+            StringBuilder sb = new StringBuilder();
+            for (DshApprovalClient.Answer a : batch) {
+                if (sb.length() > 0) sb.append(" | ");
+                sb.append(a.questionId).append('=').append(a.selected);
+                if (!a.custom.isEmpty()) sb.append(" custom:").append(a.custom);
+            }
+            c.writeDebugAnswer(sb.toString());
             return;
         }
-        c.answerQuestion(questionId, selected, custom);
+        c.answerQuestions(batch);
+    }
+
+    /** 单条答案的便捷包装（单选点一下就走的路径）。 */
+    private void sendAnswer(String questionId, java.util.List<String> selected, String custom) {
+        java.util.List<DshApprovalClient.Answer> batch =
+                new java.util.ArrayList<DshApprovalClient.Answer>();
+        batch.add(new DshApprovalClient.Answer(questionId, selected, custom));
+        sendAnswers(batch);
     }
 
     private DshApprovalClient approvals() {
@@ -1028,9 +1168,15 @@ public class FloatingBallService extends Service {
             int accent = approvalOptAccents.get(i);
             approvalOptViews.get(i).setBackground(optionBackground(
                     on ? withAlpha(accent, 0xF0) : accent));
-            String raw = approvalOptLabels.get(i).getText().toString();
-            if (raw.startsWith("☐ ") || raw.startsWith("☑ ")) {
-                approvalOptLabels.get(i).setText((on ? "☑ " : "☐ ") + raw.substring(2));
+            DshApprovalClient.Question q = questionOfOption(i);
+            boolean multi = q != null && q.isMultiSelect();
+            android.widget.TextView lab = approvalOptLabels.get(i);
+            String raw = lab.getText().toString();
+            // 前缀固定两字符：☐/☑（多选）、○/●（一批多题里的单选）
+            if (raw.length() >= 2 && (raw.startsWith("☐ ") || raw.startsWith("☑ ")
+                    || raw.startsWith("○ ") || raw.startsWith("● "))) {
+                String mark = multi ? (on ? "☑ " : "☐ ") : (on ? "● " : "○ ");
+                lab.setText(mark + raw.substring(2));
             }
         }
     }
@@ -1733,6 +1879,312 @@ public class FloatingBallService extends Service {
         }
     }
 
+    // ═══════════════════ agent 触摸门控 ═══════════════════
+    //
+    // 每 60ms 看一次信号文件：agent 要发 click/swipe/key 时会先把 nonce 写进 ACT 文件。
+    // 信号新鲜（mtime 在 ACT_HOLD_MS 内）→ 代理窗口失去触摸能力（纯显示）+ 回 ACK；
+    // 信号过期 → 恢复可触摸（用户照常能点球/拖球）。文件不存在 = 无人用这个协议，行为不变。
+    private final Runnable agentGateTick = new Runnable() {
+        @Override public void run() {
+            pumpAgentGate();
+            main.removeCallbacks(this);
+            main.postDelayed(this, GATE_POLL_MS);
+        }
+    };
+
+    private void pumpAgentGate() {
+        if (wm == null || ballTouch == null) return;
+        File dir = gateDir();
+        // 开关：dsh-ball-guard-off 放在信号目录或旧路径都认
+        boolean off = new File(dir, F_GUARD_OFF).exists()
+                || new File(DIR_LEGACY, F_GUARD_OFF).exists();
+        long now = System.currentTimeMillis();
+        String nonce = null;
+        File src = null;
+        if (!off) {
+            File[] candidates = {
+                    new File(dir, F_ACT),
+                    new File(DIR_LEGACY, F_ACT),      // 兼容老插件/老 vd 补丁
+            };
+            for (File c : candidates) {
+                if (c.lastModified() > 0) { src = c; break; }   // 只看"在不在"，不看 mtime
+            }
+            if (src != null) nonce = readSmallString(src, 64);
+        }
+        // 看到**新的** nonce = 有新的一次 agent 触摸 → 从这一刻起让路 ACT_HOLD_MS。
+        // 内容比对而不是 mtime 比对：FUSE 上同一秒内的连续写 mtime 可能不变。
+        // 陈旧信号豁免：**只在信号文件本身很旧、且这次启动还没见过任何信号时**才忽略它。
+        // 为什么不能"启动后首读一律忽略"：实测翻过车 —— 球重启后首读把遗留 nonce 记成"已见"，
+        // 而插件下一次点击生成的 nonce 恰好就是同一个序列（同一毫秒+同一 pid+同一 action），
+        // 于是真信号被当成旧信号忽略，球不让路、不回 ACK，那一次点击就被球吃掉了。
+        long ageMs = (src != null) ? (now - src.lastModified()) : -1;
+        if (nonce != null && !nonce.isEmpty() && lastActNonce.isEmpty() && ageMs > STALE_MS) {
+            lastActNonce = nonce;
+            Log.i("FloatingBall", "agent act signal (陈旧 " + ageMs + "ms，仅登记): " + nonce);
+            return;
+        }
+        if (nonce != null && !nonce.isEmpty() && !nonce.equals(lastActNonce)) {
+            lastActNonce = nonce;
+            gateUntilMs = now + ACT_HOLD_MS;
+            Log.i("FloatingBall", "agent act signal: " + nonce
+                    + " @" + (src != null ? src.getPath() : "?") + " → 让路 " + ACT_HOLD_MS + "ms");
+        }
+        boolean acting = now < gateUntilMs;
+        if (acting != agentActing) {
+            agentActing = acting;
+            applyBallTouchability();
+            Log.i("FloatingBall", "agent gate -> " + (acting ? "DISARM (球只显示)" : "ARM (球可触摸)"));
+        }
+        if (acting && nonce != null && !nonce.isEmpty() && !nonce.equals(lastAckNonce)) {
+            // 写 ACK 前先回读一次：万一这一瞬间插件又写了新 nonce，就别回旧的那个
+            if (src != null) {
+                String cur = readSmallString(src, 64);
+                if (!cur.isEmpty() && !cur.equals(nonce)) {
+                    nonce = cur;
+                    lastActNonce = cur;
+                    gateUntilMs = now + ACT_HOLD_MS;
+                }
+            }
+            if (now - lastAckTryAt >= ACK_RETRY_MS) {   // 失败时退避，别每 60ms 刷一条错误日志
+                lastAckTryAt = now;
+                try {
+                    writeAtomic(gateAckFile(), nonce + "\n");
+                    lastAckNonce = nonce;
+                    Log.i("FloatingBall", "agent gate ack: " + nonce + " -> " + gateAckFile().getPath());
+                } catch (Throwable e) {
+                    Log.w("FloatingBall", "ack write failed: " + e + " (dir=" + gateAckFile().getPath() + ")");
+                }
+            }
+        }
+        // 顺手清掉插件留下的 .tmp-* 残渣（原子写用；插件 rename 成功时本来就没有）
+        if (now - lastStaleScanAt > 10000) {
+            lastStaleScanAt = now;
+            try {
+                File[] stale = dir.listFiles();
+                if (stale != null) {
+                    for (File f : stale) {
+                        String n = f.getName();
+                        if (n.startsWith(F_ACT + ".tmp-") && now - f.lastModified() > 60000) f.delete();
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 代理窗口（唯一接用户手势的窗口）：agent 注入触摸期间必须从命中测试里消失。 */
+    private void applyBallTouchability() {
+        if (ballTouchParams == null || wm == null || ballTouch == null) return;
+        int want = agentActing ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
+        int now = ballTouchParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        if (want == now) return;
+        ballTouchParams.flags = agentActing
+                ? (ballTouchParams.flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+                : (ballTouchParams.flags & ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+        updateProxyWindow();
+    }
+
+    /** 统一的代理窗口更新口：updateViewLayout 之后补一次 setTitle（系统可能把 title 丢了）。 */
+    private void updateProxyWindow() {
+        try {
+            ballTouchParams.setTitle(PROXY_TITLE);
+            wm.updateViewLayout(ballTouch, ballTouchParams);
+        } catch (Throwable ignored) { }
+    }
+
+    private static String readSmallString(File f, int max) {
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            byte[] buf = new byte[Math.max(8, max)];
+            int n = in.read(buf);
+            if (n <= 0) return "";
+            int end = Math.min(n, max);
+            return new String(buf, 0, end, StandardCharsets.UTF_8).trim();
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    /** 原子写：先写临时文件再 rename（插件可能正好在这一刻读走）。 */
+    private static void writeAtomic(File dst, String body) throws Exception {
+        File tmp = new File(dst.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            try { out.getFD().sync(); } catch (Throwable ignored) { }
+        }
+        File parent = dst.getParentFile();
+        if (parent != null) {
+            try { parent.setExecutable(true, false); parent.setReadable(true, false); } catch (Throwable ignored) { }
+        }
+        try {
+            Files.move(tmp.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable e) {
+            if (!tmp.renameTo(dst)) throw e;
+        }
+        try {
+            dst.setReadable(true, false);
+            dst.setWritable(true, false);
+        } catch (Throwable ignored) { }
+    }
+
+    /** 代理窗口的屏幕矩形：**贴合玻璃层的当前矩形** + 少量外扩（数值没变就不动窗口）。
+     *
+     * 为什么不能只按"球的最小/最大形态"固定一个尺寸：Siri 球宽在 ~700↔~1040 之间动画，
+     * 代理窗口若只按最小形态固定，玻璃层变大时球两侧就出现**死区** —— 触摸确实落在球上，
+     * 但代理窗口没盖住那块，事件要么被丢弃要么跑去窗口外（实测：画布上那一笔凭空消失）。
+     * 所以直接跟玻璃层同尺寸 + 外扩，窗口只在尺寸真的变了才更新。
+     * 注意：球在动画期间这个窗口会跟着改几次尺寸，这是有意的（数值不同的才动）。
+     */
+    private void syncBallTouchWindow() {
+        if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        int pad = Math.round(dp(10));
+        int w = Math.max(2, Math.min(screenW, winW + 2 * pad));
+        int h = Math.max(2, Math.min(screenH, winH + 2 * pad));
+        int x = Math.round(loc[0] + winW * 0.5f - w * 0.5f);
+        int y = Math.round(loc[1] + winH * 0.5f - h * 0.5f);
+        if (ballTouchParams.x == x && ballTouchParams.y == y
+                && ballTouchParams.width == w && ballTouchParams.height == h) return;
+        ballTouchParams.x = x;
+        ballTouchParams.y = y;
+        ballTouchParams.width = w;
+        ballTouchParams.height = h;
+        updateProxyWindow();
+    }
+
+    /** 代理窗口里的触摸是否落在球上：换算到玻璃窗口本地坐标后用同一套 SDF。 */
+    private boolean inBallAtRaw(float rawX, float rawY) {
+        if (!siriEnabled) return true;                 // 普通模式：整颗球都认
+        if (glView == null) return true;
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        return inSiriBall(rawX - loc[0], rawY - loc[1]);
+    }
+
+    // ── 代理窗口：球上的一切用户手势都在这里（单击/双击/长按取消/拖动）──
+    private void setupBallTouchLayer() {
+        if (ballTouch != null || wm == null) return;
+        View v = new View(this);
+        v.setBackgroundColor(0x00000000);   // 透明但可触摸
+        v.setClickable(true);
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+        ballTouchParams = new WindowManager.LayoutParams(
+                2, 2, type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        ballTouchParams.gravity = Gravity.TOP | Gravity.START;
+        // 起个名字：dumpsys 里就能按 Window{... u0 dsh-ball-proxy} 直接认出代理层，
+        // 不用靠"猜哪个窗口是它"（验证脚本 ball-proxy-state.py 就靠这个名字）。
+
+
+        v.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY;
+            int startX, startY;
+            long lastTapAt;
+            boolean dragging, longFired;
+            /** 按住不动 480ms = 长按取消（录音中或正在问答时）。 */
+            final Runnable longPress = new Runnable() {
+                @Override public void run() {
+                    if (dragging || longFired) return;
+                    longFired = true;
+                    SiriAssistant a = SiriAssistant.peek();
+                    if (a != null && a.enabled()) {
+                        a.cancelByGesture();
+                        try {
+                            android.os.Vibrator vb = (android.os.Vibrator)
+                                    getSystemService(android.content.Context.VIBRATOR_SERVICE);
+                            if (vb != null) vb.vibrate(35);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            };
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        // 审批球挂着时不抢手势：屏幕这时候归审批球用
+                        if (approvalShown) return false;
+                        // 球上才算（代理窗口比球略大，多出来的边不响应）
+                        if (!inBallAtRaw(e.getRawX(), e.getRawY())) return false;
+                        downX = e.getRawX(); downY = e.getRawY();
+                        startX = params.x; startY = params.y;
+                        dragging = false;
+                        longFired = false;
+                        main.removeCallbacks(longPress);
+                        main.postDelayed(longPress, 480);
+                        return true;
+                    case MotionEvent.ACTION_MOVE: {
+                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
+                        if (!dragging) {
+                            if (moved <= dp(10)) return true;        // 还没算拖动
+                            dragging = true;
+                            main.removeCallbacks(longPress);         // 一旦拖动就不再触发长按
+                        }
+                        moveBallDrag(startX + (e.getRawX() - downX), startY + (e.getRawY() - downY));
+                        return true;
+                    }
+                    case MotionEvent.ACTION_UP: {
+                        main.removeCallbacks(longPress);
+                        if (longFired) return true;
+                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
+                        if (dragging || moved >= dp(10)) return true;    // 拖动过就只是拖动
+                        long now = System.currentTimeMillis();
+                        if (now - lastTapAt < 340) {                     // 双击：开始聆听 / 结束并发送
+                            lastTapAt = 0;
+                            SiriAssistant a = SiriAssistant.peek();
+                            if (a != null && a.enabled()) {
+                                ensureSiriForAssistant();
+                                a.toggle();
+                            }
+                        } else {
+                            lastTapAt = now;                             // 单击：什么都不做
+                        }
+                        return true;
+                    }
+                    case MotionEvent.ACTION_CANCEL:
+                        main.removeCallbacks(longPress);
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+        try {
+            // 加在玻璃层刚出现之后 → z 最低的触摸层：审批面板 / 文字层 / 输入行都压在它上面
+            wm.addView(v, ballTouchParams);
+            ballTouch = v;
+            Log.i("FloatingBall", "ball touch proxy added");
+        } catch (Throwable e) {
+            Log.w("FloatingBall", "add ball touch proxy failed: " + e);
+        }
+    }
+
+    /**
+     * 信号目录（App 可写）：App 外部私有目录 /sdcard/Android/data/&lt;pkg&gt;/files，
+     * 拿不到外部存储时退回内部私有目录。两条路 DSH 侧都能读（root 读内部目录也在 SELinux 允许内）。
+     */
+    private File gateDir() {
+        File d = gateDir;
+        if (d != null) return d;
+        File ext = getExternalFilesDir(null);
+        d = (ext != null) ? ext : getFilesDir();
+        gateDir = d;
+        Log.i("FloatingBall", "gate dir = " + d.getAbsolutePath());
+        return d;
+    }
+
+    private File gateAckFile() {
+        File f = gateAckFile;
+        if (f == null) {
+            f = new File(gateDir(), F_ACK);
+            gateAckFile = f;
+        }
+        return f;
+    }
+
     /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
     private void moveBallDrag(float wantX, float wantY) {
         params.x = Math.round(wantX);
@@ -1749,8 +2201,11 @@ public class FloatingBallService extends Service {
             params.x = Math.round(bcx - winW * 0.5f);
             params.y = Math.round(bcy - winH * 0.5f);
         } else {
-            params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
-            params.y = Math.max(-winSize / 4, Math.min(screenH - winSize * 3 / 4, params.y));
+            // 普通模式窗口是整块方形，比球本身大一圈；夹取按球的直径算，
+            // 免得把球拖到只剩四分之一露在屏幕里（代理窗口也跟着贴不住）。
+            float d = winSize * 0.9f;
+            params.x = Math.max(Math.round(-d / 4), Math.min(Math.round(screenW - d * 3 / 4), params.x));
+            params.y = Math.max(Math.round(-d / 4), Math.min(Math.round(screenH - d * 3 / 4), params.y));
         }
         if (wm != null) wm.updateViewLayout(glView, params);
         glView.post(winSync);
@@ -2269,9 +2724,12 @@ public class FloatingBallService extends Service {
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
+        // 液态玻璃这一层只负责画：所有用户手势都交给 setupBallTouchLayer() 的代理窗口。
+        // 这样窗口里那圈「看不见的透明边」（FLAG_LAYOUT_NO_LIMITS 下会真的铺开）不再吞触摸。
         params = new WindowManager.LayoutParams(
                 winW, winH, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
@@ -2280,102 +2738,11 @@ public class FloatingBallService extends Service {
         renderer.winX = params.x;
         renderer.winY = params.y;
 
-        glView.setOnTouchListener(new View.OnTouchListener() {
-            float downX, downY;
-            int startX, startY;
-            long downAt;
-            long lastTapAt;
-            boolean dragging;
-            boolean longFired;
-            /** 按住不动 480ms = 长按取消（录音中或正在问答时）。 */
-            final Runnable longPress = new Runnable() {
-                @Override public void run() {
-                    if (dragging || longFired) return;
-                    longFired = true;
-                    SiriAssistant a = SiriAssistant.peek();
-                    if (a != null && a.enabled()) {
-                        a.cancelByGesture();
-                        try {
-                            android.os.Vibrator vb = (android.os.Vibrator)
-                                    getSystemService(android.content.Context.VIBRATOR_SERVICE);
-                            if (vb != null) vb.vibrate(35);
-                        } catch (Throwable ignored) {}
-                    }
-                }
-            };
-            @Override public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        // 审批球挂着时不抢手势：屏幕这时候归审批球用
-                        if (approvalShown) return false;
-                        // Siri 模式：只有按在水晶球上才响应（不再是整个窗口）
-                        if (siriEnabled && !inSiriBall(e.getX(), e.getY())) return false;
-                        downX = e.getRawX(); downY = e.getRawY();
-                        startX = params.x; startY = params.y;
-                        downAt = System.currentTimeMillis();
-                        dragging = false;
-                        longFired = false;
-                        main.removeCallbacks(longPress);
-                        main.postDelayed(longPress, 480);
-                        return true;
-                    case MotionEvent.ACTION_UP: {
-                        main.removeCallbacks(longPress);
-                        if (longFired) return true;
-                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
-                        // 拖动过就只是拖动，不做任何操作
-                        if (dragging || moved >= dp(10)) return true;
-                        long now = System.currentTimeMillis();
-                        if (now - lastTapAt < 340) {                 // 双击：开始聆听 / 结束并发送
-                            lastTapAt = 0;
-                            SiriAssistant a = SiriAssistant.peek();
-                            if (a != null && a.enabled()) {
-                                ensureSiriForAssistant();
-                                a.toggle();
-                            }
-                        } else {
-                            lastTapAt = now;                          // 单击：什么都不做
-                        }
-                        return true;
-                    }
-                    case MotionEvent.ACTION_CANCEL:
-                        main.removeCallbacks(longPress);
-                        return true;
-                    case MotionEvent.ACTION_MOVE: {
-                        float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
-                        if (!dragging) {
-                            if (moved <= dp(10)) return true;             // 还没算拖动
-                            dragging = true;
-                            main.removeCallbacks(longPress);             // 一旦拖动就不再触发长按
-                        }
-                        params.x = (int) (startX + (e.getRawX() - downX));
-                        params.y = (int) (startY + (e.getRawY() - downY));
-                        if (siriEnabled) {
-                            // 以球为准夹取：整颗球保持可见，可拖到屏幕最顶（球顶贴屏幕顶）
-                            float base = winSize * 0.9f;
-                            float m = Math.max(0.01f, renderer.svMaster);
-                            float hx = base * renderer.svHalfX * m;
-                            float hy = base * renderer.svHalfY * m;
-                            float bcx = params.x + winW * 0.5f;
-                            float bcy = params.y + winH * 0.5f;
-                            bcx = Math.max(hx, Math.min(screenW - hx, bcx));
-                            bcy = Math.max(hy, Math.min(screenH - hy, bcy));
-                            params.x = Math.round(bcx - winW * 0.5f);
-                            params.y = Math.round(bcy - winH * 0.5f);
-                        } else {
-                            params.x = Math.max(-winSize / 4, Math.min(screenW - winSize * 3 / 4, params.x));
-                            params.y = Math.max(-winSize / 4, Math.min(screenH - winSize * 3 / 4, params.y));
-                        }
-                        if (wm != null) wm.updateViewLayout(glView, params);
-                        glView.post(winSync);
-                        return true;
-                    }
-                    default:
-                        return false;
-                }
-            }
-        });
-
-        wm.addView(glView, params);
+        if (wm != null) {
+            wm.addView(glView, params);
+            setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
+            main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
+        }
         glView.onResume();
         glView.addOnLayoutChangeListener(
                 (v, l, t, r, b, ol, ot, or, ob) -> syncWinPos());
@@ -2399,6 +2766,7 @@ public class FloatingBallService extends Service {
         glView.getLocationOnScreen(loc);
         renderer.winX = loc[0];
         renderer.winY = loc[1];
+        syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
         if (!renderer.selfExcluded && applySkipScreenshot()) {
             renderer.selfExcluded = true;
