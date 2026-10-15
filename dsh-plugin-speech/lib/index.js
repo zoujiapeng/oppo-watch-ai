@@ -24,7 +24,7 @@ const NO_REASONING = ReasoningEffortId("off");
 const OUT = process.env.DSH_SPEECH_OUT
   || "/sdcard/Android/data/com.glslplayground.app/files/spoken.txt";
 const MAX_INPUT = 1200;
-const TIMEOUT_MS = 8000;
+const TIMEOUT_MS = 5000;
 
 const SYSTEM =
   "把下面的助手回复改写成一句到三句的中文口播稿，供语音朗读。"
@@ -93,6 +93,19 @@ function probe(event) {
   } catch (_) {}
 }
 
+/**
+ * 一回合最多改写一次。
+ *
+ * 为什么需要：一个回合里 `assistant/message` 会来多条（每一步一条），
+ * 而它们的正文是**累积**的 —— 不去重的话，一条 3 步的回复会改写 3 次
+ *（400 / 800 / 1200 字各一次），纯属浪费 DSH 的额度。
+ * 这里用「会话 + 该条正文长度」判重：同一回合里更长的正文才改写，
+ * 且一次回复最多改写 MAX_CALLS_PER_TURN 次。
+ */
+const turnCalls = new Map();     // sessionId -> { lastLen, calls }
+const MAX_CALLS_PER_TURN = 1;
+const MIN_TEXT = 50;             // 太短的回复（"好的""已完成"）直接用规则清洗，不值得调模型
+
 export function apply(ctx) {
   ctx.logger?.info?.("speech 插件已加载（诊断探针开启）");
   if (DEBUG) {
@@ -113,7 +126,15 @@ export function apply(ctx) {
       note(`没有 provider/model（source=${JSON.stringify(source)}），跳过`);
       return;
     }
-    note(`收到 assistant/message：正文 ${text.length} 字，${provider}/${model}`);
+    // 短文本 / 一回合超次数 → 直接跳过（球会用规则清洗，零成本）
+    if (text.length < MIN_TEXT) return;
+    const sid = session?.id ?? session?.header?.id ?? "?";
+    const rec = turnCalls.get(sid) ?? { lastLen: 0, calls: 0 };
+    if (rec.calls >= MAX_CALLS_PER_TURN) return;
+    if (text.length <= rec.lastLen) return;
+    turnCalls.set(sid, { lastLen: text.length, calls: rec.calls + 1 });
+    if (turnCalls.size > 50) turnCalls.clear();          // 简单防泄漏
+    note(`收到 assistant/message：正文 ${text.length} 字，${provider}/${model}（本回合第 ${rec.calls + 1} 次改写）`);
 
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
@@ -131,7 +152,8 @@ export function apply(ctx) {
             source: { kind: "dsh-plugin-speech" },
           })],
           reasoningEffort: NO_REASONING,
-          maxTokens: 400,
+          // 额度按正文长度给：100 字口播稿约 200 token，短正文没必要给 400
+          maxTokens: text.length > 300 ? 400 : 250,
           sessionId: session?.id ?? session?.header?.id,
           purpose: "speech-rewrite",
           signal: ac.signal,
@@ -151,7 +173,7 @@ export function apply(ctx) {
               content: [{ type: "text", text: text.slice(0, MAX_INPUT) }],
               source: { kind: "dsh-plugin-speech" },
             })],
-            reasoningEffort: NO_REASONING, maxTokens: 1200,
+            reasoningEffort: NO_REASONING, maxTokens: 800,
             sessionId: session?.id ?? session?.header?.id,
             purpose: "speech-rewrite", signal: ac.signal,
           })) asm2.push(c);
