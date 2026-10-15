@@ -71,8 +71,6 @@ public final class SiriAssistant {
     private TextToSpeech tts;
     private boolean ttsReady;
     private boolean speakReplies = true;
-    private boolean speakUseModel = false;      // 朗读稿是否交给大模型改写（默认关，避免"悄悄花钱"）
-    private String speechApiKey = "";           // 只在开启该功能时才会用到
     private boolean enabled = true;
 
     private State state = State.IDLE;
@@ -90,8 +88,12 @@ public final class SiriAssistant {
                 app.getSharedPreferences("siri_assistant", Context.MODE_PRIVATE);
         enabled = sp.getBoolean("enabled", true);
         speakReplies = sp.getBoolean("speak", true);
-        speakUseModel = sp.getBoolean("speak_model", false);
-        speechApiKey = sp.getString("speak_key", "");
+        // 一次性清理：早期版本把 DeepSeek key 存在这里过，现在改用 DSH 插件（不需要 key），
+        // 留着只是多一份无用的敏感数据。
+        if (sp.contains("speak_key") || sp.contains("speak_model")) {
+            sp.edit().remove("speak_key").remove("speak_model").apply();
+            Log.i(TAG, "已清理历史遗留的 speak_key / speak_model");
+        }
         try {
             tts = new TextToSpeech(app, new TextToSpeech.OnInitListener() {
                 @Override public void onInit(int status) {
@@ -710,15 +712,8 @@ public final class SiriAssistant {
             return;
         }
         Log.i(TAG, "speak 请求: 原文 " + (text == null ? 0 : text.length()) + " 字");
-        if (speakUseModel) {
-            // 交给大模型改写朗读稿（只在开启朗读时走；失败/超时自动回落规则清洗）
-            SpeechRewriter.rewrite(text, speechApiKey, new SpeechRewriter.Cb() {
-                @Override public void onReady(String spoken, boolean byModel) {
-                    speakNow(spoken, byModel);
-                }
-            });
-            return;
-        }
+        // 朗读稿只有两个来源：DSH 插件写的口播稿（上文 speakOnce 已等到），
+        // 或本地规则清洗。App 侧不再自己调模型（用的是 DSH 的模型通道，不需要第二份 key）。
         speakNow(toSpeechText(text), false);
     }
 
@@ -815,21 +810,6 @@ public final class SiriAssistant {
         } catch (Throwable ignored) {}
     }
 
-    /** 朗读稿是否交给大模型改写（设置页开关）。 */
-    public void setSpeakUseModel(boolean v) {
-        speakUseModel = v;
-        prefs().edit().putBoolean("speak_model", v).apply();
-    }
-
-    public boolean speakUseModel() { return speakUseModel; }
-
-    /** DeepSeek API key（设置页填；只存在本 App 的首选项里，不碰 DSH 的凭据）。 */
-    public void setSpeechApiKey(String key) {
-        speechApiKey = key == null ? "" : key.trim();
-        prefs().edit().putString("speak_key", speechApiKey).apply();
-    }
-
-    public boolean hasSpeechApiKey() { return speechApiKey != null && !speechApiKey.isEmpty(); }
 
     /**
      * 把「给眼睛看的 markdown」转成「给耳朵听的稿子」。

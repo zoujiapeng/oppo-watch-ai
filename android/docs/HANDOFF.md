@@ -749,3 +749,26 @@ App 侧会自动回落本地规则清洗（不需要改 App）。
 
 **经验**：这类"跨进程 + 时序"的问题，别靠听感和 logcat，
 直接让两边各自把判断过程写文件，对照时间戳，一次就能定位。
+
+## 删掉 App 侧的 key 路径（2026-10-15，改用插件后就不需要了）
+
+插件方案跑通后，App 自己调 DeepSeek 那条路（设置页的「DeepSeek API Key」输入框 +
+`SpeechRewriter` 类 + `speak_model` 开关）就是**多余的第二条路**，全部删除：
+
+- 删 `SpeechRewriter.java`（App 不再自己调模型）
+- 删 `speakUseModel()` / `setSpeakUseModel()` / `setSpeechApiKey()` / `hasSpeechApiKey()`
+  及 `WatchBridge` 里对应的 4 个 `@JavascriptInterface`
+- 删 `settings.html` 里的「朗读稿交给模型改写」开关与 key 输入框
+- 启动时**一次性清理**历史遗留的 `speak_key` / `speak_model`（避免留一份无用的敏感数据）
+
+**现在的朗读稿只有两个来源**：
+
+1. **DSH 插件**写的 `spoken.txt`（首选，球最多等 15 秒）
+2. **本地规则清洗**（兜底：插件没装/失败/超时）
+
+实测（`speak-trace.log` + `speech-plugin.log` 对照）：
+
+```
+插件: 本回合正文 810 字 → 口播稿 68 字已写入（约 1 秒）
+球  : 开始等插件口播稿(15000ms) → 等到 68 字（等了 1414ms）→ 交给 TTS 68 字（插件口播稿）
+```

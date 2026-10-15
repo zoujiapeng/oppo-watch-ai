@@ -366,31 +366,6 @@ public class WatchBridge {
         });
     }
 
-    /** 朗读稿是否交给大模型改写（只在开启朗读后才有意义）。 */
-    @JavascriptInterface
-    public boolean getAssistantSpeakModel() {
-        return SiriAssistant.get(act).speakUseModel();
-    }
-
-    @JavascriptInterface
-    public void setAssistantSpeakModel(final boolean v) {
-        ui(new Runnable() {
-            public void run() { SiriAssistant.get(act).setSpeakUseModel(v); }
-        });
-    }
-
-    /** 是否已填 DeepSeek key（只回布尔，不回显 key 本身）。 */
-    @JavascriptInterface
-    public boolean hasAssistantSpeechKey() {
-        return SiriAssistant.get(act).hasSpeechApiKey();
-    }
-
-    @JavascriptInterface
-    public void setAssistantSpeechKey(final String key) {
-        ui(new Runnable() {
-            public void run() { SiriAssistant.get(act).setSpeechApiKey(key); }
-        });
-    }
 
     @JavascriptInterface
     public String getAssistantEndpoint() {
