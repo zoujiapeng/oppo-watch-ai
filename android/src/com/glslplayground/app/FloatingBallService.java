@@ -128,6 +128,49 @@ public class FloatingBallService extends Service {
     private Surface captureSurface;
     private SurfaceTexture captureTexture;
     private RootCapture rootCapture;
+
+    // ── 抓帧看门狗 ──
+    // 抓帧是"按需启动一次"的子进程（su screencap 或被包成常驻采集器的 app_process）。
+    // 它可能因为重装 APK / 系统回收 / su 授权被拒而死掉，而那时 **没有任何人重启它** ——
+    // 结果 GL 一直用最后一帧当折射源：球里显示的永远是启动那一刻的画面（上半截恒黑、
+    // 下半截恒亮，且对背景变化毫无反应）。用户报的"只有下半部分有折射"就是这个。
+    // 这里每 2 秒检查一次，帧停了就重启采集。
+    private static final long CAP_WATCHDOG_MS = 2000;
+    private static final long CAP_STALE_MS = 2500;
+    private final Runnable capWatchdog = new Runnable() {
+        @Override public void run() {
+            boolean alive = rootCapture != null && rootCapture.isRunning()
+                    && renderer != null && renderer.captureSource == 1;
+            if (alive) {
+                long age = System.currentTimeMillis() - renderer.lastFrameAtMs;
+                if (renderer.lastFrameAtMs > 0 && age > CAP_STALE_MS) {
+                    Log.w("FloatingBall", "抓帧已停 " + age + "ms → 重启采集");
+                    try { rootCapture.stop(); } catch (Throwable ignored) { }
+                    startRootCapture();
+                }
+            }
+            main.postDelayed(this, CAP_WATCHDOG_MS);
+        }
+    };
+
+    /** 启动 root 直采（幂等；低延迟偏好时用常驻采集器）。 */
+    private void startRootCapture() {
+        if (rootCapture == null) rootCapture = new RootCapture();
+        rootCapture.setTargetFps(targetFps);
+        int cw = screenW, ch = screenH;
+        if (prefs().getBoolean("float_lowlat", false)) {
+            int scale = Math.max(1, prefs().getInt("float_cap_scale", 2));
+            int tw = Math.max(2, screenW / scale), th = Math.max(2, screenH / scale);
+            String jar = ensureCapJar();
+            if (jar != null) {
+                rootCapture.useAppProcess(jar, tw, th);
+                cw = tw; ch = th;
+            }
+        }
+        renderer.capW = cw;
+        renderer.capH = ch;
+        rootCapture.start(renderer);
+    }
     private String rootError;
 
     private int screenW, screenH, winSize, winW, winH;
@@ -1814,6 +1857,14 @@ public class FloatingBallService extends Service {
     private long siriTickLast = 0;
     private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
+    /**
+     * 黑区最多盖住球高的比例（方案 B 的上限；pref `float_black_maxcover`，默认 65%）。
+     * 1.0 = 不限制（旧行为：黑区随文字无限扩张，长回答时上半玻璃全没了）。
+     */
+    private float blackMaxCover() {
+        return Math.max(0.35f, Math.min(1.0f, prefs().getInt("float_black_maxcover", 65) / 100f));
+    }
+
     private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
@@ -2739,7 +2790,16 @@ public class FloatingBallService extends Service {
         float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
         float waveGap = Math.max(0f, Math.min(0.45f, siriBlackStep / 1000f));
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
-        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - waveGap)));
+        // 方案 B：黑区**设上限**。原公式让黑区随文字行数无限扩张
+        // （实测 1 行=50%、6 行=54%、9 行=77%、12 行=99% 被黑区盖住），
+        // 于是长回答时球的上半截液态玻璃（折射/色散/赤道亮线）整个消失，
+        // 用户感受就是"不知道什么时候只剩下半部分有玻璃效果"。
+        // 上限 = black0 + (1 - BLACK_MAX_COVER) * (black1 - black0)，即黑区最多盖住 BLACK_MAX_COVER。
+        // 文字可读性继续由文字块的半透明底 + 阴影保证。
+        float blackFloor = black1Base
+                - (1f - blackMaxCover()) * (black1Base - ((renderer != null) ? renderer.black0 : -1f));
+        tBlack = Math.max(0f, Math.min(black1Base - blackFloor,
+                black1Base - (textBottomNy - waveGap)));
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
@@ -3072,7 +3132,13 @@ public class FloatingBallService extends Service {
             }
             renderer.capW = cw;
             renderer.capH = ch;
-            renderer.setOnSurfaceReady(st -> main.post(() -> rootCapture.start(renderer)));
+            renderer.setOnSurfaceReady(st -> main.post(new Runnable() {
+                @Override public void run() {
+                    startRootCapture();
+                    main.removeCallbacks(capWatchdog);
+                    main.postDelayed(capWatchdog, CAP_WATCHDOG_MS);
+                }
+            }));
         } else {
             renderer.capW = screenW;
             renderer.capH = screenH;
@@ -3166,6 +3232,8 @@ public class FloatingBallService extends Service {
                 renderer.topDarken  = f(o, "topDarken", renderer.topDarken);
                 renderer.black0     = f(o, "black0", renderer.black0);
                 renderer.black1     = f(o, "black1", renderer.black1);
+                // 默认 1.0：黑区不再透光（"太透明、能看到背后场景"的直接修法）
+                renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
                 renderer.edgeBleed  = f(o, "edgeBleed", renderer.edgeBleed);
                 renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
                 renderer.waveScale  = f(o, "waveScale", renderer.waveScale);

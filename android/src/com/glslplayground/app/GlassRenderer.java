@@ -44,6 +44,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
     public float blur = 0.3f;
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
+    /** 黑区不透明度：1=完全不透光。用户反馈"太透明、能看到背后场景"就是它偏小。 */
+    public float blackOpacity = 1.0f;
+    /** 球内最小不透明度：太小就会直接看到未经折射的清晰背景（用户报的现象）。 */
+    public float glassFloor = 0.82f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -109,8 +113,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     public void recycleFrameBuffer(byte[] b) { if (b != null) framePool.offer(b); }
 
+    /** 最后一帧到达时间：抓帧进程死了会停更，服务端据此重启采集（背景冻结的根因）。 */
+    public volatile long lastFrameAtMs = 0L;
+
     /** root 采集线程投递一帧（已转成 RGBA、行序翻转好）。 */
     public void submitFrame(byte[] b, int w, int h) {
+        lastFrameAtMs = System.currentTimeMillis();
         byte[] old = readyFrame.getAndSet(b);
         if (old != null) framePool.offer(old);
     }
@@ -180,6 +188,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
+        "uniform float uBlackOpacity;   // 黑区不透明度（1=完全不透光，能看到背后就说明它太小）\n" +
+        "uniform float uGlassFloor;     // 球内最小不透明度（防止透出未折射的真实背景）\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
@@ -344,7 +354,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 后半段掉得很快（不是平缓线性），到底只剩 0.12 —— 底下几乎是玻璃本身。
         "    tBlackK = mix(1.0, 0.12, pow(rise, 2.6));\n" +
         "  }\n" +
-        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
+        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         "  if(uWaveAmp > 0.001){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
@@ -377,7 +387,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
         "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
         "  float aa = smoothstep(1.5, -1.5, sd);\n" +
-        "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
+        "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +   // 面板底半透明，玻璃照旧
+        // ★ 球内 alpha 下限：黑区强度 0.93 会让 aa 掉到 0.07，那 93% 的"透明"透出来的是
+        // 背景缓冲里**未经折射**的清晰桌面（抠图路径故意把球体范围内的实时帧填成干净背景），
+        // 于是用户看到"能直接看到不变形的背景"。球体范围内永远保留一层玻璃，就不再透出原图。
+        // 只在球内（sd<0）生效，窗口四角的透明区不受影响，圆角依旧干净。
+        "  float inside = 1.0 - smoothstep(-1.5, 0.0, sd);\n" +
+        "  aa = mix(aa, max(aa, uGlassFloor), inside);\n" +
         "  gl_FragColor = vec4(col * aa, aa);\n" +   // 预乘 alpha，窗外透明
         "}\n";
 
@@ -581,6 +597,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"), black0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), black1);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOpacity"), blackOpacity);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uGlassFloor"), glassFloor);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),
