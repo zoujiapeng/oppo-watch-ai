@@ -41,19 +41,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
     public float master = 1.0f, posX = 0.5f, posY = 0.5f;   // 球体整体尺寸（设置页「球体大小」滑块，1.0 = 原始大小）
     public float halfX = 0.37f, halfY = 0.25f, corner = 1.0f;
-    // 折射/色散的默认值按"真实玻璃球"观感调过（用户对照物理世界提的）：
-    //   refraction 620：径向位移足够大，背景被明显放大+拉弯（原来 200 几乎看不出变形）
-    //   zoom 1.1：只做轻微收窄 —— 放大主要来自折射位移，zoom 太大会把 Siri 波坐标一起拉细
-    //   aberration 26：边缘色散更强，像真玻璃的彩虹边
-    //   edgeBleed 0.24：边缘亮环（全内反射的观感）
-    //   blur 1.9：玻璃体内的柔和失焦
-    public float refraction = 620f, band = 210f, zoom = 1.1f, dome = 0.35f, aberration = 26f;
-    public float blur = 1.9f;
-    public float topDarken = 0.40f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.24f;
-    /** 黑区不透明度：1=完全不透光。用户反馈"太透明、能看到背后场景"就是它偏小。 */
-    public float blackOpacity = 0.28f;
-    /** 球内最小不透明度：太小就会直接看到未经折射的清晰背景（用户报的现象）。 */
-    public float glassFloor = 0.82f;
+    public float refraction = 200f, band = 170f, zoom = 1.0f, dome = 0.40f, aberration = 10f;
+    public float blur = 0.3f;
+    public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -194,8 +184,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
-        "uniform float uBlackOpacity;   // 黑区不透明度（1=完全不透光，能看到背后就说明它太小）\n" +
-        "uniform float uGlassFloor;     // 球内最小不透明度（防止透出未折射的真实背景）\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
@@ -225,8 +213,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float A1=0.30+0.01*low*6.0;\n" +
         "  float A2=A1+mid*0.05+high*0.06;\n" +
         "  float AB=2.6+mid*0.8+high*0.5;\n" +
-        // 过曝修正：原来 inten 峰值把波带推到纯白（用户报"Siri 太亮"），整体 ×0.55
-        "  float th=0.03*spread, inten=0.0055*(2.0+low*1.5), soft=0.0055*max(0.0,2.5+mid*0.4)*spread;\n" +
+        "  float th=0.03*spread, inten=0.01*(2.0+low*1.5), soft=0.01*max(0.0,2.5+mid*0.4)*spread;\n" +
         "  float yMain=A1*env*sin(p.x*1.1+drift);\n" +
         "  float bandAmt=1e-4*26000.0*inten;\n" +
         "  vec3 num=vec3(0.0),den=vec3(0.0);\n" +
@@ -338,10 +325,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.r = texture2D(iBlur, suv + disp).r;\n" +
         "  col.g = texture2D(iBlur, suv).g;\n" +
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
-        // 折射采样后的调色：原来只有 0.22 的冷色偏移，采样内容几乎原样显示 →
-        // 球内看着"亮、透、虚"（用户反复反馈"太透明/能看清背景"）。
-        // 这里把折射内容压暗并略降饱和，玻璃才是"实心的深色玻璃"而不是一层薄雾。
-        "  col = mix(col, col*vec3(0.88,0.91,0.97)+vec3(0.006,0.007,0.014), 0.30);\n" +
+        "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
@@ -364,7 +348,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 后半段掉得很快（不是平缓线性），到底只剩 0.12 —— 底下几乎是玻璃本身。
         "    tBlackK = mix(1.0, 0.12, pow(rise, 2.6));\n" +
         "  }\n" +
-        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +
+        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         "  if(uWaveAmp > 0.001){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
@@ -396,25 +380,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float shell = smoothstep(3.0*uScale, 0.0, abs(sd + 2.5*uScale));\n" +
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
         "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
-        // 球内 alpha 直接置 1（完全由折射/色散提供玻璃观感，不靠透光）。
-        // 用户连续反馈"能清晰看到背景"，而折射/模糊链已确认生效 ——
-        // 说明问题只在 alpha：mix(1,panelFade,...) 在黑区不满时仍会留透光。
-        // 这里在球体内部（sd<0）强制 aa=1；球外仍按 aa 淡出，圆角保持干净。
-        // ★ 球在屏幕上的"实"取决于合成权重 aa × 颜色。此前 aa 在黑区里掉到 0.07~0.3，
-        // 于是屏幕上是"近透明的镜片"（用户："透明、能清晰看到背景"）。
-        // 预乘输出下，要让它像实心玻璃，aa 必须接近 1；球的观感（暗色/色散/波）由 col 提供。
-        "  float aa = (sd < 0.0) ? 0.96 : smoothstep(1.5, -1.5, sd);\n" +
-        // ★ 这行原本无条件把 aa 乘成 (1-blackMask*...)，普通球的黑区里会掉到 0.04 ——
-        // 屏幕上看到的就成了"近乎透明的一层贴纸"（背景文字清晰可读，用户反复反馈）。
-        // panelFade 只在审批卡片模式(uPanelMode)才 <1，所以这里**只在面板模式下**才降透明度；
-        // 普通球保持 aa=1，玻璃观感完全由 col（折射/色散/黑区）提供。
-        "  if(uPanelMode > 0.5) aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK*uBlackOpacity);\n" +
-        // ★ 球内 alpha 下限：黑区强度 0.93 会让 aa 掉到 0.07，那 93% 的"透明"透出来的是
-        // 背景缓冲里**未经折射**的清晰桌面（抠图路径故意把球体范围内的实时帧填成干净背景），
-        // 于是用户看到"能直接看到不变形的背景"。球体范围内永远保留一层玻璃，就不再透出原图。
-        // 只在球内（sd<0）生效，窗口四角的透明区不受影响，圆角依旧干净。
-        "  float inside = 1.0 - smoothstep(-1.5, 0.0, sd);\n" +
-        "  aa = mix(aa, max(aa, uGlassFloor), inside);\n" +
+        "  float aa = smoothstep(1.5, -1.5, sd);\n" +
+        "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
+
         "  gl_FragColor = vec4(col * aa, aa);\n" +   // 预乘 alpha，窗外透明
         "}\n";
 
@@ -618,8 +586,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"), black0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), black1);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOpacity"), blackOpacity);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uGlassFloor"), glassFloor);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),

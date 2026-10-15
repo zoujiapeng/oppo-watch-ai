@@ -171,6 +171,26 @@ public class FloatingBallService extends Service {
         renderer.capH = ch;
         rootCapture.start(renderer);
     }
+    private String ensureCapJar() {
+        try {
+            File f = new File(getFilesDir(), "caplive.jar");
+            if (!f.exists() || f.length() == 0) {
+                InputStream in = getAssets().open("caplive.jar");
+                FileOutputStream out = new FileOutputStream(f);
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                out.close();
+                in.close();
+                f.setReadable(true, false);
+            }
+            return f.getAbsolutePath();
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "ensureCapJar failed: " + t);
+            return null;
+        }
+    }
+
     private String rootError;
 
     private int screenW, screenH, winSize, winW, winH;
@@ -1860,14 +1880,6 @@ public class FloatingBallService extends Service {
     private long siriTickLast = 0;
     private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
-    /**
-     * 黑区最多盖住球高的比例（方案 B 的上限；pref `float_black_maxcover`，默认 65%）。
-     * 1.0 = 不限制（旧行为：黑区随文字无限扩张，长回答时上半玻璃全没了）。
-     */
-    private float blackMaxCover() {
-        return Math.max(0.35f, Math.min(1.0f, prefs().getInt("float_black_maxcover", 65) / 100f));
-    }
-
     private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
@@ -2793,16 +2805,7 @@ public class FloatingBallService extends Service {
         float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
         float waveGap = Math.max(0f, Math.min(0.45f, siriBlackStep / 1000f));
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
-        // 方案 B：黑区**设上限**。原公式让黑区随文字行数无限扩张
-        // （实测 1 行=50%、6 行=54%、9 行=77%、12 行=99% 被黑区盖住），
-        // 于是长回答时球的上半截液态玻璃（折射/色散/赤道亮线）整个消失，
-        // 用户感受就是"不知道什么时候只剩下半部分有玻璃效果"。
-        // 上限 = black0 + (1 - BLACK_MAX_COVER) * (black1 - black0)，即黑区最多盖住 BLACK_MAX_COVER。
-        // 文字可读性继续由文字块的半透明底 + 阴影保证。
-        float blackFloor = black1Base
-                - (1f - blackMaxCover()) * (black1Base - ((renderer != null) ? renderer.black0 : -1f));
-        tBlack = Math.max(0f, Math.min(black1Base - blackFloor,
-                black1Base - (textBottomNy - waveGap)));
+        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - waveGap)));
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
@@ -2841,12 +2844,6 @@ public class FloatingBallService extends Service {
             aCorner += (tCorner - aCorner) * k;
             aBlack += (tBlack - aBlack) * k;
             if (renderer != null) {
-                // 每帧从 pref 同步这几个标量：它们以前只在启动读一次，
-                // 一旦被 applyParams 的早期赋值覆盖，就会出现"启动后球又变半透"（踩过）。
-                renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
-                renderer.glassFloor  = prefs().getInt("float_glass_floor", 82) / 100f;
-                renderer.orbGain     = prefs().getInt("float_orb_gain", 110) / 100f;
-                renderer.orbRim      = prefs().getInt("float_orb_rim", 130) / 100f;
                 renderer.siriGeom = true;
                 renderer.svBlackOffset = aBlack;
                 renderer.svMaster = aMaster;
@@ -3025,6 +3022,7 @@ public class FloatingBallService extends Service {
     }
 
     /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
+    /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
     private boolean applySkipScreenshot() {
         if (Build.VERSION.SDK_INT < 29 || glView == null) return false;
         try {
@@ -3040,46 +3038,13 @@ public class FloatingBallService extends Service {
                 m.invoke(tx, true);
             }
             txClass.getMethod("apply").invoke(tx);
-            try {
-                java.io.File f = new java.io.File(getExternalFilesDir(null), "skipshot.log");
-                java.io.FileOutputStream o = new java.io.FileOutputStream(f, true);
-                o.write((System.currentTimeMillis() + " OK\n").getBytes("UTF-8"));
-                o.close();
-            } catch (Throwable ignored) { }
             return true;
         } catch (Throwable t) {
             Log.w("FloatingBall", "setSkipScreenshot failed: " + t);
-            // 直接落盘：logcat 会被其他服务刷掉，这类"静默失败"必须写文件才看得到
-            try {
-                java.io.File f = new java.io.File(getExternalFilesDir(null), "skipshot.log");
-                java.io.FileOutputStream o = new java.io.FileOutputStream(f, true);
-                o.write((System.currentTimeMillis() + " FAIL " + t + "\n").getBytes("UTF-8"));
-                o.close();
-            } catch (Throwable ignored) { }
             return false;
         }
     }
 
-    /** 把 assets/caplive.jar 释放到 filesDir，返回绝对路径（供 root app_process 以 CLASSPATH 加载）。 */
-    private String ensureCapJar() {
-        try {
-            File f = new File(getFilesDir(), "caplive.jar");
-            if (!f.exists() || f.length() == 0) {
-                InputStream in = getAssets().open("caplive.jar");
-                FileOutputStream out = new FileOutputStream(f);
-                byte[] buf = new byte[16384];
-                int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                out.close();
-                in.close();
-                f.setReadable(true, false);
-            }
-            return f.getAbsolutePath();
-        } catch (Throwable t) {
-            Log.w("FloatingBall", "ensureCapJar failed: " + t);
-            return null;
-        }
-    }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         startForegroundCompat();
@@ -3219,11 +3184,8 @@ public class FloatingBallService extends Service {
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
-        // 调试开关 float_no_skipshot=1 可临时关掉它，让球出现在系统截图里（排查"球到底有没有被画出来"）。
-        if (!prefs().getBoolean("float_no_skipshot", false)) {
-            if (!renderer.selfExcluded && applySkipScreenshot()) {
-                renderer.selfExcluded = true;
-            }
+        if (!renderer.selfExcluded && applySkipScreenshot()) {
+            renderer.selfExcluded = true;
         }
     }
 
@@ -3239,10 +3201,7 @@ public class FloatingBallService extends Service {
         String s = prefs().getString("float_params", null);
         String sig = s + "|" + prefs().getInt("float_orb_gain", 110)
                 + "|" + prefs().getInt("float_orb_rim", 130)
-                + "|" + prefs().getInt("float_orb_radius", 90)
-                + "|" + prefs().getInt("float_black_opacity", 100)
-                + "|" + prefs().getInt("float_black_maxcover", 65)
-                + "|" + prefs().getString("float_blur_override", "");
+                + "|" + prefs().getInt("float_orb_radius", 90);
         if (sig.equals(lastParamsJson)) return false;
         lastParamsJson = sig;
         if (s != null) applyParams(s);
@@ -3251,7 +3210,6 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
-            renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;
@@ -3283,11 +3241,6 @@ public class FloatingBallService extends Service {
                 renderer.topDarken  = f(o, "topDarken", renderer.topDarken);
                 renderer.black0     = f(o, "black0", renderer.black0);
                 renderer.black1     = f(o, "black1", renderer.black1);
-                // 顺便支持"模糊值"等直接热改（原先只在启动读，改一次要重启服务）
-                String b = prefs().getString("float_blur_override", null);
-                if (b != null && !b.isEmpty()) {
-                    try { renderer.blur = Float.parseFloat(b); } catch (Throwable ignored) { }
-                }
                 renderer.edgeBleed  = f(o, "edgeBleed", renderer.edgeBleed);
                 renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
                 renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
