@@ -591,6 +591,23 @@ public final class SiriAssistant {
         }
     };
 
+    /**
+     * 调试口子：把当前这轮标记成"最终回复已到"，并重排安静计时。
+     * 用它可以在**没有真实 DSH 回合**的情况下验证"1.5 秒收形状"这条链路。
+     */
+    public void debugMarkTurnSettled() {
+        main.post(new Runnable() {
+            @Override public void run() {
+                turnSettled = true;
+                shapeBackSent = false;
+                FloatingBallService.setAssistantPinned(false);
+                lastTextAt = android.os.SystemClock.uptimeMillis();
+                armQuiet();
+                Log.i(TAG, "debug: 标记为最终回复 → 1.5s 后应变回初始圆球");
+            }
+        });
+    }
+
     /** 供球侧调用（用户解除钉住后重新开始安静计时）。 */
     public void rearmQuietPublic() {
         main.post(new Runnable() {
@@ -601,7 +618,10 @@ public final class SiriAssistant {
     /** 重排安静计时（每次有字进来都调一次）。 */
     private void armQuiet() {
         main.removeCallbacks(quietTick);
-        main.postDelayed(quietTick, IDLE_CLEAR_MS + 100);
+        // ⚠️ 必须是"很快跳一次"（200ms），不能直接用 IDLE_CLEAR_MS 排：
+        // quietTick 里同时管着 ①最终回复 1.5s 收形状 ②4s 清文字 两条计时，
+        // 用 4.1s 排第一次 → 1.5s 那条永远等不到（实测用户报"1.5 秒后不恢复"就是这个）。
+        main.postDelayed(quietTick, 200);
     }
 
     // ── 球内文字：一个字一个字弹出来 ────────────────────────────────────

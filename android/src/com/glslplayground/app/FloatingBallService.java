@@ -303,7 +303,7 @@ public class FloatingBallService extends Service {
     private static final String[] STATE_EXTRA =
             {"TURNEND", "TURNSTART",
              // 离线预览：`touch files/state-PREVIEW` 灌示例并钉住；`state-PREVIEWOFF` 结束。
-             "PREVIEW", "PREVIEWOFF"};
+             "PREVIEW", "PREVIEWOFF", "SETTLED"};
 
     private void pumpStateRequest() {
         long now = android.os.SystemClock.uptimeMillis();
@@ -319,6 +319,9 @@ public class FloatingBallService extends Service {
                 previewText(smp != null ? smp : MD_PREVIEW_FALLBACK);
             } else if ("PREVIEWOFF".equals(name)) {
                 previewStop();
+            } else if ("SETTLED".equals(name)) {
+                SiriAssistant a = SiriAssistant.peek();
+                if (a != null) a.debugMarkTurnSettled();
             } else {
                 applyTurnEnded("TURNEND".equals(name));
             }
@@ -2416,7 +2419,7 @@ public class FloatingBallService extends Service {
         String src = displayTextOf(siriStr);
         int width = Math.max((int) dp(120), mdLayoutWidthPx());
         String key = src.length() + "|" + width + "|" + Math.round(siriTextPx)
-                + "|" + Math.round(mdFontRatio() * 1000) + "|" + siriTextDy;
+                + "|" + Math.round(mdFontRatio() * 1000);
         if (key.equals(mdBuiltFor)) return;
         mdBuiltFor = key;
 
@@ -2425,7 +2428,9 @@ public class FloatingBallService extends Service {
         st.headPx = st.bodyPx * 1.06f;
         st.codePx = st.bodyPx * 0.94f;
         st.padH = (int) dp(20);
-        st.padTop = Math.max(0, siriTextDy) + (int) dp(6);
+        // ⚠️ 顶部留白**不要**用 siriTextDy（那是给"文字距球顶"滑块、配合 Siri 波用的，
+        // 默认 10px 会让首行离球顶显得很空）。富文本用固定的小留白即可。
+        st.padTop = (int) dp(8);
         st.padBottom = (int) dp(10);
         st.gap = Math.round(st.bodyPx * 0.55f);
 
@@ -3029,9 +3034,19 @@ public class FloatingBallService extends Service {
 
     private void showSiriTextNow() {
         if (siriText == null) return;
-        if (!squareFormActive()) {      // 圆球态：内容一律不出现
-            hideSiriTextNow();
-            return;
+        if (!squareFormActive()) {
+            // 圆球态本该不显示内容 —— 但如果**球里确实有字**（比如刚被清空又来了新字、
+            // 或用户点了文字导致几何重置），那就把方形态撑起来，而不是把内容藏掉。
+            // 用户实测："点一下界面飞出方形之外、离开 1.5 秒后界面不显示" 就是这条路径。
+            if (siriStr != null && !siriStr.trim().isEmpty()) {
+                enterTextHold();
+                mdBuiltFor = "";
+                rebuildMarkdown();
+            }
+            if (!squareFormActive()) {
+                hideSiriTextNow();
+                return;
+            }
         }
         siriTextShown = true;
         // 审批球在屏上时原球文字一律不露头（审批结束后 measureSiriTargets 会重新放出来）
@@ -3191,6 +3206,22 @@ public class FloatingBallService extends Service {
 
     private void measureSiriTargets(String s) {
         if (approvalShown) return;      // 面板在屏上：球尺寸归面板管，别在这儿改
+        // ⚠️ 重入守卫（实测踩过、很隐蔽）：本方法里会调 showSiriTextNow()，
+        // 它可能触发 rebuildMarkdown() → 又回头调 measureSiriTargets()。
+        // 递归那一层会把 tHalfY 覆盖成"按文字高度算的值"，**比真实需要的小**，
+        // 于是球缩小了、而文字窗还按大几何摆 → 文字超出球底（用户实拍的那个）。
+        if (measuringNow) return;
+        measuringNow = true;
+        try {
+            measureSiriTargetsInner(s);
+        } finally {
+            measuringNow = false;
+        }
+    }
+
+    private volatile boolean measuringNow = false;
+
+    private void measureSiriTargetsInner(String s) {
         int n = s == null ? 0 : s.trim().length();
         if (n <= 1) {                           // 0/1 个字
             if (textHold) {
@@ -3224,7 +3255,6 @@ public class FloatingBallService extends Service {
         float padY = Math.max(dp(12), siriTextPx * mdFontRatio() * 0.5f);
         // 方形态高度上限 = 屏高 55%（用户要求）
         float maxBallH = siriMaxBallH();
-        showSiriTextNow();          // 有字 → 确保文字层可见（方形态才允许出现，见 squareFormActive）
 
         float maxBallW = siriMaxBallW();
         // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
@@ -3280,6 +3310,9 @@ public class FloatingBallService extends Service {
         holdHalfY = Math.max(holdHalfY, tHalfY);
         holdCorner = Math.min(holdCorner, tCorner);
         holdBlack = Math.max(holdBlack, tBlack);
+
+        // 几何已经定下来 → 这时才决定文字层要不要露头（方形态才允许，见 squareFormActive）
+        if (s != null && !s.trim().isEmpty()) showSiriTextNow();
     }
 
     private final Runnable siriTick = new Runnable() {
@@ -3441,15 +3474,21 @@ public class FloatingBallService extends Service {
         int sysDy = Math.round(winYnow) - params.y;             // 请求坐标 → 屏幕坐标的系统 inset
         float base = winSize * 0.9f;
         if (base <= 0) base = 1f;
-        float ballHalfH = base * aHalfY * aMaster;              // 当前球半高（缓动值）
         float sx = winXnow + winW * 0.5f;
-        // 球顶/球底用**统一**的定位函数（含"躲开屏幕下部"的位移）：
-        // 不能各自用 sy±halfH 算，否则玻璃上移了、文字还留在原处 → 文字掉出球外。
-        float ballTop = ballTopOnScreen(ballHalfH) + winY0();
+        // ── 玻璃的**可见边界**从"窗口矩形 − 窗口边距 m"算 ────────────────────
+        // ⚠️ 两个坑合起来才定位到这里（都用实测数据锁定的）：
+        //  ① 玻璃不是铺满窗口的：窗口四边各有 m(=dp(24)≈63px) 的留白 —— 实测截一帧量到
+        //     "上/下/左/右各 62px 全是透明"；所以**窗口边缘 ≠ 玻璃边缘**，差 62px。
+        //  ② 半高不能用动画值 aHalfY：窗口是用动画值摆的，两者在动画途中会差一截
+        //     （实测 aHalfY 差分出 96px），文字就跑到球外面去了。
+        // 由窗口尺寸反推半高，天然与屏幕一致；窗口位置也直接取 view 的真实位置。
+        float m = dp(24);
+        float ballHalfH = Math.max(dp(20), (winH - 2f * m) / 2f);
+        float ballTop = winYnow + m;
         float ballBottom = ballTop + ballHalfH * 2f;
 
-        int topPad = Math.max(0, siriTextDy) + (int) dp(6);
-        int padBottomSafe = (int) dp(16);
+        int topPad = (int) dp(8);           // 与 rebuildMarkdown 的 padTop 保持一致
+        int padBottomSafe = (int) dp(14);
         int tw = Math.max((int) dp(40), mdLayoutWidthPx());
         int availTop = Math.round(ballTop + topPad);
         int availBottom = Math.round(ballBottom - padBottomSafe);
@@ -3471,7 +3510,6 @@ public class FloatingBallService extends Service {
             siriParams.x = x; siriParams.y = y;
             siriParams.width = tw; siriParams.height = th;
             try { wm.updateViewLayout(siriText, siriParams); } catch (Throwable ignored) { }
-            // 越界自检（正常不该出现；出现过就是"文字漏出球外"）
             int realBottom = y + sysDy + th;
             if (realBottom > Math.round(ballBottom) + 2 && Math.abs(th - siriTextLogH) > 24) {
                 siriTextLogH = th;
