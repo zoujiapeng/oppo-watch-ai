@@ -14,7 +14,12 @@
  * 失败一律静默：写不出文件时悬浮球会走本地规则，朗读不会因此停摆。
  */
 import fs from "node:fs";
-import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { BlockAssembler, createUserMessage, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
+
+// 改写是个纯格式化任务，不需要推理。**必须显式关掉**：
+// 实测不关的话，模型把 max_tokens 全花在 reasoning 块上，正文一个字都没输出就被截断
+// （日志：`chunks=304 blocks=reasoning 文本=0 字`）→ 插件永远写不出稿子。
+const NO_REASONING = ReasoningEffortId("off");
 
 const OUT = process.env.DSH_SPEECH_OUT
   || "/sdcard/Android/data/com.glslplayground.app/files/spoken.txt";
@@ -125,7 +130,8 @@ export function apply(ctx) {
             content: [{ type: "text", text: text.slice(0, MAX_INPUT) }],
             source: { kind: "dsh-plugin-speech" },
           })],
-          maxTokens: 300,
+          reasoningEffort: NO_REASONING,
+          maxTokens: 400,
           sessionId: session?.id ?? session?.header?.id,
           purpose: "speech-rewrite",
           signal: ac.signal,
@@ -136,7 +142,25 @@ export function apply(ctx) {
         const blocks = assembler.blocks();
         const spoken = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
         note(`模型返回 chunks=${chunks} blocks=${blocks.map((b) => b.type).join("|")} 文本=${spoken.length} 字`);
-        if (!spoken) { note("模型没给文本，跳过（球用规则清洗）"); return; }
+        if (!spoken) {
+          note("模型没给文本（可能又被推理占满），提高额度重试一次");
+          const asm2 = new BlockAssembler();
+          for await (const c of ctx.llm.stream({
+            provider, model, system: SYSTEM,
+            messages: [createUserMessage({
+              content: [{ type: "text", text: text.slice(0, MAX_INPUT) }],
+              source: { kind: "dsh-plugin-speech" },
+            })],
+            reasoningEffort: NO_REASONING, maxTokens: 1200,
+            sessionId: session?.id ?? session?.header?.id,
+            purpose: "speech-rewrite", signal: ac.signal,
+          })) asm2.push(c);
+          const retry = asm2.blocks().filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
+          if (!retry) { note("重试也没文本，跳过（球用规则清洗）"); return; }
+          writeAtomic(OUT, retry);
+          note(`口播稿（重试成功）${retry.length} 字已写入`);
+          return;
+        }
         writeAtomic(OUT, spoken);
         note(`口播稿 ${spoken.length} 字已写入`);
       } catch (e) {

@@ -670,3 +670,31 @@ $ java SpeakTest < sample.md
 
 **已验证**：插件可被 DSH 解析加载；用**真实事件结构**（`data.message` + `source`）驱动时，
 模型调用与原子写全部走通（`→ provider=… model=… 输入=25字` → `口播稿 8 字已写入`）。
+
+## 口播稿插件：真正的失败原因（2026-10-15 定位完成）
+
+排查链条（每一步都靠"直接落盘"的日志，因为 `ctx.logger` 的输出看不到）：
+
+```
+15:26:47 收到 assistant/message 但取不到正文              ← 该回合第 1 条只有 reasoning+tool-call，正常跳过
+15:26:56 收到 assistant/message：正文 64 字，deepseek-official/deepseek-flash
+15:26:56 开始调用 ctx.llm.stream …
+15:26:58 模型返回 chunks=304 blocks=reasoning 文本=0 字     ← ★ 真凶
+15:26:58 模型没给文本，跳过（球用规则清洗）
+```
+
+**根因**：这个模型默认**带推理**，而改写请求只给了 `maxTokens: 300` ——
+模型把额度全花在 reasoning 块上，正文一个字都没输出就被截断，
+于是插件永远写不出稿子（球只能走本地规则清洗，所以听感"不像被模型改写过"）。
+
+**改法**：
+1. `reasoningEffort: ReasoningEffortId("off")` —— DeepSeek 适配器原生支持
+   `off/low/high/max`（在 `dsh-llm-deepseek` 里定义），改写是纯格式化任务，不需要推理；
+2. `maxTokens` 300 → 400；
+3. 兜底：万一仍然只回 reasoning，**自动用 1200 token 重试一次**。
+
+**顺带记两个排查经验**：
+- `ctx.logger.info` 的输出在设备上**看不到**（不知道它去了哪），排查这类插件要
+  **直接 `fs.appendFileSync` 到 files/ 下的日志**，否则永远是"静默失败"；
+- 一个回合里 `assistant/message` 会来**多条**（每一步一条），
+  其中有些只有 `reasoning|tool-call` 没有正文 —— 插件跳过它们是正确行为，不是 bug。
