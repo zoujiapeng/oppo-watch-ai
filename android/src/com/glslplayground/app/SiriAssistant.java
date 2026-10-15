@@ -523,7 +523,9 @@ public final class SiriAssistant {
      * （几十个 step、几分钟都不 end），只认 turn/end 的话文字会一直挂在那儿 ——
      * 用户看到的就是「回答完变回球了，字还留着，怪怪的」。
      */
-    private static final long IDLE_CLEAR_MS = 1500;
+    // 用户要求「出现文字时停留时间长一点」：安静这么久才把球内文字清掉。
+    // 注意球侧 IDLE_SETTLE_MS（几何/动画回初始）要比它略长，让「文字消失 → 球回圆球」有先后。
+    private static final long IDLE_CLEAR_MS = 4000;
 
     /** 最近一次球内文字有变化的时间（打字机每弹一个字都会刷新）。 */
     private volatile long lastTextAt = android.os.SystemClock.uptimeMillis();

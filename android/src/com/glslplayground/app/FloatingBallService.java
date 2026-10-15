@@ -279,10 +279,13 @@ public class FloatingBallService extends Service {
     //     （THINKING/ANSWERING/LISTENING…）都会取消它 —— 只有「确实安静下来了」才回 IDLE。
     //  ② 包络（gate）：换形态先把幅度淡到 0、换完再淡回来（WAVE_FADE_MS ×2）。
     private String stateNow = "IDLE";          // 球当前呈现的助手状态
+    private float orbWanted = 0f;              // 文字消失后该显示的形态（0=波 1=流体圆点）
     private long stateEnteredAt = 0;           // 进入 stateNow 的时刻
     private Runnable idleSettle;               // 压后的「回 IDLE」
     private long stateSig = 0;                 // 去重：同一个状态连续上报只处理一次
-    private static final long IDLE_SETTLE_MS = 1200;   // 安静多久才算真的结束
+    // 安静多久才算「本轮结束」（结束前一直保持处理中，避免回 Siri 波又被打断造成闪动）。
+    // 用户要求「文字停留久一点」，这里从 1200 拉到 3500；真正结束的定义仍是「安静这么久」。
+    private static final long IDLE_SETTLE_MS = 3500;
 
     private float waveGateTarget = 1f;
     private int waveModePending = -1;          // 淡出到底时要切到的形态（-1=不切）
@@ -394,9 +397,31 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 球里现在有没有字（文字优先于动画：有字时不出波也不出圆点）。 */
+    private boolean hasBallText() {
+        return siriTextShown && siriStr != null && !siriStr.trim().isEmpty();
+    }
+
     /** 把状态真正落到波形上（走包络，不硬切形态）。 */
     private void applyAssistantState(String state) {
         if (renderer == null) return;
+        orbWanted = 0f;
+        // ── 文字优先：球里有字就只显示字 ────────────────────────────────
+        // 用户要求「文字和 Siri 波不能同时出现」。所以：
+        //   · 有字 → 波/圆点一律不出（waveGate 压到 0），文字结束后再按状态恢复；
+        //   · LISTENING/TRANSCRIBING（用户在说话）没字 → Siri 波；
+        //   · THINKING（思考/操作/执行命令）→ 流体圆点（处理中）；
+        //   · ANSWERING/IDLE 没字 → 交还用户自己的 Siri 模式设定。
+        if (hasBallText() && !"LISTENING".equals(state) && !"TRANSCRIBING".equals(state)) {
+            // 有字：幅度压到 0（不出波也不出圆点），只记下"字没了之后该显示什么"。
+            // 形态切换推迟到文字消失那一刻 —— 否则会在文字还在时换脸，破坏连续性。
+            renderer.waveOn = true;
+            waveGateTarget = 0f;
+            orbWanted = "THINKING".equals(state) ? 1f : 0f;
+            Log.i("FloatingBall", "有字优先：状态 " + state + " 暂不出动画，闸门→0（字没了显示 orbMix="
+                    + orbWanted + "）");
+            return;
+        }
         if ("THINKING".equals(state)) {
             // 只有「思考中」才切到流体圆点
             saveWaveOnce();
@@ -409,11 +434,19 @@ public class FloatingBallService extends Service {
             setWaveForm(1);                        // siriWaveCore
             setOrbMixTarget(0f);
         } else {
-            // 回答中 / 空闲：交还给用户自己的 Siri 模式设定 ——
-            // 回复就是「原本的 Siri 模式 + 球内文字」，不再叠任何特效
-            releaseWaveForm();
-            setOrbMixTarget(0f);
-            if ("IDLE".equals(state) || "OFF".equals(state)) renderer.voiceBoost = 0f;
+            // 回答中 / 空闲：不出波，保持「处理中」形态 —— 用户要求处理中动画必须连续，
+            // 所以 ANSWERING 不再切回 Siri 波（波只在"初始/结束"出现）。
+            // 球里此时挂着回答文字；字清掉之后，IDLE 沉降到点再交还给用户的 Siri 模式。
+            if ("IDLE".equals(state) && !hasBallText()) {
+                // 真正结束且已经没字 → 交还 Siri 波（用户要的"结束状态才出波"）
+                releaseWaveForm();
+                setOrbMixTarget(0f);
+            } else {
+                // 还在处理（THINKING/ANSWERING）或字还挂着 → 保持"处理中"，不出波
+                setWaveForm(-1);
+                waveGateTarget = 0f;
+            }
+            if ("IDLE".equals(state)) renderer.voiceBoost = 0f;
         }
         Log.i("FloatingBall", "assistant state=" + state
                 + " waveOn=" + renderer.waveOn + " waveMode=" + renderer.waveMode
@@ -2386,7 +2419,25 @@ public class FloatingBallService extends Service {
     /** 立刻把球内文字藏掉（不进布局）—— 球缩回最小形态时必须同一帧生效。 */
     private void hideSiriTextNow() {
         if (siriText == null) return;
+        boolean hadText = siriTextShown;
         siriTextShown = false;
+        // 「文字消失 → 波出来」的接续点：本轮已经结束（IDLE 且沉降到点）时才恢复 Siri 波。
+        // 处理中（THINKING/ANSWERING）不恢复 —— 那时要保持连续的处理中动画。
+        if (hadText && renderer != null) {
+            boolean processing = "THINKING".equals(stateNow) || "ANSWERING".equals(stateNow);
+            if (processing) {
+                // 处理中：续上"处理中"动画（形态只在这一刻切一次，之后不再变 → 连续不闪）
+                renderer.waveOn = true;
+                setWaveForm(1);              // 先淡出到 0（此刻本来就没有内容）再切形态
+                setOrbMixTarget(1f);
+                Log.i("FloatingBall", "文字消失 → 续上处理中动画（state=" + stateNow + "）");
+            } else if ("IDLE".equals(stateNow) && idleSettle == null) {
+                // 本轮已结束：交还用户自己的 Siri 模式设定
+                releaseWaveForm();
+                setOrbMixTarget(0f);
+                Log.i("FloatingBall", "文字消失 → 交还 Siri 波（本轮已结束）");
+            }
+        }
         // 钉住状态下文字必须一直留着（否则就点不到、解不开了）——
         // 这时球缩回最小形态，但文字保持可见不动，直到用户再点一下文字
         if (asstTextPinned && siriStr != null && !siriStr.isEmpty()) return;
