@@ -283,9 +283,10 @@ public class FloatingBallService extends Service {
             }
         } catch (Throwable ignored) { }
         if (!f.delete() && f.exists()) return;
-        // 顺带支持参数热重载：改了 float_params 后碰一下这个钩子即可生效，
-        // 不必重装 APK / 重启服务（调折射、缩放这类参数时很有用）。
-        if (pumpParamsReload()) return;
+        // 顺带支持参数热重载：改了 float_params 后碰一下这个钩子即可生效，不必重装 APK。
+        // ⚠️ 注意：**不能在这里 return** —— 否则首次碰钩子时会跳过截图，
+        // 读到的就是上一次的旧 png（排查时被这个骗过好几轮）。
+        pumpParamsReload();
         if (payload != null && !payload.isEmpty()) {
             final String text = payload;
             Log.i("FloatingBall", "shot request text len=" + text.length());
