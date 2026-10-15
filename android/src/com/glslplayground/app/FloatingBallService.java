@@ -2590,6 +2590,7 @@ public class FloatingBallService extends Service {
     private void moveBallDrag(float wantX, float wantY) {
         params.x = Math.round(wantX);
         params.y = Math.round(wantY);
+        rememberHomeIfMinimal();   // 拖动 = 搬家（只在最小形态时才算家）
         if (siriEnabled) {
             float base = winSize * 0.9f;
             float m = Math.max(0.01f, renderer.svMaster);
@@ -2834,7 +2835,9 @@ public class FloatingBallService extends Service {
 
         float tw, th;
         // 高度上限（屏幕 70%）：先算出来，才能把文字按「装得下几行」截断
-        float maxBallH = Math.min(screenH * 0.70f, winH);
+        // 高度上限只看屏幕（0.88 屏高）：不能再用 winH —— 方形态的窗口高度是随文字长的，
+        // 套进上限里会把球锁死在当前高度（字号再涨也长不动）。
+        float maxBallH = screenH * 0.88f;
         if (siriText != null) {
             // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配；
             // 封顶后放不下的行用省略号截掉 —— 文字永远待在球里，既不溢出也不占满屏
@@ -2888,28 +2891,22 @@ public class FloatingBallService extends Service {
         }
 
         float maxBallW = siriMaxBallW();
-        // 文字所需半宽/半高（不小于“原来的水晶球”）
-        float hxpx = Math.max(base * minHalfX, Math.min(maxBallW / 2f, tw / 2f + padX));
+        // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
+        //   · 宽**固定** = 屏宽 85%（siriMaxBallW），字号/文字多少都不许改它；
+        //   · 高随文字往下长（th = 文字实际高度 + 上下留白），**不再强行拉成正方形** ——
+        //     用户原话：「方形不是说是正方形，且方形的宽要固定好（屏幕宽度的 85%）不可变，
+        //     高度随文字往下涨的体积变化（不限字号）」。
+        float hxpx = maxBallW / 2f;
         float hypx = Math.max(base * minHalfY, th / 2f + padY + dp(16));
-        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 70%（长回复不占满屏）
-        // ① 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，球不缩回去。
-        //    先做减法：把本轮「量过的最大值」钳进来，再夹到上限。
+        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 88%（物理上限）
+        // 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，方框不缩回去。
         if (textHold) {
-            hxpx = Math.max(hxpx, holdHalfX * base);
             hypx = Math.max(hypx, holdHalfY * base);
             hypx = Math.min(hypx, maxBallH / 2f);
+            hxpx = maxBallW / 2f;                                    // 宽永远钉在这个值
         }
-        // ② 只要这一轮出过字，就一律往「近方形」收 —— 用户的原话是「有文字就尽可能变成近方形」。
-        //    两个方向都要补齐：只补宽度会得到一条 5:1 的横条（实测 1044x573），不是近方形。
         {
-            float a = Math.max(hxpx, hypx);                    // 近方形：短边往长边靠
-            float lo = Math.min(hxpx, hypx);
-            a = Math.min(a, lo * 1.18f);                       // 但别拉太狠（上限 1.18 倍）
-            a = Math.min(a, maxBallW / 2f);                    // 宽 ≤ 屏宽 85%
-            a = Math.min(a, maxBallH / 2f);                    // 高 ≤ 屏高 70%
-            a = Math.max(a, Math.min(base * minHalfY, base * minHalfX));   // 不小于原来的水晶球
-            hxpx = hypx = a;
-            float r = 0.38f * Math.min(hxpx, hypx);            // 圆角 ≈ 短边 38% → squircle
+            float r = 0.38f * Math.min(hxpx, hypx);                  // 圆角 ≈ 短边 38% → squircle
             tCorner = Math.max(0.18f, Math.min(minCorner, r / Math.max(1f, hypx)));
         }
         // 提示：球内文字被清空（siriStr 为空）但本轮还没结束时，黑区/文字层也跟着藏掉，
@@ -2996,6 +2993,38 @@ public class FloatingBallService extends Service {
     };
 
     /** Siri：把悬浮窗尺寸调整为贴合当前球（触摸有效区域=球），并保持球心屏幕位置不变。 */
+    // ── 球的"家"：常态（最小圆球）时球心的屏幕坐标 ──────────────────────────
+    // 方形态的长高以它为锚：**顶边钉在家的位置，高度往下长**（用户要求"高度随文字往下涨"）。
+    // 以前是保持"球心"不动 → 文字一变长球就往上顶，观感就是"球在往上跑"。
+    // 用户拖动球、或常态下窗口重建时更新它。
+    private float homeCx = -1f, homeCy = -1f;
+
+    /**
+     * 记一次"家"。**只在当前就是最小形态时**才记 —— 否则方形态那套大几何会被记成家，
+     * 下一次定位又拿它当基准，位置会越滚越偏（实测滚到过 -3e7 这种离谱值，球直接飞出屏幕）。
+     */
+    private void rememberHomeIfMinimal() {
+        if (renderer == null || winW <= 0 || winH <= 0) return;
+        boolean minimal = renderer.svHalfX <= minHalfX * 1.06f && renderer.svHalfY <= minHalfY * 1.06f;
+        if (!minimal) return;
+        float cx = params.x + winW * 0.5f;
+        float cy = params.y + winH * 0.5f;
+        if (cx < -screenW || cx > screenW * 2f || cy < -screenH || cy > screenH * 2f) return;   // 离谱值直接丢弃
+        homeCx = cx;
+        homeCy = cy;
+    }
+
+    /** 定位用的家：没记过 / 记成了离谱值 → 退回屏幕中心。 */
+    private float homeCxSafe() {
+        if (homeCx < 0f || homeCx > screenW * 2f) return screenW * 0.5f;
+        return homeCx;
+    }
+
+    private float homeCySafe() {
+        if (homeCy < 0f || homeCy > screenH * 2f) return screenH * 0.5f;
+        return homeCy;
+    }
+
     private void updateSiriWindow(float hxpx, float hypx) {
         if (!siriEnabled || wm == null || glView == null) return;
         float m = dp(24);
@@ -3003,12 +3032,20 @@ public class FloatingBallService extends Service {
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
         Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
         if (W == winW && H == winH) return;
-        float bcx = params.x + winW * 0.5f;
-        float bcy = params.y + winH * 0.5f;
+        final float hx0 = homeCxSafe(), hy0 = homeCySafe();
         winW = W; winH = H;
         params.width = W; params.height = H;
-        params.x = Math.round(bcx - W * 0.5f);
-        params.y = Math.round(bcy - H * 0.5f);
+        // 水平：以"家"为中心（宽固定 85% 屏宽，左右对称）。
+        params.x = Math.round(hx0 - W * 0.5f);
+        // 竖直：**家的球顶钉住，高度往下长**（用户要求"高度随文字往下涨"）。
+        // 以前保持球心不动 → 文字一变长球就往上顶，观感是"球在往上跑、波也跟着上去"。
+        // 窗口 = 球 + 四周 m 留白 ⇒ 窗口顶边 = 常态圆球的球顶 - m。
+        float minHalfH = winSize * 0.9f * minHalfY;
+        params.y = Math.round(hy0 - minHalfH - m);
+        Log.i("FloatingBall", "siri window place: home=(" + Math.round(hx0) + ","
+                + Math.round(hy0) + ") minHalfH=" + Math.round(minHalfH)
+                + " m=" + Math.round(m) + " -> params=(" + params.x + "," + params.y + ")"
+                + " size=" + W + "x" + H);
         try { wm.updateViewLayout(glView, params); } catch (Exception ignored) { }
         glView.post(winSync);
         clampBallOnScreen();          // 文字变长 → 球变大 → 可能要往屏内挪，否则文字出界
@@ -3220,9 +3257,9 @@ public class FloatingBallService extends Service {
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
-        // 方形态收尾时，Siri 波在球内的竖直锚点（千分比，负 = 沉到球底以下）。
-        // -1250 = -1.25：整条波压在球底下面，球里只露波顶一点点。
-        renderer.waveAnchorGlass = prefs().getInt("float_wave_anchor", -1250) / 1000f;
+        // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
+        // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
+        renderer.waveDropPx = prefs().getInt("float_wave_drop", 92);
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -3293,6 +3330,8 @@ public class FloatingBallService extends Service {
 
         if (wm != null) {
             wm.addView(glView, params);
+            homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
+            homeCy = params.y + winH * 0.5f;
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
@@ -3323,6 +3362,7 @@ public class FloatingBallService extends Service {
         renderer.winY = loc[1];
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
+        rememberHomeIfMinimal();        // 最小形态时顺手刷新"家"（滚偏了也能自愈）
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面。
         // ⚠️ 这一步必须是**无条件**的：一旦球没被排除，抓屏里就含着球自己，背景会被冻住
         // （球内显示的是启动那一刻的画面，或者干脆是球自己的上一帧）→ 观感就是「半透明贴纸」
@@ -3354,7 +3394,7 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
-            renderer.waveAnchorGlass = prefs().getInt("float_wave_anchor", -1250) / 1000f;
+            renderer.waveDropPx = prefs().getInt("float_wave_drop", 92);
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;
