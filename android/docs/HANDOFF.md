@@ -601,3 +601,37 @@ $ java SpeakTest < sample.md
 …
 （有代码，略过）
 ```
+
+## 朗读稿改写：交给大模型（2026-10-15 新增，默认关）
+
+**用户要求**：用大模型把回复改写成适合朗读的稿子；只有开启朗读时才这样，不开朗读完全不影响 DSH；
+**用最简单的方式做，反正朗读不需要那么长**。
+
+**实现（`SpeechRewriter`，131 行，刻意最简）**：
+
+- 只在 `speakReplies`（朗读回答）打开、且设置页填了 DeepSeek key 时才发请求；
+  否则一律走本地规则清洗（`SiriAssistant.toSpeechText`）；
+- **不做任何"值不值得改写"的判断**（第一版写了 `needsRewrite`/`isSane` 两道启发式，
+  按用户"最简单"的要求删掉了）；
+- 提示词直接要求**输出 100 字以内的口播稿** —— 短了既好念又省钱，比在代码里截断自然；
+- 3s 连接 / 5s 读取超时；**任何失败（没 key / 断网 / 超时 / 空返回）都回落规则清洗版**，
+  朗读不会因为网络问题停摆；
+- 输入裁剪到 1200 字；`max_tokens=300`；
+- **不碰 DSH**：不改它的代码、不占它的会话、不读它的凭据；key 存在 App 自己的首选项
+  （`watch` prefs 的 `speak_key`），只在开启该功能时用到。
+
+**实测提示词效果**（直接用设备上的 key 打一次 API 验证，未经过 App）：
+
+```
+输入：## 结论 / **可以**，但分两步：/ 1. 跑 `adb shell input tap 100 200` / 表格 / 链接 🚀
+输出：可以，但得分两步。先跑 adb shell input tap 100 200，再改 settings.html 的开关。本地规则成本是 0。
+```
+
+**设置页**（「DSH 语音助手」展开后）：
+
+- 开关「朗读稿交给模型改写（更自然、要联网）」→ `swAsstSpeakModel`
+- 输入框「DeepSeek API Key（只存本 App）」→ `asstSpeakKey`（填完即存，输入框清空；
+  用 `hasAssistantSpeechKey()` 只判断"有没有"，不回显 key）
+
+**核对方式**：`files/last-spoken.txt`（实际要念的稿子）+ `logcat -s SpeechRewrite SiriAssistant`
+（会打 `speak(N字，模型改写)` 或 `speak(N字，规则清洗)`，一眼看出走的是哪条路）。

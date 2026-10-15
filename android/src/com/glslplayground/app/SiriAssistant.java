@@ -71,6 +71,8 @@ public final class SiriAssistant {
     private TextToSpeech tts;
     private boolean ttsReady;
     private boolean speakReplies = true;
+    private boolean speakUseModel = false;      // 朗读稿是否交给大模型改写（默认关，避免"悄悄花钱"）
+    private String speechApiKey = "";           // 只在开启该功能时才会用到
     private boolean enabled = true;
 
     private State state = State.IDLE;
@@ -88,6 +90,8 @@ public final class SiriAssistant {
                 app.getSharedPreferences("siri_assistant", Context.MODE_PRIVATE);
         enabled = sp.getBoolean("enabled", true);
         speakReplies = sp.getBoolean("speak", true);
+        speakUseModel = sp.getBoolean("speak_model", false);
+        speechApiKey = sp.getString("speak_key", "");
         try {
             tts = new TextToSpeech(app, new TextToSpeech.OnInitListener() {
                 @Override public void onInit(int status) {
@@ -641,8 +645,22 @@ public final class SiriAssistant {
 
     private void speak(String text) {
         if (!ttsReady || tts == null) return;
-        String spoken = toSpeechText(text);
-        // 调试口：把「要念的稿子」落盘，方便核对清洗效果（球自己的目录，能写能删）
+        if (speakUseModel) {
+            // 交给大模型改写朗读稿（只在开启朗读时走；失败/超时自动回落规则清洗）
+            SpeechRewriter.rewrite(text, speechApiKey, new SpeechRewriter.Cb() {
+                @Override public void onReady(String spoken, boolean byModel) {
+                    speakNow(spoken, byModel);
+                }
+            });
+            return;
+        }
+        speakNow(toSpeechText(text), false);
+    }
+
+    /** 真正送给 TTS 的那一步（规则清洗版与模型版都走这里）。 */
+    private void speakNow(String spoken, boolean byModel) {
+        if (!ttsReady || tts == null || spoken == null) return;
+        // 调试口：把「要念的稿子」落盘，方便核对清洗/改写效果（球自己的目录，能写能删）
         try {
             java.io.File f = new java.io.File(
                     app.getExternalFilesDir(null), "last-spoken.txt");
@@ -651,13 +669,30 @@ public final class SiriAssistant {
             out.close();
         } catch (Throwable ignored) { }
         if (spoken.isEmpty()) return;
-        Log.i(TAG, "speak(" + spoken.length() + "字): " + spoken.substring(0, Math.min(80, spoken.length())));
+        Log.i(TAG, "speak(" + spoken.length() + "字" + (byModel ? "，模型改写" : "，规则清洗") + "): "
+                + spoken.substring(0, Math.min(80, spoken.length())));
         try {
             tts.stop();
             tts.speak(spoken.length() > 800 ? spoken.substring(0, 800) : spoken,
                     TextToSpeech.QUEUE_FLUSH, null, "dsh-siri");
         } catch (Throwable ignored) {}
     }
+
+    /** 朗读稿是否交给大模型改写（设置页开关）。 */
+    public void setSpeakUseModel(boolean v) {
+        speakUseModel = v;
+        prefs().edit().putBoolean("speak_model", v).apply();
+    }
+
+    public boolean speakUseModel() { return speakUseModel; }
+
+    /** DeepSeek API key（设置页填；只存在本 App 的首选项里，不碰 DSH 的凭据）。 */
+    public void setSpeechApiKey(String key) {
+        speechApiKey = key == null ? "" : key.trim();
+        prefs().edit().putString("speak_key", speechApiKey).apply();
+    }
+
+    public boolean hasSpeechApiKey() { return speechApiKey != null && !speechApiKey.isEmpty(); }
 
     /**
      * 把「给眼睛看的 markdown」转成「给耳朵听的稿子」。
@@ -676,7 +711,7 @@ public final class SiriAssistant {
      *   · 去掉所有 markdown 强调符与其余符号（emoji、箭头、制表符等）
      *   · 只保留：中日韩汉字、拉丁字母数字、空白、逗号句号问号感叹号顿号分号冒号引号括号
      */
-    private static String toSpeechText(String raw) {
+    public static String toSpeechText(String raw) {
         if (raw == null) return "";
         String t = raw;
 

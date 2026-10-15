@@ -129,6 +129,9 @@
     <div class="row" style="margin-top:16px"><label>DSH 语音助手（点球说话）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
       <div class="row"><label>朗读回答</label><div class="switch" id="swAsstSpeak"></div></div>
+      <div class="row" style="margin-top:8px"><label>朗读稿交给模型改写（更自然、要联网）</label><div class="switch" id="swAsstSpeakModel"></div></div>
+      <div class="row" style="margin-top:8px"><label>DeepSeek API Key（只存本 App）</label></div>
+      <input type="text" id="asstSpeakKey" placeholder="sk-...（留空则只用本地规则清洗）">
       <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
       <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
       <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
@@ -426,6 +429,8 @@
   var swAsst = document.getElementById('swAsst');
   var asstBox = document.getElementById('asstBox');
   var swAsstSpeak = document.getElementById('swAsstSpeak');
+  var swAsstSpeakModel = document.getElementById('swAsstSpeakModel');
+  var asstSpeakKey = document.getElementById('asstSpeakKey');
   var asstUrl = document.getElementById('asstUrl');
   function syncAsst() {
     var on = false, speak = false, url = '';
@@ -434,6 +439,8 @@
     try { url = W.getAssistantEndpoint(); } catch (e) {}
     swAsst.classList.toggle('on', !!on);
     swAsstSpeak.classList.toggle('on', !!speak);
+    try { swAsstSpeakModel.classList.toggle('on', !!W.getAssistantSpeakModel()); } catch (e) {}
+    try { asstSpeakKey.placeholder = W.hasAssistantSpeechKey() ? '已保存（重新填写可覆盖）' : 'sk-...（留空则只用本地规则清洗）'; } catch (e) {}
     asstBox.style.display = on ? 'block' : 'none';
     if (!asstUrl.value && url) asstUrl.value = url;
   }
@@ -446,6 +453,16 @@
   swAsstSpeak.addEventListener('click', function () {
     var on = !swAsstSpeak.classList.contains('on');
     try { W.setAssistantSpeak(on); } catch (e) {}
+    syncAsst();
+  });
+  swAsstSpeakModel.addEventListener('click', function () {
+    var on = !swAsstSpeakModel.classList.contains('on');
+    try { W.setAssistantSpeakModel(on); } catch (e) {}
+    syncAsst();
+  });
+  asstSpeakKey.addEventListener('change', function () {
+    try { W.setAssistantSpeechKey(asstSpeakKey.value); } catch (e) {}
+    asstSpeakKey.value = '';
     syncAsst();
   });
   asstUrl.addEventListener('change', function () {
