@@ -325,7 +325,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.r = texture2D(iBlur, suv + disp).r;\n" +
         "  col.g = texture2D(iBlur, suv).g;\n" +
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
-        "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
+        "  col = vec3(1.0, 0.0, 0.0);   // 【决定性实验】纯红：若球真的被画出来，屏幕上应出现红球\n" +
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +

@@ -3236,8 +3236,11 @@ public class FloatingBallService extends Service {
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
-        if (!renderer.selfExcluded && applySkipScreenshot()) {
-            renderer.selfExcluded = true;
+        // 排查开关：打开 float_no_skipshot 时球会出现在系统截图里（注意：会导致自我采样）
+        if (!prefs().getBoolean("float_no_skipshot", false)) {
+            if (!renderer.selfExcluded && applySkipScreenshot()) {
+                renderer.selfExcluded = true;
+            }
         }
     }
 
