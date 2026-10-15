@@ -103,6 +103,7 @@ public class FloatingBallService extends Service {
             if (glView == null || targetFps <= 0) return;
             pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
+            pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
             glView.requestRender();
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
@@ -274,14 +275,986 @@ public class FloatingBallService extends Service {
         return s == null ? "" : (s.siriStr == null ? "" : s.siriStr);
     }
 
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  审批 / 提问面板：DSH 要你点头或回答时，**同一颗球**变成可交互的玻璃卡片
+    //
+    //  参考苹果那种卡片：外壳还是这颗水晶球（折射 / 黑顶 / 赤道亮线 / 底缘，
+    //  不带 Siri 波），壳**里面**按 DSH 给的内容自适应排：
+    //
+    //    审批（DSH 只有这两种，协议上写死）：
+    //      ┌──────────────────────────────┐
+    //      │ bash                         │ ← 标题（工具名）
+    //      │ 这个命令要在沙箱之外执行…      │ ← 说明（reason / displayReason）
+    //      │ ┌──────────────┐             │
+    //      │ │    批准       │             │ ← 选项：绿色，点一下直接答
+    //      │ └──────────────┘             │
+    //      │ ┌──────────────┐             │
+    //      │ │    拒绝       │             │ ← 红色
+    //      │ └──────────────┘             │
+    //      └──────────────────────────────┘
+    //
+    //    提问（ask_user_question，**千变万化**）：
+    //      ┌──────────────────────────────┐
+    //      │ 选择运行模式                   │ ← header / 题干
+    //      │ 打开 QQ 需要操作屏幕…          │
+    //      │ ┌──────────────────────────┐ │
+    //      │ │ ① 前台 Foreground（推荐）  │ │ ← 选项数量/文案/多选都由 DSH 决定
+    //      │ │   在物理屏幕上显示…        │ │ ← description 也照排
+    //      │ └──────────────────────────┘ │
+    //      │ ┌──────────────────────────┐ │
+    //      │ │ ② 后台 Background         │ │
+    //      │ └──────────────────────────┘ │
+    //      │ ┌──────────────────────────┐ │
+    //      │ │ 或者自己写点什么…   [发送] │ │ ← 自由输入 = 协议里的 custom
+    //      │ └──────────────────────────┘ │
+    //      └──────────────────────────────┘
+    //
+    //  协议（对着 DSH 源码抄的，别自己发明）：
+    //    · 审批的 outcome 只有 `allowed-once` / `rejected` 两个值，就在
+    //      `dsh-client-ui-approval` 的 locales（allowOnce / reject）与
+    //      `PendingApproval.answer(outcome)` 里，没有第三种。
+    //    · 提问走同一条瀑布，**回的是答案对象**而不是字符串：
+    //        { answers: [ { id, selected: [label…], custom?: "自由文本" } ] }
+    //      单选 + 写了自由文本时，客户端会把 selected 清空（见
+    //      dsh-client-ui-user-questions/lib/client.js 里 `selected: custom === "" … ? value.selected : []`）。
+    //      所以这里照抄这个语义。
+    //    · 多选（multiSelect）时 selected 可以有多个，且可以与 custom 并存。
+    //
+    //  关于「不跳」和「点得动」：几何只在档位变化时算一次，内层两个窗口只在实测值
+    //  变化时 update；按钮是壳内普通 View + OnClickListener，不靠命中判定。
+    // ═══════════════════════════════════════════════════════════════════
+
+    /** 面板正挂在球上（球此刻显示审批/提问内容，不是 Siri 文字）。 */
+    private boolean approvalShown = false;
+    private boolean approvalClosing = false;
+    private DshApprovalClient.Request approvalReq;
+
+    // 壳内：文字块（标题/说明/题干）
+    private android.widget.LinearLayout approvalContent;
+    private WindowManager.LayoutParams approvalContentParams;
+    private android.widget.TextView approvalBodyView;
+    private boolean approvalBodyClipped = false;
+    // 壳内：交互层（选项 + 自由输入 + 发送）
+    private android.widget.LinearLayout approvalActions;
+    /** 选项多/文案长时，交互层自己滚 —— 绝不能压到上面的文字块上去。 */
+    private android.widget.ScrollView approvalActionsScroll;
+    private WindowManager.LayoutParams approvalActionsParams;
+    private android.widget.EditText approvalInput;
+    private android.widget.TextView approvalSend;
+    /** 选项按钮：label / 选中态 / 视图。 */
+    private final java.util.List<View> approvalOptViews = new java.util.ArrayList<View>();
+    private final java.util.List<android.widget.TextView> approvalOptLabels =
+            new java.util.ArrayList<android.widget.TextView>();
+    private final java.util.List<String> approvalOptValues = new java.util.ArrayList<String>();
+    private final java.util.List<Boolean> approvalOptChecked = new java.util.ArrayList<Boolean>();
+    private final java.util.List<Integer> approvalOptAccents = new java.util.ArrayList<Integer>();
+    private int approvalSingleQid = -1;        // 单选时锁定的题号（本面板一次只答第一题）
+
+    // 审批面板**自己的一套**几何目标（单独一组，绝不与 Siri 那条路共用）。
+    // 共用会出事：镜像打字 / 静默清空 / 新一轮提问任一调 measureSiriTargets()，
+    // 就会把 tHalfX/tHalfY 改回小球，而面板内容还挂着 → 内容溢出玻璃（实拍踩到过）。
+    private float aprHalfX = 0.37f, aprHalfY = 0.25f, aprCorner = 1f, aprBlack = 0f;
+
+    // 几何缓存
+    private String apGeomKey = "";
+    private int apTextW, apTextH, apActW, apActH;
+    private boolean apGeomDirty = true;
+    private int apLayoutKey = Integer.MIN_VALUE;
+
+    // 拖动
+    private View approvalTouch;
+    private WindowManager.LayoutParams approvalTouchParams;
+    private float apDownX, apDownY;
+    private int apStartX, apStartY;
+    private boolean apDragging;
+
+    // 原球存档
+    private boolean apSaved = false;
+    private int apSaveWinW, apSaveWinH, apSaveX, apSaveY;
+    private float apSaveTHalfX, apSaveTHalfY, apSaveTCorner, apSaveTBlack, apSaveTMaster;
+    private float apSaveAHalfX, apSaveAHalfY, apSaveACorner, apSaveABlack, apSaveAMaster;
+    private boolean apSaveWaveOn, apSaveSiriGeom;
+    private float apSaveVoiceBoost;
+
+    private int apPadX, apPadY, apGap, apTitlePx, apBodyPx, apOptPadX, apOptPadY, apOptGap;
+    private static final int AP_PAD_X_DP = 30, AP_PAD_Y_DP = 26;
+    private static final int AP_GAP_DP = 14;
+    private static final int AP_OPT_GAP_DP = 10;
+    private static final int AP_OPT_PAD_X_DP = 18, AP_OPT_PAD_Y_DP = 13;
+    private static final int AP_OPT_MIN_H_DP = 46;
+    private static final int AP_ACCENT_OK = 0xFF3ED598;
+    private static final int AP_ACCENT_NO = 0xFFFF6B6B;
+    private static final int AP_ACCENT_ASK = 0xFF6FA8FF;
+    /** 面板底：半透明深玻璃，让球本身的折射还能透出来一点（纯黑会像糊了块板子）。 */
     /**
-     * 调试用：把球体这一帧存成 PNG，返回文件路径。
-     * 只截悬浮窗（= 球 + 24dp 边距），不含桌面内容，方便对着调黑区/文字/波的位置。
+     * 文字块底：**淡淡的暗色**，不是不透明黑面板。
+     * 球壳自己就是液态玻璃（折射/色散/黑顶/赤道线），这一层只给文字垫底；
+     * 一旦调实（原来 0xD8≈85%），玻璃的折射色散就全看不见了 —— 用户明确要求保留玻璃效果。
      */
+    private static final int AP_PANEL_BG = 0x57101419;
+    /** 球尽量接近方形：文字块允许的最大宽度 = 屏宽的这个比例。 */
+    private static final float AP_TEXT_W_RATIO = 0.60f;
+
+    private void pumpApprovalDebug() {
+        SiriAssistant a = SiriAssistant.peek();
+        if (a == null) return;
+        DshApprovalClient c = a.approvals();
+        if (c != null) c.pumpDebugRequest();
+    }
+
+    void onApprovalRequest(Object request) {
+        if (!(request instanceof DshApprovalClient.Request)) return;
+        showApprovalPanel((DshApprovalClient.Request) request);
+    }
+
+    void onApprovalWithdraw(String eventId) {
+        if (approvalReq == null || eventId == null || !eventId.equals(approvalReq.eventId)) return;
+        Log.i("FloatingBall", "approval withdrawn eventId=" + eventId + " → 收面板");
+        hideApprovalPanel();
+    }
+
+    // ── 出场 / 退场 ────────────────────────────────────────────────────
+
+    private void showApprovalPanel(final DshApprovalClient.Request req) {
+        if (wm == null || glView == null || renderer == null) return;
+        if (approvalShown && approvalReq != null && req.eventId != null
+                && req.eventId.equals(approvalReq.eventId)) return;
+
+        saveOriginalBall();
+        approvalReq = req;
+        approvalClosing = false;
+        renderer.waveOn = false;          // 面板不带 Siri 波（退出时按存档还原）
+        renderer.voiceBoost = 0f;
+
+        float d = getResources().getDisplayMetrics().density;
+        apPadX = Math.round(AP_PAD_X_DP * d);
+        apPadY = Math.round(AP_PAD_Y_DP * d);
+        apGap = Math.round(AP_GAP_DP * d);
+        apTitlePx = Math.round(19f * d);
+        apBodyPx = Math.round(14f * d);
+        apOptPadX = Math.round(AP_OPT_PAD_X_DP * d);
+        apOptPadY = Math.round(AP_OPT_PAD_Y_DP * d);
+        apOptGap = Math.round(AP_OPT_GAP_DP * d);
+
+        approvalShown = true;
+        // 面板模式：黑区不是死黑 —— 底部透强调色并带光晕（审批=暖红，提问=蓝）
+        if (renderer != null) {
+            boolean appr = req.isApproval();
+            renderer.panelMode = 1f;
+            renderer.panelAccentR = appr ? 1.00f : 0.42f;
+            renderer.panelAccentG = appr ? 0.28f : 0.66f;
+            renderer.panelAccentB = appr ? 0.22f : 1.00f;
+        }
+        apGeomDirty = true;
+        apGeomKey = "";
+        apLayoutKey = Integer.MIN_VALUE;
+        buildApprovalViews(req);
+        applyApprovalGeometry();
+        ensureApprovalWindows();
+        applyApprovalGeometry();     // ensureApprovalWindows 之后面板尺寸才算定，再算一次
+        updateApprovalWindow();      // 球变大了，窗口必须立刻跟上，否则球面/内容一起被裁
+        Log.i("FloatingBall", "approval panel up: " + req.title()
+                + " kind=" + (req.isApproval() ? "approval" : "question")
+                + " text=" + apTextW + "x" + apTextH
+                + " actions=" + apActW + "x" + apActH
+                + " half=" + round3(aprHalfX) + "x" + round3(aprHalfY)
+                + " corner=" + round3(aprCorner) + " black=" + round3(aprBlack)
+                + " options=" + approvalOptValues.size()
+                + (approvalInput != null ? " +输入框" : "")
+                + (approvalBodyClipped ? " [截断]" : ""));
+    }
+
+    private void hideApprovalPanel() {
+        if (!approvalShown) { approvalReq = null; return; }
+        hideKeyboard();
+        approvalShown = false;
+        approvalClosing = true;
+        approvalReq = null;
+        if (renderer != null) renderer.panelMode = 0f;   // 交还给普通球（纯黑区）
+        hideApprovalWindows();
+        // 收球动画：这一次才允许动 Siri 那套目标（面板已不再需要它们）
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        main.postDelayed(new Runnable() {
+            @Override public void run() { finishApprovalClose(); }
+        }, 280);
+    }
+
+    private void finishApprovalClose() {
+        if (!approvalClosing) return;
+        approvalClosing = false;
+        removeApprovalViews();
+        restoreOriginalBall();
+        Log.i("FloatingBall", "approval panel down · 原球已复原");
+    }
+
+    private void saveOriginalBall() {
+        if (apSaved) return;
+        apSaved = true;
+        apSaveWinW = winW; apSaveWinH = winH;
+        apSaveX = params == null ? 0 : params.x;
+        apSaveY = params == null ? 0 : params.y;
+        apSaveTHalfX = tHalfX; apSaveTHalfY = tHalfY; apSaveTCorner = tCorner;
+        apSaveTBlack = tBlack; apSaveTMaster = tMaster;
+        apSaveAHalfX = aHalfX; apSaveAHalfY = aHalfY; apSaveACorner = aCorner;
+        apSaveABlack = aBlack; apSaveAMaster = aMaster;
+        apSaveWaveOn = renderer != null && renderer.waveOn;
+        apSaveSiriGeom = renderer != null && renderer.siriGeom;
+        apSaveVoiceBoost = renderer == null ? 0f : renderer.voiceBoost;
+    }
+
+    private void restoreOriginalBall() {
+        if (!apSaved) return;
+        apSaved = false;
+        if (params != null && wm != null) {
+            winW = apSaveWinW; winH = apSaveWinH;
+            params.width = apSaveWinW; params.height = apSaveWinH;
+            params.x = apSaveX; params.y = apSaveY;
+            try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        }
+        tHalfX = apSaveTHalfX; tHalfY = apSaveTHalfY; tCorner = apSaveTCorner;
+        tBlack = apSaveTBlack; tMaster = apSaveTMaster;
+        aHalfX = apSaveAHalfX; aHalfY = apSaveAHalfY; aCorner = apSaveACorner;
+        aBlack = apSaveABlack; aMaster = apSaveAMaster;
+        if (renderer != null) {
+            renderer.waveOn = apSaveWaveOn;
+            renderer.voiceBoost = apSaveVoiceBoost;
+            renderer.siriGeom = apSaveSiriGeom;
+        }
+        if (siriEnabled) measureSiriTargets(siriStr);
+        syncSiriTouchLayer();
+    }
+
+    // ── 壳里的内容 ────────────────────────────────────────────────────
+
+    private void buildApprovalViews(DshApprovalClient.Request req) {
+        removeApprovalViews();
+        if (wm == null) return;
+        float d = getResources().getDisplayMetrics().density;
+        int textMaxW = approvalMaxContentW();
+
+        // ① 文字块
+        android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(apPadX, apPadY, apPadX, apPadY);
+        box.setBackground(panelBackground());
+
+        android.widget.TextView apTitle = addText(box, req.title(), apTitlePx, 0xFFF2F5FA,
+                android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD), 3, textMaxW);
+        apTitle.setShadowLayer(dp(7), 0f, dp(1), 0xE0000000);   // 底变透后靠阴影保可读
+        String body = approvalBodyText(req);
+        if (body != null && !body.trim().isEmpty()) {
+            approvalBodyView = addText(box, body.trim(), apBodyPx, 0xFFAEB8C6,
+                    android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL),
+                    12, textMaxW);
+            approvalBodyView.setShadowLayer(dp(7), 0f, dp(1), 0xE0000000);
+            ((android.widget.LinearLayout.LayoutParams) approvalBodyView.getLayoutParams()).topMargin = apGap;
+        }
+        approvalContent = box;
+        approvalContentParams = overlayParams(
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+
+        // ② 交互层：选项 + 自由输入 + 发送
+        android.widget.LinearLayout col = new android.widget.LinearLayout(this);
+        col.setOrientation(android.widget.LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        if (req.isApproval()) {
+            addOption(col, "批准", "", AP_ACCENT_OK, "allowed-once");
+            addOption(col, "拒绝", "", AP_ACCENT_NO, "rejected");
+        } else {
+            approvalSingleQid = 0;
+            for (int qi = 0; qi < req.questions.size(); qi++) {
+                DshApprovalClient.Question q = req.questions.get(qi);
+                boolean multi = q.isMultiSelect();
+                if (qi > 0 && !q.question.isEmpty()) {
+                    android.widget.TextView tv = addText(col, q.question, apBodyPx, 0xFF9AA5B4,
+                            android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD),
+                            3, textMaxW);
+                    ((android.widget.LinearLayout.LayoutParams) tv.getLayoutParams()).topMargin = apGap;
+                }
+                for (int i = 0; i < q.labels.size(); i++) {
+                    String label = q.labels.get(i);
+                    String desc = i < q.descriptions.size() ? q.descriptions.get(i) : "";
+                    addOption(col, (multi ? "☐ " : (i + 1) + ". ") + label, desc, AP_ACCENT_ASK,
+                            q.id + "\u0000" + label);
+                }
+            }
+        }
+
+        // 自由输入（协议里的 custom）：提问一定有，审批没有
+        if (!req.isApproval()) {
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(optionBackground(0x22FFFFFF));
+            row.setPadding(apOptPadX, Math.round(apOptPadY * 0.6f), Math.round(apOptPadX * 0.5f),
+                    Math.round(apOptPadY * 0.6f));
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowLp.topMargin = apOptGap;
+
+            approvalInput = new android.widget.EditText(this);
+            approvalInput.setHint("或者在这里自己写…");
+            approvalInput.setHintTextColor(0x8AFFFFFF);
+            approvalInput.setTextColor(0xFFF2F5FA);
+            approvalInput.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+            approvalInput.setBackgroundColor(0x00000000);
+            approvalInput.setPadding(0, Math.round(6 * d), Math.round(8 * d), Math.round(6 * d));
+            approvalInput.setMaxLines(4);
+            approvalInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                    | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+            approvalInput.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND);
+            approvalInput.setOnEditorActionListener(new android.widget.TextView.OnEditorActionListener() {
+                @Override public boolean onEditorAction(android.widget.TextView v, int actionId,
+                                                        android.view.KeyEvent e) {
+                    submitCustomAnswer();
+                    return true;
+                }
+            });
+            row.addView(approvalInput, new android.widget.LinearLayout.LayoutParams(
+                    0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+            approvalSend = new android.widget.TextView(this);
+            approvalSend.setText("发送");
+            approvalSend.setTextColor(0xFFF4F8FF);
+            approvalSend.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+            approvalSend.setTypeface(android.graphics.Typeface.create("sans-serif-medium",
+                    android.graphics.Typeface.NORMAL));
+            approvalSend.setGravity(Gravity.CENTER);
+            approvalSend.setPadding(apOptPadX, Math.round(9 * d), apOptPadX, Math.round(9 * d));
+            approvalSend.setBackground(optionBackground(withAlpha(AP_ACCENT_ASK, 0x66)));
+            approvalSend.setClickable(true);
+            approvalSend.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { submitCustomAnswer(); }
+            });
+            row.addView(approvalSend);
+            col.addView(row, rowLp);
+        }
+
+        approvalActions = col;
+        approvalActionsScroll = new android.widget.ScrollView(this);
+        approvalActionsScroll.setVerticalScrollBarEnabled(false);
+        approvalActionsScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        approvalActionsScroll.addView(col, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
+        approvalActionsParams = overlayParams(
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+    }
+
+    /** 加一段文字，返回这个 TextView（调用方可以再改 LayoutParams）。 */
+    private android.widget.TextView addText(android.widget.LinearLayout parent, String text,
+                                            int sizePx, int color, android.graphics.Typeface tf,
+                                            int maxLines, int maxW) {
+        android.widget.TextView tv = new android.widget.TextView(this);
+        tv.setText(text);
+        tv.setTextColor(color);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, sizePx);
+        tv.setTypeface(tf);
+        tv.setGravity(Gravity.CENTER);
+        tv.setMaxLines(maxLines);
+        tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        tv.setMaxWidth(maxW);
+        android.widget.LinearLayout.LayoutParams lp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        parent.addView(tv, lp);
+        return tv;
+    }
+
+    /** 加一枚选项：可选描述排在标签下面（DSH 的 option.description）。 */
+    private void addOption(android.widget.LinearLayout parent, String label, String desc,
+                           int accent, String value) {
+        float d = getResources().getDisplayMetrics().density;
+        android.widget.LinearLayout item = new android.widget.LinearLayout(this);
+        item.setOrientation(android.widget.LinearLayout.VERTICAL);
+        item.setPadding(apOptPadX, apOptPadY, apOptPadX, apOptPadY);
+        item.setBackground(optionBackground(withAlpha(accent, 0x33)));
+        item.setClickable(true);
+        item.setMinimumHeight(Math.round(AP_OPT_MIN_H_DP * d));
+
+        android.widget.TextView lab = new android.widget.TextView(this);
+        lab.setText(label);
+        lab.setTextColor(0xFFF4F8FF);
+        lab.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 15f * d);
+        lab.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        lab.setMaxLines(3);
+        lab.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        item.addView(lab);
+
+        if (desc != null && !desc.trim().isEmpty()) {
+            android.widget.TextView dv = new android.widget.TextView(this);
+            dv.setText(desc.trim());
+            dv.setTextColor(0xFF9AA5B4);
+            dv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 12.5f * d);
+            dv.setTypeface(android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.NORMAL));
+            dv.setMaxLines(3);
+            dv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams dlp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+            dlp.topMargin = Math.round(4 * d);
+            item.addView(dv, dlp);
+        }
+
+        android.widget.LinearLayout.LayoutParams lp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = approvalOptViews.isEmpty() ? 0 : apOptGap;
+        item.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onOptionTap(v); }
+        });
+        parent.addView(item, lp);
+
+        approvalOptViews.add(item);
+        approvalOptLabels.add(lab);
+        approvalOptValues.add(value);
+        approvalOptChecked.add(Boolean.FALSE);
+        approvalOptAccents.add(accent);
+    }
+
+    /**
+     * 选项底：淡语义色玻璃 + 细描边，按下时提亮 —— 对齐苹果那种「玻璃里嵌一块浅色卡」，
+     * 而不是一整块实心色（实心色在球里看着很糊）。
+     */
+    private android.graphics.drawable.Drawable optionBackground(int color) {
+        float d = getResources().getDisplayMetrics().density;
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        g.setCornerRadius(16f * d);
+        g.setStroke(Math.max(1, Math.round(d)), withAlpha(color, 0x7A));
+        g.setColors(new int[]{ blend(color, 0x3A), blend(color, 0x1C) });
+        g.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
+        // 按下态单独给一版：同样形状，整体提亮
+        android.graphics.drawable.GradientDrawable pressed =
+                new android.graphics.drawable.GradientDrawable();
+        pressed.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        pressed.setCornerRadius(16f * d);
+        pressed.setStroke(Math.max(1, Math.round(d)), withAlpha(color, 0xB0));
+        pressed.setColors(new int[]{ blend(color, 0x6E), blend(color, 0x40) });
+        pressed.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
+        return new android.graphics.drawable.StateListDrawable() {{
+            addState(new int[]{android.R.attr.state_pressed}, pressed);
+            addState(new int[]{}, g);
+        }};
+    }
+
+    /** 把语义色按比例叠到深底上，得到一层「淡色玻璃」。 */
+    private static int blend(int color, int alpha) {
+        return withAlpha(color, alpha);
+    }
+
+    private static int lighten(int c) {
+        int a = (c >>> 24) & 0xFF;
+        int r = Math.min(255, (int) (((c >> 16) & 0xFF) * 1.35f));
+        int g = Math.min(255, (int) (((c >> 8) & 0xFF) * 1.35f));
+        int b = Math.min(255, (int) ((c & 0xFF) * 1.35f));
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private android.graphics.drawable.Drawable panelBackground() {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        g.setCornerRadius(26f * getResources().getDisplayMetrics().density);
+        g.setColor(AP_PANEL_BG);
+        return g;
+    }
+
+    private static String approvalBodyText(DshApprovalClient.Request req) {
+        if (req.isApproval()) return req.reason == null ? "" : req.reason;
+        StringBuilder sb = new StringBuilder();
+        for (DshApprovalClient.Question q : req.questions) {
+            String text = q.detail != null && !q.detail.isEmpty() ? q.detail : q.question;
+            if (text == null || text.isEmpty()) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(text);
+        }
+        return sb.length() > 0 ? sb.toString() : (req.reason == null ? "" : req.reason);
+    }
+
+    private void removeApprovalViews() {
+        if (approvalContent != null && wm != null) {
+            try { wm.removeView(approvalContent); } catch (Throwable ignored) { }
+        }
+        if (approvalActionsScroll != null && wm != null) {
+            try { wm.removeView(approvalActionsScroll); } catch (Throwable ignored) { }
+        }
+        approvalContent = null;
+        approvalActions = null;
+        approvalActionsScroll = null;
+        approvalBodyView = null;
+        approvalInput = null;
+        approvalSend = null;
+        approvalOptViews.clear();
+        approvalOptLabels.clear();
+        approvalOptValues.clear();
+        approvalOptChecked.clear();
+        approvalOptAccents.clear();
+        approvalSingleQid = -1;
+    }
+
+    private void hideApprovalWindows() {
+        if (approvalContent != null) approvalContent.setVisibility(View.GONE);
+        if (approvalActionsScroll != null) approvalActionsScroll.setVisibility(View.GONE);
+    }
+
+    private int approvalMaxContentW() {
+        float d = getResources().getDisplayMetrics().density;
+        // 球要接近方形，所以文字块不能铺满屏：给它一个「近乎方形」的宽度预算
+        int byRatio = Math.round(screenW * AP_TEXT_W_RATIO);
+        int byBall = (int) (siriMaxBallW() - 2 * (AP_PAD_X_DP + 16) * d);
+        return (int) Math.max(160 * d, Math.min(byRatio, byBall));
+    }
+
+    // ── 点击 → 回答案 ──────────────────────────────────────────────────
+
+    private void onOptionTap(View v) {
+        int idx = approvalOptViews.indexOf(v);
+        if (idx < 0 || approvalReq == null) return;
+        String value = approvalOptValues.get(idx);
+        try {
+            android.os.Vibrator vb = (android.os.Vibrator) getSystemService(VIBRATOR_SERVICE);
+            if (vb != null) vb.vibrate(20);
+        } catch (Throwable ignored) { }
+
+        if (approvalReq.isApproval()) {
+            Log.i("FloatingBall", "approval tap → " + value);
+            DshApprovalClient c = approvals();
+            if (c != null) {
+                if (c.debugMode()) c.writeDebugAnswer(value);
+                else if ("allowed-once".equals(value)) c.allow();
+                else c.reject();
+            }
+            hideApprovalPanel();
+            return;
+        }
+
+        // 提问：value = "<questionId>\0<label>"
+        boolean multi = approvalReq.questions.get(0).isMultiSelect();
+        if (multi) {                                  // 多选：点亮/取消，由「发送」提交
+            approvalOptChecked.set(idx, !approvalOptChecked.get(idx));
+            refreshOptionStyles();
+            return;
+        }
+        int sep = value.indexOf('\u0000');
+        String qid = sep < 0 ? "" : value.substring(0, sep);
+        String label = sep < 0 ? value : value.substring(sep + 1);
+        Log.i("FloatingBall", "question answer → " + qid + " = " + label);
+        sendAnswer(qid, java.util.Collections.singletonList(label), "");
+        hideApprovalPanel();
+    }
+
+    /** 自由输入提交：单选时清掉 selected（照抄 DSH 客户端的语义）。 */
+    private void submitCustomAnswer() {
+        if (approvalReq == null) return;
+        String text = approvalInput == null || approvalInput.getText() == null
+                ? "" : approvalInput.getText().toString().trim();
+        if (text.isEmpty()) return;
+        String qid = approvalReq.questions.isEmpty() ? "" : approvalReq.questions.get(0).id;
+        boolean multi = !approvalReq.questions.isEmpty() && approvalReq.questions.get(0).isMultiSelect();
+        java.util.List<String> picked;
+        if (multi) {
+            picked = new java.util.ArrayList<String>();
+            for (int i = 0; i < approvalOptValues.size(); i++) {
+                if (Boolean.TRUE.equals(approvalOptChecked.get(i))) {
+                    String v = approvalOptValues.get(i);
+                    int sep = v.indexOf('\u0000');
+                    picked.add(sep < 0 ? v : v.substring(sep + 1));
+                }
+            }
+        } else {
+            picked = java.util.Collections.emptyList();
+        }
+        Log.i("FloatingBall", "question custom answer → " + qid + " = " + text
+                + (picked.isEmpty() ? "" : " (+" + picked.size() + " 个选项)"));
+        sendAnswer(qid, picked, text);
+        hideApprovalPanel();
+    }
+
+    /** 把答案交给 DSH：审批是字符串，提问是 {answers:[…]} 对象。 */
+    private void sendAnswer(String questionId, java.util.List<String> selected, String custom) {
+        DshApprovalClient c = approvals();
+        if (c == null) return;
+        if (c.debugMode()) {
+            c.writeDebugAnswer(custom != null && !custom.isEmpty()
+                    ? custom : String.valueOf(selected));
+            return;
+        }
+        c.answerQuestion(questionId, selected, custom);
+    }
+
+    private DshApprovalClient approvals() {
+        SiriAssistant a = SiriAssistant.peek();
+        return a == null ? null : a.approvals();
+    }
+
+    private void refreshOptionStyles() {
+        for (int i = 0; i < approvalOptViews.size(); i++) {
+            boolean on = Boolean.TRUE.equals(approvalOptChecked.get(i));
+            int accent = approvalOptAccents.get(i);
+            approvalOptViews.get(i).setBackground(optionBackground(
+                    on ? withAlpha(accent, 0xF0) : accent));
+            String raw = approvalOptLabels.get(i).getText().toString();
+            if (raw.startsWith("☐ ") || raw.startsWith("☑ ")) {
+                approvalOptLabels.get(i).setText((on ? "☑ " : "☐ ") + raw.substring(2));
+            }
+        }
+    }
+
+    private void hideKeyboard() {
+        try {
+            if (approvalInput != null) {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) imm.hideSoftInputFromWindow(approvalInput.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    // ── 几何：只在档位变化时重算 ───────────────────────────────────────
+
+    private void applyApprovalGeometry() {
+        if (approvalContent == null || approvalActions == null) return;
+        float d = getResources().getDisplayMetrics().density;
+        float base = winSize * 0.9f;
+        if (base <= 0) base = 1f;
+        int textMaxW = approvalMaxContentW();
+        int actMaxW = textMaxW + 2 * apPadX;      // 交互层可以比文字块宽一点（按钮要有存在感）
+        float cap = screenH * 0.66f;              // 面板总高上限（球也按它收）
+
+        String key = textMaxW + "|" + actMaxW + "|" + apBodyPx + "|" + approvalOptValues.size()
+                + "|" + (approvalInput != null);
+        if (!apGeomDirty && key.equals(apGeomKey)) return;
+        apGeomKey = key;
+        apGeomDirty = false;
+
+        // 文字块：先把宽度上限给到每个 TextView，再量（否则量出「一行」的假高度）
+        for (int i = 0; i < approvalContent.getChildCount(); i++) {
+            View c = approvalContent.getChildAt(i);
+            if (c instanceof android.widget.TextView) ((android.widget.TextView) c).setMaxWidth(textMaxW);
+        }
+        apBodyPx = Math.round(14f * d);
+        approvalBodyClipped = false;
+        if (approvalBodyView != null) {
+            approvalBodyView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, apBodyPx);
+            approvalBodyView.setMaxLines(12);
+        }
+        remeasure(approvalContent, textMaxW);
+
+        // 放不下就压：先压交互层（说明文字行数 → 内边距），再压正文
+        for (int guard = 0; guard < 8; guard++) {
+            measureActions(actMaxW, Integer.MAX_VALUE);
+            float total = approvalContent.getMeasuredHeight() + apGap + approvalActions.getMeasuredHeight();
+            if (total <= cap) break;
+            if (apOptPadY > Math.round(7 * d)) {
+                apOptPadY = Math.max(Math.round(7 * d), apOptPadY - Math.round(2 * d));
+                for (int i = 0; i < approvalOptViews.size(); i++) {
+                    approvalOptViews.get(i).setPadding(apOptPadX, apOptPadY, apOptPadX, apOptPadY);
+                }
+                continue;
+            }
+            if (approvalBodyView != null && apBodyPx > Math.round(11 * d)) {
+                apBodyPx = Math.max(Math.round(11 * d), apBodyPx - Math.round(1.5f * d));
+                approvalBodyView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, apBodyPx);
+            } else if (approvalBodyView != null && approvalBodyView.getMaxLines() > 2) {
+                approvalBodyView.setMaxLines(approvalBodyView.getMaxLines() - 2);
+                approvalBodyClipped = true;
+            } else {
+                break;                            // 选项实在太多：球封顶，内容由窗口裁
+            }
+            remeasure(approvalContent, textMaxW);
+        }
+        apTextW = approvalContent.getMeasuredWidth();
+        apTextH = approvalContent.getMeasuredHeight();
+        // 交互层最多能占多高：面板上限 − 文字块 − 缝。超出的部分在它自己的框里滚，
+        // **绝不允许压到文字块上**（之前没夹高度，选项直接盖住了说明文字）。
+        int actBudget = Math.max(Math.round(120 * d),
+                (int) (cap - apTextH - apGap - apPadY / 2f));
+        measureActions(actMaxW, actBudget);
+        View actBox = approvalActionsScroll != null ? (View) approvalActionsScroll : approvalActions;
+        apActW = Math.min(actBox.getMeasuredWidth(), actMaxW);
+        apActH = Math.min(actBox.getMeasuredHeight(), actBudget);
+
+        // 球：接近方形（取文字块与交互层里更宽的那个），高度装下两块 + 留白
+        float innerW = Math.max(apTextW, apActW);
+        float halfW = Math.max(base * minHalfX, innerW / 2f + apPadX / 2f + dp(4));
+        float halfH = Math.max(base * minHalfY,
+                (apTextH + apGap + apActH) / 2f + apPadY / 2f + dp(6));
+        float maxHalfW = screenW * 0.92f / 2f;
+        float maxHalfH = screenH * 0.68f / 2f;
+        halfW = Math.min(halfW, maxHalfW);
+        halfH = Math.min(halfH, maxHalfH);
+        halfH = Math.max(halfH, halfW * 0.9f);            // 别扁成一条：至少接近方形
+        halfW = Math.max(halfW, halfH * 0.62f);
+        halfW = Math.min(halfW, maxHalfW);
+        halfH = Math.min(halfH, maxHalfH);
+
+        float cr = 0.28f * Math.min(halfW, halfH);        // squircle：比方角柔、比椭圆方正
+        aprCorner = Math.max(0.28f, Math.min(minCorner, cr / Math.max(1f, halfH)));
+        aprHalfX = halfW / base;
+        aprHalfY = halfH / base;
+
+        float contentBottomPx = apTextH + apGap + apActH + dp(8);
+        float ny = 1f - contentBottomPx / Math.max(1f, halfH);
+        float gap = Math.max(0f, Math.min(0.25f, siriBlackStep / 1000f));
+        float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
+        aprBlack = Math.max(0f, Math.min(1.5f, black1Base - (ny - gap)));
+    }
+
+    private void remeasure(View v, int maxW) {
+        v.measure(View.MeasureSpec.makeMeasureSpec(Math.max(1, maxW), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+    }
+
+    /** 交互层（带滚动）按「最多这么高」来量：超了就滚，不压文字。 */
+    private void measureActions(int maxW, int maxH) {
+        View v = approvalActionsScroll != null ? (View) approvalActionsScroll : approvalActions;
+        v.measure(View.MeasureSpec.makeMeasureSpec(Math.max(1, maxW), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(Math.max(1, maxH), View.MeasureSpec.AT_MOST));
+    }
+
+    // ── 窗口 ──────────────────────────────────────────────────────────
+
+    private WindowManager.LayoutParams overlayParams(int w, int h, int flags) {
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+        WindowManager.LayoutParams p = new WindowManager.LayoutParams(w, h, type, flags, PixelFormat.TRANSLUCENT);
+        p.gravity = Gravity.TOP | Gravity.START;
+        return p;
+    }
+
+    private void ensureApprovalWindows() {
+        if (wm == null) return;
+        if (approvalContent != null && approvalContent.getParent() == null) {
+            try { wm.addView(approvalContent, approvalContentParams); }
+            catch (Throwable t) { Log.w("FloatingBall", "add approval content failed: " + t); }
+        }
+        if (approvalActionsScroll != null && approvalActionsScroll.getParent() == null) {
+            try { wm.addView(approvalActionsScroll, approvalActionsParams); }
+            catch (Throwable t) { Log.w("FloatingBall", "add approval actions failed: " + t); }
+        }
+        if (approvalContent != null) approvalContent.setVisibility(View.VISIBLE);
+        if (approvalActionsScroll != null) approvalActionsScroll.setVisibility(View.VISIBLE);
+        // 拖动层必须藏起来（它在按钮之上且铺满屏，会吃掉点击）
+        if (approvalTouch != null) approvalTouch.setVisibility(View.GONE);
+        if (approvalTouch == null) {
+            View v = new View(this);
+            v.setBackgroundColor(0x00000000);
+            v.setClickable(true);
+            approvalTouchParams = overlayParams(2, 2,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            v.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View view, MotionEvent e) {
+                    return onApprovalTouch(e);
+                }
+            });
+            try { wm.addView(v, approvalTouchParams); approvalTouch = v; }
+            catch (Throwable t) { Log.w("FloatingBall", "add approval touch failed: " + t); }
+        }
+    }
+
+    /** 球窗口：完整包住这颗球（否则球面会被窗口裁掉）。 */
+    private void updateApprovalWindow() {
+        if (wm == null || glView == null || !approvalShown) return;
+        float m = dp(24);
+        float base = winSize * 0.9f;
+        float hw = aprHalfX > 0f ? aprHalfX : minHalfX;
+        float hh = aprHalfY > 0f ? aprHalfY : minHalfY;
+        int W = Math.min(screenW, Math.max(2, Math.round(2 * (base * hw + m))));
+        int H = Math.min(screenH, Math.max(2, Math.round(2 * (base * hh + m))));
+        if (W == winW && H == winH) return;
+        float bcx = params.x + winW * 0.5f;
+        float bcy = params.y + winH * 0.5f;
+        winW = W; winH = H;
+        params.width = W; params.height = H;
+        params.x = Math.round(bcx - W * 0.5f);
+        params.y = Math.round(bcy - H * 0.5f);
+        params.x = Math.max(-W / 2, Math.min(screenW - W / 2, params.x));
+        params.y = Math.max(-Math.round(dp(24)), Math.min(screenH - H + Math.round(dp(24)), params.y));
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        glView.post(winSync);
+        Log.i("FloatingBall", "approval window -> " + W + "x" + H + " at " + params.x + "," + params.y);
+    }
+
+    /** 摆放两块内容；同档位下不重复动窗口（这就是「不跳」的关键）。 */
+    private void updateApprovalLayout() {
+        if (!approvalShown || approvalContent == null || approvalActions == null || wm == null) return;
+        if (approvalTouch != null && approvalTouch.getVisibility() == View.VISIBLE) {
+            approvalTouch.setVisibility(View.GONE);   // 双保险
+        }
+        float winXnow = (renderer != null) ? renderer.winX : params.x;
+        float winYnow = (renderer != null) ? renderer.winY : params.y;
+        float base = winSize * 0.9f;
+        float hypx = base * aHalfY * aMaster;
+        float hxpx = base * aHalfX * aMaster;
+        float sy = winYnow + winH * 0.5f;
+        float ballTop = sy - hypx;
+        float sysOffset = winYnow - params.y;
+
+        float blockH = apTextH + apGap + apActH;
+        float topPad = Math.max(dp(4), (hypx - Math.max(0f, aBlack) * hypx - blockH) / 2f);
+        int textX = Math.round(winXnow + winW / 2f - apTextW / 2f);
+        int textY = Math.round(ballTop + topPad - sysOffset);
+        int actX = Math.round(winXnow + winW / 2f - apActW / 2f);
+        int actY = Math.round(textY + apTextH + apGap);
+
+        int key = textX * 31 + textY * 17 + actX * 7 + actY * 3 + apTextW + apActW + apActH;
+        if (key == apLayoutKey) return;
+        apLayoutKey = key;
+
+        if (approvalContentParams.width != apTextW || approvalContentParams.height != apTextH) {
+            approvalContentParams.width = Math.max(1, apTextW);
+            approvalContentParams.height = Math.max(1, apTextH);
+        }
+        approvalContentParams.x = textX;
+        approvalContentParams.y = textY;
+        try { wm.updateViewLayout(approvalContent, approvalContentParams); } catch (Throwable ignored) { }
+
+        View actBox = approvalActionsScroll != null ? (View) approvalActionsScroll : approvalActions;
+        if (approvalActionsParams.width != apActW || approvalActionsParams.height != apActH) {
+            approvalActionsParams.width = Math.max(1, apActW);
+            approvalActionsParams.height = Math.max(1, apActH);
+        }
+        approvalActionsParams.x = actX;
+        approvalActionsParams.y = actY;
+        try { wm.updateViewLayout(actBox, approvalActionsParams); } catch (Throwable ignored) { }
+    }
+
+    private void updateApprovalTouchLayer(float hxpx, float hypx, float winXnow, float winYnow) {
+        if (approvalTouch == null || approvalTouchParams == null || wm == null) return;
+        // 实测教训：这个「拖动层」虽然只给了 2x2 的初始尺寸，但 FLAG_LAYOUT_NO_LIMITS +
+        // TOP|START 会让它真的铺满整屏（dumpsys: frame=[0,96][1080,2296]），而它加在
+        // 按钮窗口之后 → z 更高 → **把选项按钮的点击全吃掉了**（按钮看得见点不动）。
+        // 面板期间球在屏幕中间，本来也不需要在球上拖动，所以直接藏起来，把点击还给按钮。
+        if (approvalTouch.getVisibility() != View.GONE) approvalTouch.setVisibility(View.GONE);
+        return;
+    }
+
+
+    private boolean onApprovalTouch(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                apDownX = e.getRawX(); apDownY = e.getRawY();
+                apStartX = params.x; apStartY = params.y;
+                apDragging = false;
+                return true;
+            case MotionEvent.ACTION_MOVE: {
+                float moved = Math.abs(e.getRawX() - apDownX) + Math.abs(e.getRawY() - apDownY);
+                if (!apDragging && moved > dp(12)) apDragging = true;
+                if (apDragging) {
+                    params.x = (int) (apStartX + (e.getRawX() - apDownX));
+                    params.y = (int) (apStartY + (e.getRawY() - apDownY));
+                    params.x = Math.max(-winW / 2, Math.min(screenW - winW / 2, params.x));
+                    params.y = Math.max(-Math.round(dp(24)),
+                            Math.min(screenH - winH + Math.round(dp(24)), params.y));
+                    if (wm != null) wm.updateViewLayout(glView, params);
+                    glView.post(winSync);
+                }
+                return true;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                apDragging = false;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static boolean isApprovalUp() {
+        FloatingBallService s = INSTANCE;
+        return s != null && (s.approvalShown || s.approvalClosing);
+    }
+
+    static String approvalSummary() {
+        FloatingBallService s = INSTANCE;
+        if (s == null || s.approvalReq == null) return "";
+        DshApprovalClient.Request r = s.approvalReq;
+        return r.title() + " · " + (r.isApproval() ? "审批" : "提问")
+                + " · 选项 " + s.approvalOptViews.size()
+                + (s.approvalInput != null ? " +输入" : "");
+    }
+
+    static void debugApproval(final String toolName, final String reason) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                FloatingBallService s2 = INSTANCE;
+                if (s2 == null) return;
+                DshApprovalClient.Request req = new DshApprovalClient.Request();
+                req.event = "approval/request";
+                req.eventId = "debug-" + System.currentTimeMillis();
+                req.toolName = toolName == null || toolName.isEmpty() ? "bash" : toolName;
+                req.reason = reason == null ? "" : reason;
+                s2.showApprovalPanel(req);
+            }
+        });
+    }
+
+    /** 调试：造一条「多选项 + 自由输入」的提问，用来验收自适应版式。 */
+    static void debugQuestion() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                FloatingBallService s2 = INSTANCE;
+                if (s2 == null) return;
+                DshApprovalClient.Request req = new DshApprovalClient.Request();
+                req.event = "user-questions/request";
+                req.eventId = "debug-q-" + System.currentTimeMillis();
+                DshApprovalClient.Question q = new DshApprovalClient.Question();
+                q.id = "mode";
+                q.header = "选择运行模式";
+                q.question = "打开 QQ 需要操作屏幕，请选择运行模式：";
+                q.labels.add("前台 Foreground");
+                q.descriptions.add("在物理屏幕上显示，你能看到画面和触摸光效。");
+                q.labels.add("后台 Background");
+                q.descriptions.add("在隔离的虚拟显示中静默运行，不占用你的屏幕。");
+                q.labels.add("先不动，我自己来");
+                q.descriptions.add("什么都不做，你去网页端处理。");
+                req.questions.add(q);
+                s2.showApprovalPanel(req);
+            }
+        });
+    }
+
+    static FloatingBallService instance() { return INSTANCE; }
+
+    static void dismissApprovalIfAny() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                FloatingBallService s2 = INSTANCE;
+                if (s2 != null && s2.approvalShown) s2.hideApprovalPanel();
+            }
+        });
+    }
+
+    /** 调试试用：把球体这一帧存成 PNG，返回文件路径。 */
     public static String captureBallPng() {
         FloatingBallService s = INSTANCE;
         if (s == null || s.glView == null) return "";
-        // 助手状态直接写进日志：调「思考中」的光效时，靠它确认那一刻球处于哪个形态
         Log.i("FloatingBall", "ball capture requested (state=" + SiriAssistant.stateName()
                 + " waveMode=" + s.renderer.waveMode + " orbMix=" + s.renderer.orbMix + ")");
         return s.captureBallPngNow();
@@ -291,7 +1264,6 @@ public class FloatingBallService extends Service {
         FloatingBallService s = this;
         String path = "";
         try {
-            // 写内部私有目录：Termux 侧看不到 /storage/emulated/0，内部目录 root 可直接读
             java.io.File dir = s.getFilesDir();
             path = new java.io.File(dir, "ball-capture.png").getAbsolutePath();
             final String out = path;
@@ -327,7 +1299,8 @@ public class FloatingBallService extends Service {
         return path;
     }
 
-    /** 助手开始工作前确保球在 Siri 形变模式下（否则文字没有地方显示）。 */    public static void ensureSiriForAssistant() {
+    /** 助手开始工作前确保球在 Siri 形变模式下（否则内容没有地方显示）。 */
+    public static void ensureSiriForAssistant() {
         FloatingBallService s = INSTANCE;
         if (s == null || s.siriEnabled) return;
         s.main.post(new Runnable() {
@@ -337,6 +1310,10 @@ public class FloatingBallService extends Service {
             }
         });
     }
+
+    private static int withAlpha(int color, int a) { return (color & 0x00FFFFFF) | (a << 24); }
+
+    private static String round3(float v) { return String.valueOf(Math.round(v * 1000f) / 1000f); }
 
     // ── Siri 模式：球弹出、文字从球内出现、球随文字实时变宽变高、圆角变小 ──
     private boolean siriEnabled = false;
@@ -623,7 +1600,8 @@ public class FloatingBallService extends Service {
     /** 触摸层跟随文字区域（有文字才有触摸层，没文字就收起，球的手势完全不受影响）。 */
     private void syncSiriTouchLayer() {
         if (siriTouch == null || siriTouchParams == null || wm == null) return;
-        boolean show = siriTextShown && siriStr != null && !siriStr.trim().isEmpty();
+        boolean show = siriTextShown && siriStr != null && !siriStr.trim().isEmpty()
+                && !approvalShown;      // 审批球在屏上时原球的文字触摸层必须让路
         int wantVis = show ? View.VISIBLE : View.GONE;
         if (siriTouch.getVisibility() != wantVis) {
             siriTouch.setVisibility(wantVis);
@@ -659,6 +1637,8 @@ public class FloatingBallService extends Service {
     private void showSiriTextNow() {
         if (siriText == null) return;
         siriTextShown = true;
+        // 审批球在屏上时原球文字一律不露头（审批结束后 measureSiriTargets 会重新放出来）
+        if (approvalShown) return;
         if (siriText.getVisibility() != View.VISIBLE) siriText.setVisibility(View.VISIBLE);
         syncSiriTouchLayer();             // 有字 → 触摸层铺在文字区域上
     }
@@ -678,6 +1658,10 @@ public class FloatingBallService extends Service {
     }
 
     private void applySiriText(String text) {
+        // 面板挂着的时候，Siri 那条文字通道一律让路：球里的内容此刻属于面板。
+        // 否则镜像/静默清空写一次文字就会触发 measureSiriTargets()，把球改回小球尺寸，
+        // 面板内容立刻溢出玻璃（实拍踩过）。
+        if (approvalShown || approvalClosing) return;
         String prev = siriStr;
         siriStr = text == null ? "" : text;
         if (siriText != null) siriText.setText(displayTextOf(siriStr));
@@ -700,6 +1684,7 @@ public class FloatingBallService extends Service {
     }
 
     private void measureSiriTargets(String s) {
+        if (approvalShown) return;      // 面板在屏上：球尺寸归面板管，别在这儿改
         int n = s == null ? 0 : s.trim().length();
         if (n <= 1) {                           // 0/1 个字：最短形态 = 原来的水晶球
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
@@ -830,6 +1815,14 @@ public class FloatingBallService extends Service {
             float dt = siriTickLast == 0 ? 0.016f : Math.min(0.05f, (now - siriTickLast) / 1000f);
             siriTickLast = now;
             float k = 1f - (float) Math.exp(-dt / 0.06);
+            // 面板挂着时**每帧把目标值钉回审批那一套**：Siri 那条路（镜像打字、静默清空、
+            // 新一轮提问）随时可能调 measureSiriTargets() 把 tHalf* 改成小球尺寸，
+            // 这里不许它影响面板 —— 面板撤走时才把控制权交还（approvalShown=false）。
+            if (approvalShown) {
+                tMaster = 1f;
+                tHalfX = aprHalfX; tHalfY = aprHalfY;
+                tCorner = aprCorner; tBlack = aprBlack;
+            }
             aMaster += (tMaster - aMaster) * k;
             aHalfX += (tHalfX - aHalfX) * k;
             aHalfY += (tHalfY - aHalfY) * k;
@@ -845,7 +1838,18 @@ public class FloatingBallService extends Service {
                 renderer.svPosX = 0.5f;
                 renderer.svPosY = 0.5f;
             }
-            updateSiriTextPos();
+            // 审批球挂着的时候：几何由审批那一套驱动，原球那条 Siri 文字通道一律不碰 ——
+            // 这样原球的文字、钉住状态、光效设定在整个审批期间原封不动。
+            if (approvalShown) {
+                updateApprovalWindow();
+                updateApprovalLayout();
+                updateApprovalTouchLayer(winSize * 0.9f * aHalfX * aMaster,
+                        winSize * 0.9f * aHalfY * aMaster,
+                        renderer != null ? renderer.winX : params.x,
+                        renderer != null ? renderer.winY : params.y);
+            } else {
+                updateSiriTextPos();
+            }
             main.postDelayed(this, 16);
         }
     };
@@ -933,6 +1937,8 @@ public class FloatingBallService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        Log.i("FloatingBall", "onCreate pid=" + android.os.Process.myPid()
+                + " uid=" + android.os.Process.myUid() + " ver=" + BuildConfigVersion.V);
         running = true;
         INSTANCE = this;
         exemptHiddenApis();
@@ -941,10 +1947,19 @@ public class FloatingBallService extends Service {
         // DSH 里只要 AI 在回话（不管是谁问的），球就逐字出字。
         try {
             SiriAssistant a = SiriAssistant.get(this);
+            Log.i("FloatingBall", "assistant got: enabled=" + a.enabled()
+                    + " approvalOrb=" + a.approvalEnabled());
             if (a.enabled()) a.startMirror();
+            a.startApprovals();          // 审批球：DSH 要你批的时候就弹另一颗球
+            Log.i("FloatingBall", "assistant init done");
         } catch (Throwable t) {
-            Log.w("FloatingBall", "siri assistant init failed: " + t);
+            Log.w("FloatingBall", "siri assistant init failed: " + t, t);
         }
+    }
+
+    /** 构建版本号（日志里认版本用，省得怀疑装错了包）。 */
+    static final class BuildConfigVersion {
+        static final String V = "approval-orb-4";
     }
 
     /** 允许反射调用 @hide 的 SurfaceControl#setSkipScreenshot（抓屏排除本窗口）。
@@ -1132,6 +2147,8 @@ public class FloatingBallService extends Service {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        // 审批球挂着时不抢手势：屏幕这时候归审批球用
+                        if (approvalShown) return false;
                         // Siri 模式：只有按在水晶球上才响应（不再是整个窗口）
                         if (siriEnabled && !inSiriBall(e.getX(), e.getY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
@@ -1336,6 +2353,11 @@ public class FloatingBallService extends Service {
         main.removeCallbacks(renderTick);
         main.removeCallbacks(siriTick);
         removeSiriText();
+        removeApprovalViews();            // 面板的两个内层窗口得自己收
+        try {
+            SiriAssistant a = SiriAssistant.peek();
+            if (a != null) a.stopApprovals();
+        } catch (Throwable ignored) { }
         if (rootCapture != null) { rootCapture.stop(); rootCapture = null; }
         try { glView.onPause(); } catch (Exception ignored) { }
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay = null; }

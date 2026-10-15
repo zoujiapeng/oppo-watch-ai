@@ -103,6 +103,78 @@ public final class SiriAssistant {
         // 传输层默认指向本机 DSH 服务；地址可在设置页改，存在同一个 prefs 里
         setTransport(new DshHttpTransport(app, sp.getString("endpoint", DshHttpTransport.DEFAULT_ENDPOINT)));
         mirrorEnabled = sp.getBoolean("mirror", true);
+        approvalEnabled = sp.getBoolean("approval_orb", true);
+    }
+
+    // ── 审批球：DSH 要你点「批准/拒绝」时，弹一颗新的液态玻璃球 ──────────
+    // 这条链路和语音助手是两回事（不录音、不提问、不碰球内文字），只是共用
+    // 同一个 DSH 地址与悬浮球服务。见 DshApprovalClient 的头注释。
+
+    private DshApprovalClient approvals;
+    private boolean approvalEnabled = true;
+    private volatile String approvalStatus = "";
+
+    /** 审批流的客户端（球与设置页共用同一条连接）。 */
+    public synchronized DshApprovalClient approvals() {
+        if (approvals == null) approvals = new DshApprovalClient(app);
+        return approvals;
+    }
+
+    public boolean approvalEnabled() { return approvalEnabled; }
+
+    public void setApprovalEnabled(boolean v) {
+        approvalEnabled = v;
+        prefs().edit().putBoolean("approval_orb", v).apply();
+        if (v) startApprovals(); else stopApprovals();
+    }
+
+    /** 状态：连没连上审批流（设置页展示）。 */
+    public String approvalStatus() { return approvalStatus; }
+
+    /** 起审批流；球挂上回调，请求来了就弹球。 */
+    public void startApprovals() {
+        try {
+            startApprovalsInner();
+        } catch (Throwable t) {
+            Log.w(TAG, "startApprovals failed: " + t, t);
+        }
+    }
+
+    private void startApprovalsInner() {
+        Log.i(TAG, "startApprovals: enabled=" + approvalEnabled);
+        if (!approvalEnabled) return;
+        final DshApprovalClient c = approvals();
+        c.setListener(new DshApprovalClient.Listener() {
+            @Override public void onRequest(DshApprovalClient.Request request) {
+                Log.i(TAG, "approval listener onRequest: "
+                        + (request == null ? "null" : request.title()));
+                FloatingBallService.ensureSiriForAssistant();
+                FloatingBallService s = FloatingBallService.instance();
+                if (s != null) s.onApprovalRequest(request);
+                else Log.w(TAG, "审批来了但球没起来（悬浮球未开启？）");
+            }
+
+            @Override public void onWithdraw(String eventId) {
+                FloatingBallService s = FloatingBallService.instance();
+                if (s != null) s.onApprovalWithdraw(eventId);
+            }
+
+            @Override public void onStatus(String note) {
+                approvalStatus = note;
+            }
+        });
+        c.start();
+    }
+
+    public void stopApprovals() {
+        if (approvals != null) approvals.stop();
+        FloatingBallService.dismissApprovalIfAny();
+        approvalStatus = "审批球已关闭";
+    }
+
+    public static synchronized SiriAssistant get(Context c) {
+        if (instance == null) instance = new SiriAssistant(c);
+        return instance;
     }
 
     public void setMirrorEnabled(boolean v) {
@@ -188,11 +260,6 @@ public final class SiriAssistant {
         return app.getSharedPreferences("siri_assistant", Context.MODE_PRIVATE);
     }
 
-    public static synchronized SiriAssistant get(Context c) {
-        if (instance == null) instance = new SiriAssistant(c);
-        return instance;
-    }
-
     public static synchronized SiriAssistant peek() { return instance; }
 
     public State state() { return state; }
@@ -227,6 +294,8 @@ public final class SiriAssistant {
         } else {
             startMirror();
         }
+        // 审批球是独立的一条链路：语音助手开着或关着，它都照常工作
+        if (v) startApprovals(); else stopApprovals();
     }
     public boolean enabled() { return enabled; }
 

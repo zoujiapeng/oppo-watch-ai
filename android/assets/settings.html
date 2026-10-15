@@ -150,6 +150,25 @@
       <div class="muted" style="margin-top:4px">助手状态：<b id="asstState">—</b> · 球 Siri 模式：<b id="ballSiri">—</b></div>
       <div class="muted" style="margin-top:4px">镜像：<b id="mirrorState">—</b></div>
     </div>
+
+    <div class="row" style="margin-top:16px"><label>审批球（DSH 要你点批准时弹新球）</label><div class="switch" id="swAppr"></div></div>
+    <div id="apprBox" style="display:none;margin-top:8px">
+      <div class="muted">DSH 里任何一条会话需要你点头（审批 / 提问）时，<b>这颗球自己会展开</b>成一张
+        近方形的液态玻璃卡片：上面是标题与说明，下面是可点的选项，点一下就替你回给 DSH。<br>
+        <b>选项是自适应的</b>：审批固定「批准 / 拒绝」；提问（<code>ask_user_question</code>）多少条、
+        什么文案、能不能多选，都按 DSH 给的排。<br>
+        <b>提问还带自由输入框</b>（协议里的 custom）：选项都不合适就自己写，写完点「发送」；
+        单选时「自己写」和「选一个」互斥。<br>
+        卡片不带 Siri 波：只留水晶球本来的折射 / 黑顶 / 赤道亮线，字和选项落在黑区里。
+        答完（或你在网页端答了）球就收回原样，原球状态一点不动。<br>
+        它跟网页端是「谁先答谁算」：你在浏览器里点了，球会自己收回去。</div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnApprDemo">叫一条假审批（调版式）</button>
+        <button id="btnQDemo">叫一条假提问（多选项+输入）</button>
+        <button id="btnApprDismiss">撤掉球上的审批</button>
+      </div>
+      <div class="muted" style="margin-top:6px">连接：<b id="apprState">—</b> · 球上正挂着：<b id="apprPending">—</b></div>
+    </div>
     <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
     <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
       <b>采集方式</b>：<b>录屏 MediaProjection</b>=需授予「屏幕录制」，有系统录制标记；<b>Root 直采</b>=root 直读合成帧，无弹窗、无标记（需设备已 root）。<br>
@@ -454,6 +473,33 @@
     try { W.setMirrorEnabled(on); } catch (e) {}
     swAsstMirror.classList.toggle('on', on);
   });
+  // 审批球开关 + 调试入口
+  var swAppr = document.getElementById('swAppr');
+  var apprBox = document.getElementById('apprBox');
+  var apprStateEl = document.getElementById('apprState');
+  var apprPendingEl = document.getElementById('apprPending');
+  function syncAppr() {
+    var on = true;
+    try { on = !!W.getApprovalOrb(); } catch (e) {}
+    swAppr.classList.toggle('on', on);
+    apprBox.style.display = on ? 'block' : 'none';
+  }
+  syncAppr();
+  swAppr.addEventListener('click', function () {
+    var on = !swAppr.classList.contains('on');
+    try { W.setApprovalOrb(on); } catch (e) {}
+    syncAppr();
+  });
+  document.getElementById('btnApprDemo').addEventListener('click', function () {
+    try { W.debugApproval('bash', '这个命令要在沙箱之外执行：rm -rf /data/local/tmp/probe（试一下审批球长什么样）'); } catch (e) {}
+  });
+  document.getElementById('btnQDemo').addEventListener('click', function () {
+    try { W.debugQuestion(); } catch (e) {}
+  });
+  document.getElementById('btnApprDismiss').addEventListener('click', function () {
+    try { W.dismissApproval(); } catch (e) {}
+  });
+
   // 实时回读球内文字 / 助手状态，确认 DSH 的回答真的写进了球里
   var ballTextEl = document.getElementById('ballText');
   var asstStateEl = document.getElementById('asstState');
@@ -465,6 +511,8 @@
     try { asstStateEl.textContent = W.getAssistantState(); } catch (e) {}
     try { ballSiriEl.textContent = W.isBallSiriOn() ? '开' : '关'; } catch (e) {}
     try { mirrorEl.textContent = W.getMirrorStatus() || '未连接'; } catch (e) {}
+    try { apprStateEl.textContent = W.getApprovalStatus() || '未连接'; } catch (e) {}
+    try { apprPendingEl.textContent = W.getApprovalPending() || '—'; } catch (e) {}
   }, 1000);
 
   var siriDy = document.getElementById('siriDy'), vSiriDy = document.getElementById('vSiriDy');

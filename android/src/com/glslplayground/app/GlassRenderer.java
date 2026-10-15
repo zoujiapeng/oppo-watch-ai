@@ -58,6 +58,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     /** 波↔圆点的交叉淡化进度：0=纯 Siri 波，1=纯流体圆点（见 FloatingBallService.setAssistantState）。 */
     public volatile float orbMix = 0f;
 
+    /** 审批/提问面板模式：1 时黑区底部带强调色渐变与光晕（0 = 普通球，纯黑区）。 */
+    public volatile float panelMode = 0f;
+    /** 保留字段：面板现在是纯黑（不再用颜色），留在这里避免别处改动，值不参与绘制。 */
+    public volatile float panelAccentR = 1f, panelAccentG = 0.30f, panelAccentB = 0.24f;
+
     public volatile float winX, winY;
 
     // ── GL 资源 ──
@@ -169,6 +174,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
+        // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
+        "uniform float uPanelMode;\n" +
+        "uniform vec3 uPanelAccent;\n" +
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
@@ -312,7 +320,24 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float b1 = uBlack1 - uBlackOffset;\n" +
         "  float blackMask = smoothstep(b0, b1, ny);\n" +
         "  blackMask = blackMask*blackMask*(3.0-2.0*blackMask);\n" +
-        "  col = mix(col, vec3(0.012,0.015,0.025), blackMask*uTopDarken);\n" +
+        // 普通球：黑区是深色玻璃。面板：底色**保持黑**，但做成「上暗下亮」——
+        // 顶上几乎纯黑，越往下越亮，最底下那一条亮到有点刺眼（像底部藏了个光源）。
+        // 面板底色：顶上**纯黑**（给文字垫底），往下**加速**变透，底部基本只剩玻璃。
+        // 玻璃的折射/色散/黑顶/赤道线在下面那半段照旧可见（苹果那张卡片就是这个层次：
+        // 壳是玻璃，只有字/按钮那几块有底）。
+        // 输出是**预乘 alpha**，减透明度要同时缩 col 与 alpha。
+        "  vec3 blackCol = vec3(0.012,0.015,0.025);\n" +
+        "  float panelFade = 1.0;\n" +
+        "  float tBlackK = 1.0;\n" +
+        "  if(uPanelMode > 0.5){\n" +
+        "    float rise = clamp((1.0 - ny) / 1.5, 0.0, 1.0);\n" +      // 0=球顶 1=黑区底
+        "    blackCol = vec3(0.0);\n" +                               // 纯黑，不带任何颜色
+        "    panelFade = 1.0;\n" +
+        // 顶上**纯黑**（1.0），往下加速变透：pow(rise, 2.6) 让前段几乎不变、
+        // 后半段掉得很快（不是平缓线性），到底只剩 0.12 —— 底下几乎是玻璃本身。
+        "    tBlackK = mix(1.0, 0.12, pow(rise, 2.6));\n" +
+        "  }\n" +
+        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         "  if(uWaveAmp > 0.001){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
@@ -345,6 +370,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
         "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
         "  float aa = smoothstep(1.5, -1.5, sd);\n" +
+        "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
         "  gl_FragColor = vec4(col * aa, aa);\n" +   // 预乘 alpha，窗外透明
         "}\n";
 
@@ -559,6 +585,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panelMode);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uPanelAccent"),
+                panelAccentR, panelAccentG, panelAccentB);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);

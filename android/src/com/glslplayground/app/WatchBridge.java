@@ -434,6 +434,53 @@ public class WatchBridge {
         return SiriAssistant.get(act).mirrorStatus();
     }
 
+    // ─────────── 审批球（DSH 要你点批准/拒绝时弹的那颗新球）───────────
+
+    @JavascriptInterface
+    public boolean getApprovalOrb() {
+        return SiriAssistant.get(act).approvalEnabled();
+    }
+
+    @JavascriptInterface
+    public void setApprovalOrb(final boolean v) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setApprovalEnabled(v); }
+        });
+    }
+
+    @JavascriptInterface
+    public String getApprovalStatus() {
+        return SiriAssistant.get(act).approvalStatus();
+    }
+
+    /** 球上正挂着什么审批（空串 = 没有）。 */
+    @JavascriptInterface
+    public String getApprovalPending() {
+        return FloatingBallService.approvalSummary();
+    }
+
+    /** 调试：叫一条假审批出来，对着调球的版式与点击（不需要真触发 DSH 审批）。 */
+    @JavascriptInterface
+    public void debugApproval(final String toolName, final String reason) {
+        ui(new Runnable() {
+            public void run() { FloatingBallService.debugApproval(toolName, reason); }
+        });
+    }
+
+    /** 调试：叫一条「多选项 + 自由输入」的假提问，验收自适应版式。 */
+    @JavascriptInterface
+    public void debugQuestion() {
+        ui(new Runnable() {
+            public void run() { FloatingBallService.debugQuestion(); }
+        });
+    }
+
+    /** 调试：把球上那条假审批撤掉。 */
+    @JavascriptInterface
+    public void dismissApproval() {
+        FloatingBallService.dismissApprovalIfAny();
+    }
+
     /** 把球体这一帧存成 PNG（调试用），返回文件路径。 */
     @JavascriptInterface
     public String captureBall() {

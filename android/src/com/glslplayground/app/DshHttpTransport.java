@@ -563,6 +563,23 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         return sb.toString();
     }
 
+    // ── 给审批流用的几个入口（同一个 cookie / 同一个地址）────────────────
+
+    /** 换一次签名 cookie 并把 cookie 串交出去（WebSocket 握手要带它）。 */
+    String authCookie() throws IOException {
+        if (cookie == null) authenticate();
+        return cookie;
+    }
+
+    String host() { return hostOf(); }
+
+    int port() { return portOf(); }
+
+    /** 通用 RPC（审批决策就是一条普通 RPC：`$events/result`）。 */
+    JSONObject call(String endpoint, JSONObject args) throws Exception {
+        return rpc(endpoint, args);
+    }
+
     // ── JSON-RPC over HTTP ─────────────────────────────────────────────
 
     private JSONObject rpc(String endpoint, JSONObject args) throws Exception {
@@ -611,6 +628,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                     JSONObject err = result.optJSONObject("error");
                     throw new IOException(err == null ? "DSH 调用失败" : err.optString("message", "DSH 调用失败"));
                 }
+                // 有些方法（比如审批回执 $events/result）只回 ok、没有 value，
+                // 调用方拿 null 就当「成功但无返回值」。
+                if (!result.has("value") || result.isNull("value")) return null;
                 return result.optJSONObject("value");
             } catch (Exception e) {
                 last = e;
