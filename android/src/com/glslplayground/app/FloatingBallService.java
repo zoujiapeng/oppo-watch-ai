@@ -2841,6 +2841,12 @@ public class FloatingBallService extends Service {
             aCorner += (tCorner - aCorner) * k;
             aBlack += (tBlack - aBlack) * k;
             if (renderer != null) {
+                // 每帧从 pref 同步这几个标量：它们以前只在启动读一次，
+                // 一旦被 applyParams 的早期赋值覆盖，就会出现"启动后球又变半透"（踩过）。
+                renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
+                renderer.glassFloor  = prefs().getInt("float_glass_floor", 82) / 100f;
+                renderer.orbGain     = prefs().getInt("float_orb_gain", 110) / 100f;
+                renderer.orbRim      = prefs().getInt("float_orb_rim", 130) / 100f;
                 renderer.siriGeom = true;
                 renderer.svBlackOffset = aBlack;
                 renderer.svMaster = aMaster;
@@ -3260,8 +3266,6 @@ public class FloatingBallService extends Service {
                 renderer.topDarken  = f(o, "topDarken", renderer.topDarken);
                 renderer.black0     = f(o, "black0", renderer.black0);
                 renderer.black1     = f(o, "black1", renderer.black1);
-                // 默认 1.0：黑区不再透光（"太透明、能看到背后场景"的直接修法）
-                renderer.blackOpacity = prefs().getInt("float_black_opacity", 100) / 100f;
                 renderer.edgeBleed  = f(o, "edgeBleed", renderer.edgeBleed);
                 renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
                 renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
