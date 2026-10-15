@@ -861,3 +861,99 @@ A/B 测试时把 `refraction` 设成 0（关掉折射）后忘了还原 → 用�
 | `edgeBleed` | 0.11 | 赤道线/边缘亮环 |
 | `aberration` | 10 | 色散 |
 | `waveAmp` | 1.9 | Siri 波幅度 |
+
+## ★「球是半透明图层 / 贴纸」的真根因：ColorOS 把 NOT_TOUCHABLE 悬浮窗钉成 alpha 0.80
+
+**2026-10-16 02:26 定位并修复（前面 15+ 轮全找错方向，因为根因根本不在本项目里）。**
+
+### 现象（用户原话）
+
+> "失去了液态玻璃的真实效果，看起来像半透明图层"
+> "背景和折射后的同时出现，但背景远比折射效果清晰"
+
+### 真根因：一加 / OPPO 的 WindowManager 有一条 OEM 规则
+
+```bash
+$ adb shell logcat | grep "setting alpha"
+W WindowManager: App com.glslplayground.app has a system alert window (type = 2038)
+  with FLAG_NOT_TOUCHABLE and LayoutParams.alpha = 1.00 > 0.80, setting alpha to 0.80
+  to let touches pass through (if this is isn't desirable, remove flag FLAG_NOT_TOUCHABLE).
+```
+
+**只要系统悬浮窗（TYPE_APPLICATION_OVERLAY = 2038）带 `FLAG_NOT_TOUCHABLE`，
+系统就把窗口 alpha 强行压到 0.80。** 球的玻璃层为了"只画不摸"正好带着这个 flag，
+于是屏幕上永远只有 80% 不透明 —— 剩下 20% 是**未经折射的真实背景**直接叠上来，
+既有折射又有清晰原背景，观感就是"半透明贴纸"。
+
+量出来的证据（别再靠肉眼猜）：
+
+```bash
+dumpsys window windows | grep -A3 "Window .*glslplayground"   # mAttrs ... alpha=0.8
+dumpsys window ... mShownAlpha=0.8 mAlpha=0.8 mLastAlpha=0.8  # 合成权重确实是 0.8
+dumpsys input | grep glslplayground                            # alpha=0.80
+dumpsys SurfaceFlinger | grep -B1 alpha=0.799805                # 图层 alpha
+```
+
+### 为什么前面十几轮全没找对
+
+- shader 里球内 `aa=1`、预乘输出都**没问题**：`b557c74` 的纯红实验量到"合成只有 ~55% 不透明"，
+  结论（"EGL 配置 / SurfaceView format 把 alpha 打了折"）是**错的** —— 那是 0.8 的窗口 alpha
+  再叠上黑区遮罩后的平均值。顺着这条错线索改了两轮 alpha 公式，全是白改。
+- 窗口 alpha **不在本仓库**：`grep -rn alpha android/src` 一处赋值都没有，
+  所以"读代码找 0.8"永远找不到。它是系统在 `relayout` 时改的。
+- 排查这类"屏幕上和 shader 算的不一样"的问题，**先量合成，再怀疑 shader**：
+  `dumpsys window`（mAttrs.alpha / mShownAlpha）、`dumpsys input`（InputWindowHandle alpha）、
+  `logcat | grep WindowManager`（OEM 改了什么）。
+
+### 修法：空可触摸区域，而不是 FLAG_NOT_TOUCHABLE
+
+`FloatingBallService.makeTouchTransparent(View)`：
+
+```java
+// 反射挂 ViewTreeObserver.OnComputeInternalInsetsListener（@hide，android.jar 里没有）
+info.setTouchableInsets(TOUCHABLE_INSETS_REGION);   // = 3
+info.touchableRegion.setEmpty();                    // 输入系统命中不到 → 相当于 NOT_TOUCHABLE
+```
+
+窗口 flags 同时把 `FLAG_NOT_TOUCHABLE` 换成 `FLAG_NOT_TOUCH_MODAL`。三处都改了：
+
+| 窗口 | 作用 |
+|---|---|
+| 玻璃层（`params`，glView） | **球本体**，最关键的 0.8 就是它 |
+| Siri 文字层（`siriParams`） | 球里的回答文字（也会被压成 0.8）|
+| 审批面板底（`approvalContentParams`） | 审批卡片的底（同一个 flag，同样的病）|
+
+代理触摸窗口（`dsh-ball-proxy`）**故意保留** `FLAG_NOT_TOUCHABLE`：它是全透明的，
+球让路时被压成 0.8 也看不见（logcat 里那条警告现在只属于它）。
+
+### 验证（改完必须逐条过）
+
+```bash
+dumpsys window windows | grep -A2 "Window .*glslplayground"   # 玻璃窗 mAttrs 里**不再有** alpha=0.8
+dumpsys input | grep glslplayground                           # 玻璃窗 alpha=1.00 + touchableRegion=<empty>
+logcat -d | grep "setting alpha to 0.80" | tail                # 只剩代理窗口（透明，无害）
+# 让路窗口内再量一次：球 alpha 仍 1.00（说明让路协议没把球重新变透明）
+printf x > $D/.tmp-act && mv $D/.tmp-act $D/dsh-ball-act
+```
+
+### 顺手清掉的第二个坑：`float_no_skipshot` 调试开关
+
+同一个 session 里还留着 `float_no_skipshot=true`（`b557c74` 排查时开的）。它让球不被
+`SKIP_SCREENSHOT` 排除 → **球把自己的画面抓进折射背景**（自我采样）→ 球内显示的要么是
+启动那一刻的旧桌面、要么干脆是球自己的上一帧，同样表现为"半透明贴纸且不实时"。
+
+已从代码里**删掉这个口子**（`syncWinPos()` 里改为无条件打 `SKIP_SCREENSHOT`），
+并在 `onStartCommand()` 里把设备上残留的值清掉。要看球体自带画面请用 `files/ballshot`
+钩子（PixelCopy 只截本窗口），别再去动截屏包含关系。
+
+排查这类问题的正确姿势（新增两条）：
+
+5. 屏幕上看到的和 shader 算的不一致时，**先 `dumpsys` 量合成 alpha**，别急着改 shader；
+6. **调试开关必须成对还原**，能删就删 —— 这个项目已经被"忘了关的开关"坑过两次
+   （`float_no_skipshot` 一次、测试脚本留下的极端参数一次）。
+
+### 已知遗留（本次没动）
+
+- Siri 文字上的**点击层**（`siriTouch`）在"球让路"时不会跟着变 NOT_TOUCHABLE，
+  所以球里有文字时，agent 注入到那条文字带上的触摸会被它吃掉（`applyBallTouchability()`
+  只管代理窗口）。要修就把它一起纳入让路逻辑。

@@ -77,12 +77,22 @@ DSH 侧（要注入触摸时）                          球侧（每 60ms 轮�
 ### 3.1 窗口结构（这次改动）
 
 ```
-玻璃层 GLSurfaceView   fl=NOT_FOCUSABLE NOT_TOUCHABLE LAYOUT_NO_LIMITS   ← 只画不摸
+玻璃层 GLSurfaceView   fl=NOT_FOCUSABLE NOT_TOUCH_MODAL LAYOUT_NO_LIMITS   ← 只画不摸
+                       可触摸区域 = 空（ViewTreeObserver TOUCHABLE_INSETS_REGION）
       ↑ z 更低
 代理窗口 ballTouch     贴身包住球（+10dp 容错），唯一接用户手势的窗口
+                       （只有它保留 FLAG_NOT_TOUCHABLE，让路时用）
       ↑ z 更高
 文字触摸层 / 审批按钮层 / 审批输入行   各自按需出现（原样没动）
 ```
+
+> ⚠️ **2026-10-16 起，玻璃层不再用 `FLAG_NOT_TOUCHABLE`**（见 HANDOFF「半透明图层真根因」）：
+> 一加/OPPO 的 WindowManager 会把带这个 flag 的系统悬浮窗 alpha 钉成 0.80，
+> 球会永远只有 80% 不透明。现在改用**空可触摸区域**
+> （`FloatingBallService.makeTouchTransparent()`：反射挂
+> `ViewTreeObserver.OnComputeInternalInsetsListener` → `TOUCHABLE_INSETS_REGION` + 空 region），
+> 输入系统照样命中不到玻璃层，但窗口保持 alpha=1.0。
+> **别把 `FLAG_NOT_TOUCHABLE` 加回玻璃层/文字层/审批底** —— 那不是"只画不摸"的唯一写法。
 
 **代理窗口尺寸 = 玻璃层当前矩形 + 每边 10dp**（`syncBallTouchWindow()`，数值没变就不动窗口）。
 早期版本按"球的最小形态"固定尺寸，结果 Siri 球宽在 ~700↔~1040 之间动画时，
@@ -232,6 +242,11 @@ agent gate -> ARM (球可触摸)
    症状是"某一笔凭空消失 / 球位置莫名跳变"。代理层要**跟玻璃层同尺寸**（+外扩）。
 12. **改代码别用"从 A 切到 B"的大块替换**：这次就是这么把 `syncBallTouchWindow` /
    `inBallAtRaw` / `setupBallTouchLayer` 三个方法整段删掉过一次（编译报 symbol not found 才发现）。
+13. **`FLAG_NOT_TOUCHABLE` 在 ColorOS 上会换来 alpha=0.80**（2026-10-16 定位）：玻璃层用它 =
+   球永久 80% 不透明（"半透明贴纸"）。只画不摸要用**空可触摸区域**，
+   见 `makeTouchTransparent()` 与 HANDOFF 那一节。**只有全透明的代理窗口可以留这个 flag。**
+14. **Siri 文字上的点击层（`siriTouch`）不会让路**：`applyBallTouchability()` 只切代理窗口，
+   球里有文字时那条文字带仍可触摸 → agent 注入到那一带的点击会被它吃掉。改门控时记得带上它。
 
 ## 6. 已知限制
 
@@ -240,12 +255,13 @@ agent gate -> ARM (球可触摸)
   `ACTION_CANCEL`（表现为球突然不跟手），这是设计取舍。
 - DSH 侧要**重启 DSH** 才会加载改过的插件（插件在启动时 import 进内存）。
 - 球被系统杀掉再打开（点「悬浮于桌面」）后重新开始轮询，无状态残留。
+- 球里有文字时，文字点击层那条带**不受让路协议管**（见踩坑 14）。
 
 ## 7. 改动清单速查
 
 | 文件 | 改了什么 |
 |---|---|
-| `FloatingBallService.java` | 玻璃层加 `FLAG_NOT_TOUCHABLE`；新增代理窗口（`dsh-ball-proxy`，带 title）+ 门控（内容比对 + 本地时钟窗口 + ACK 退避 + 残留清理）；普通模式拖动夹取按球直径算 |
+| `FloatingBallService.java` | 玻璃层/文字层/审批底改用**空可触摸区域**（`makeTouchTransparent()`；2026-10-16 之前是 `FLAG_NOT_TOUCHABLE`，会被 ColorOS 压成 alpha 0.8）；新增代理窗口（`dsh-ball-proxy`，带 title）+ 门控（内容比对 + 本地时钟窗口 + ACK 退避 + 残留清理）；普通模式拖动夹取按球直径算 |
 | `~/dsh-preset-mobile-use/lib/index.js` | `waitForBallStandDown()`（原子写 + 唯一 nonce + 20ms 轮询 ACK）+ `default:` 分支只对 click/swipe/key 调用 + guidance 里加一句（**升级会覆盖，需重打**，备份在 `patches/preset-mobile-use/index.js.patched`） |
 | `/data/adb/modules/agent_mobile_use/system/bin/vd` | `ball_signal()`（原子写）+ tap/swipe/key 三处调用；`/system/bin` 是 Magisk ro 挂载，改模块里的文件、**重启后生效** |
 | `patches/apply-vd-ball-guard-patch.sh` | 幂等应用上面那条 vd 补丁（含备份 `vd.bak-ballguard`） |

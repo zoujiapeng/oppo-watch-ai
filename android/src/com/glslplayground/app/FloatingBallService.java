@@ -877,8 +877,9 @@ public class FloatingBallService extends Service {
                 android.view.WindowManager.LayoutParams.WRAP_CONTENT,
                 android.view.WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        makeTouchTransparent(box);   // 面板底只画不摸（不用 FLAG_NOT_TOUCHABLE，见该方法注释）
 
         // ② 交互层：选项 + 自由输入 + 发送
         android.widget.LinearLayout col = new android.widget.LinearLayout(this);
@@ -1574,6 +1575,64 @@ public class FloatingBallService extends Service {
         return p;
     }
 
+    /**
+     * 让一个悬浮窗「只画不摸」—— **不用 FLAG_NOT_TOUCHABLE**。
+     *
+     * 为什么不能用那个 flag（2026-10-16 用 logcat 定位到的真根因）：
+     * 一加 / OPPO 的 WindowManager 加了一条 OEM 规则，logcat 原文：
+     *
+     *   W WindowManager: App com.glslplayground.app has a system alert window (type = 2038)
+     *   with FLAG_NOT_TOUCHABLE and LayoutParams.alpha = 1.00 > 0.80, setting alpha to 0.80
+     *   to let touches pass through (if this is isn't desirable, remove flag FLAG_NOT_TOUCHABLE).
+     *
+     * 也就是说：**只要系统悬浮窗带 FLAG_NOT_TOUCHABLE，系统就把 alpha 钉成 0.80**。
+     * 球因此永远只有 80% 不透明 —— 剩下 20% 是「未经折射的真实背景」直接叠上来，
+     * 于是球看着像一层半透明贴纸（既看得到折射、又清清楚楚看得到原背景）。
+     * 这个 alpha 是窗口级的，shader 里把 aa 写成 1 也救不回来（排查过好几轮都栽在这）。
+     *
+     * 等价做法：把窗口的**可触摸区域置空**（ViewTreeObserver 的 TOUCHABLE_INSETS_REGION）。
+     * 输入系统照样命中不到这个窗口（触摸穿到下面 / 交给代理窗口），但 OEM 那条规则不触发，
+     * 球保持 100% 不透明。
+     *
+     * 这套 API（ViewTreeObserver.OnComputeInternalInsetsListener / InternalInsetsInfo）在
+     * 公开 SDK 里是 @hide 的（android.jar 里根本没有），所以只能反射挂监听 + 动态代理。
+     * 失败时只打日志、不影响其它逻辑；那时窗口退回「可触摸」，代理窗口仍在上面接手势。
+     */
+    private void makeTouchTransparent(final View v) {
+        if (v == null) return;
+        try {
+            final Class<?> listenerCls = Class.forName(
+                    "android.view.ViewTreeObserver$OnComputeInternalInsetsListener");
+            final Class<?> infoCls = Class.forName("android.view.ViewTreeObserver$InternalInsetsInfo");
+            final java.lang.reflect.Method setTouchableInsets =
+                    infoCls.getMethod("setTouchableInsets", int.class);
+            final java.lang.reflect.Field regionField = infoCls.getField("touchableRegion");
+            final int TOUCHABLE_INSETS_REGION = 3;   // InternalInsetsInfo.TOUCHABLE_INSETS_REGION
+            Object listener = java.lang.reflect.Proxy.newProxyInstance(
+                    listenerCls.getClassLoader(), new Class<?>[]{listenerCls},
+                    new java.lang.reflect.InvocationHandler() {
+                        @Override public Object invoke(Object proxy, java.lang.reflect.Method m, Object[] a) {
+                            if (a != null && a.length == 1 && a[0] != null) {
+                                try {
+                                    setTouchableInsets.invoke(a[0], TOUCHABLE_INSETS_REGION);
+                                    Object region = regionField.get(a[0]);
+                                    if (region instanceof android.graphics.Region) {
+                                        ((android.graphics.Region) region).setEmpty();
+                                    }
+                                } catch (Throwable ignored) { }
+                            }
+                            return null;
+                        }
+                    });
+            java.lang.reflect.Method add = android.view.ViewTreeObserver.class.getMethod(
+                    "addOnComputeInternalInsetsListener", listenerCls);
+            add.invoke(v.getViewTreeObserver(), listener);
+            Log.i("FloatingBall", "makeTouchTransparent ok（窗口只画不摸，但不带 FLAG_NOT_TOUCHABLE）");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "makeTouchTransparent failed: " + t);
+        }
+    }
+
     private void ensureApprovalWindows() {
         if (wm == null) return;
         if (approvalContent != null && approvalContent.getParent() == null) {
@@ -2020,12 +2079,13 @@ public class FloatingBallService extends Service {
         siriParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         siriParams.gravity = Gravity.TOP | Gravity.START;
         try {
             wm.addView(tv, siriParams);
+            makeTouchTransparent(tv);   // 同上：不用 FLAG_NOT_TOUCHABLE，否则文字也被压到 0.8
             siriText = tv;
             setupSiriTouchLayer();
         } catch (Exception e) {
@@ -3051,6 +3111,12 @@ public class FloatingBallService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         startForegroundCompat();
+        // 清掉历史遗留的调试开关 float_no_skipshot：它会让球不被排除出抓屏 → 自我采样，
+        // 屏幕上看着就是「半透明贴纸」。代码里已删掉这个口子，设备上残留的值也在这里清掉。
+        if (prefs().getBoolean("float_no_skipshot", false)) {
+            prefs().edit().remove("float_no_skipshot").apply();
+            Log.w("FloatingBall", "清掉残留的 float_no_skipshot（自我采样根源）");
+        }
         if (intent != null) {
             resultCode = intent.getIntExtra("code", 0);
             resultData = intent.getParcelableExtra("data");
@@ -3143,10 +3209,14 @@ public class FloatingBallService extends Service {
                 : WindowManager.LayoutParams.TYPE_PHONE;
         // 液态玻璃这一层只负责画：所有用户手势都交给 setupBallTouchLayer() 的代理窗口。
         // 这样窗口里那圈「看不见的透明边」（FLAG_LAYOUT_NO_LIMITS 下会真的铺开）不再吞触摸。
+        // ⚠️ 这里**不能**用 FLAG_NOT_TOUCHABLE：一加/OPPO 的 WindowManager 会把带这个 flag 的
+        // 系统悬浮窗 alpha 强行压到 0.80 → 球永远只有 80% 不透明、背景直接透上来
+        // （用户报的「半透明图层 / 贴纸」）。改用「空可触摸区域」达到同样的只画不摸，
+        // 细节见 makeTouchTransparent()。
         params = new WindowManager.LayoutParams(
                 winW, winH, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
@@ -3157,6 +3227,7 @@ public class FloatingBallService extends Service {
 
         if (wm != null) {
             wm.addView(glView, params);
+            makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
         }
@@ -3186,12 +3257,13 @@ public class FloatingBallService extends Service {
         renderer.winY = loc[1];
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
-        // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面
-        // 排查开关：打开 float_no_skipshot 时球会出现在系统截图里（注意：会导致自我采样）
-        if (!prefs().getBoolean("float_no_skipshot", false)) {
-            if (!renderer.selfExcluded && applySkipScreenshot()) {
-                renderer.selfExcluded = true;
-            }
+        // Surface 就绪后打上 SKIP_SCREENSHOT：抓屏不再包含本窗口 → 球内实时折射真实桌面。
+        // ⚠️ 这一步必须是**无条件**的：一旦球没被排除，抓屏里就含着球自己，背景会被冻住
+        // （球内显示的是启动那一刻的画面，或者干脆是球自己的上一帧）→ 观感就是「半透明贴纸」
+        // 且不随桌面变化。历史上这里挂过一个 float_no_skipshot 调试开关，被留在 true 两次，
+        // 两次都被误判成「玻璃被改坏了」。要看球体自带画面请用 files/ballshot 钩子（只截本窗口）。
+        if (!renderer.selfExcluded && applySkipScreenshot()) {
+            renderer.selfExcluded = true;
         }
     }
 
