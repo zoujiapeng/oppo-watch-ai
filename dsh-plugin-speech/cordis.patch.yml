@@ -1,0 +1,4 @@
+# 把 speech 插件挂进宿主 profile（全局生效，不需要在每个会话里加）
+- insert:
+    - id: dsh-plugin-speech
+      name: 'dsh-plugin-speech'

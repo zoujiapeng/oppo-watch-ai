@@ -635,3 +635,32 @@ $ java SpeakTest < sample.md
 
 **核对方式**：`files/last-spoken.txt`（实际要念的稿子）+ `logcat -s SpeechRewrite SiriAssistant`
 （会打 `speak(N字，模型改写)` 或 `speak(N字，规则清洗)`，一眼看出走的是哪条路）。
+
+## 口播稿插件 dsh-plugin-speech（2026-10-15，替代 App 侧 key 方案）
+
+**用户要求**：用 DSH 插件配合，**依赖 DSH、不要第二份 key**。
+
+**做法**：一个 DSH 插件（`~/dsh-plugin-speech`，源码也存仓库 `dsh-plugin-speech/`）——
+监听 `session/event` 里的 `assistant/message`，取出正文与 `message.source.{provider,model}`，
+用 `ctx.llm.stream()`（官方 `dsh-session-title-llm` 同款用法）生成 ≤100 字口播稿，
+原子写到 `/sdcard/Android/data/com.glslplayground.app/files/spoken.txt`。
+
+球侧：朗读前**优先读这个文件**（2 分钟内有效，用掉即删），没有就回落本地规则清洗
+—— 所以插件是"可选增强"：不装也能用，装了更自然。App 里那条 DeepSeek key 的路径保留但不再是主路。
+
+**装法（要点，容易踩）**：
+
+1. 插件要 `import "@deepseek-ai/dsh-llm"`，但插件目录解析不到 DSH 的包 →
+   在插件下 `node_modules/@deepseek-ai/` 里**软链到 DSH 自己的包**
+   （`.../dsh/node_modules/@deepseek-ai/dsh-llm` 与 `dsh-util-values`）；
+2. `dsh plugin --profile web add .` **只把它装成普通依赖**（会提示 "declares no dsh.bundle"），
+   必须在插件 `package.json` 里声明 `dsh.bundle.patch = ./cordis.patch.yml`，
+   并把它**加进 profile 的 `bundles` 数组**，否则不会被加载；
+3. 重启 DSH 生效（`pkill -f "dsh/lib/bin.js web"`，看门狗约 30 秒拉起）。
+
+**核对**：`files/spoken.txt` 是否出现、`logcat -s SiriAssistant | grep speak` 里是
+「口播稿」（走了插件）还是「规则清洗」（回落）。
+
+**已验证**：插件可被 DSH 解析加载（`name=speech, inject=["llm"]`）、
+事件取值与原子写用同一份逻辑单测通过。**未验证**：真实回合里 `ctx.llm.stream` 的实际调用
+（需要重启 DSH 后跑一次真实对话）。

@@ -643,8 +643,42 @@ public final class SiriAssistant {
         } catch (Throwable ignored) {}
     }
 
+    /** DSH 插件（dsh-plugin-speech）写的口播稿；球只读它，不碰 DSH 内部。 */
+    private static final String SPOKEN_FILE = "spoken.txt";
+    private static final long SPOKEN_FRESH_MS = 120000;   // 2 分钟内的才算这一轮
+
+    /**
+     * 优先用 DSH 插件改写好的口播稿（若存在且新鲜）；
+     * 没有（插件没装/失败）就回落本地规则清洗。
+     * 这样插件是"可选增强"：不装也能用，装了更自然。
+     */
+    private String pluginSpokenOrNull() {
+        try {
+            java.io.File f = new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE);
+            if (!f.isFile()) return null;
+            long age = System.currentTimeMillis() - f.lastModified();
+            if (age > SPOKEN_FRESH_MS) return null;
+            byte[] buf = new byte[(int) Math.min(f.length(), 8 * 1024)];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = in.read(buf);
+            in.close();
+            if (n <= 0) return null;
+            String t = new String(buf, 0, n, "UTF-8").trim();
+            return t.isEmpty() ? null : t;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     private void speak(String text) {
         if (!ttsReady || tts == null) return;
+        String fromPlugin = pluginSpokenOrNull();
+        if (fromPlugin != null) {
+            // 用掉就删，避免下一轮重复念同一份稿子
+            try { new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE).delete(); } catch (Throwable ignored) { }
+            speakNow(fromPlugin, true);
+            return;
+        }
         if (speakUseModel) {
             // 交给大模型改写朗读稿（只在开启朗读时走；失败/超时自动回落规则清洗）
             SpeechRewriter.rewrite(text, speechApiKey, new SpeechRewriter.Cb() {
@@ -669,7 +703,7 @@ public final class SiriAssistant {
             out.close();
         } catch (Throwable ignored) { }
         if (spoken.isEmpty()) return;
-        Log.i(TAG, "speak(" + spoken.length() + "字" + (byModel ? "，模型改写" : "，规则清洗") + "): "
+        Log.i(TAG, "speak(" + spoken.length() + "字" + (byModel ? "，口播稿" : "，规则清洗") + "): "
                 + spoken.substring(0, Math.min(80, spoken.length())));
         try {
             tts.stop();
