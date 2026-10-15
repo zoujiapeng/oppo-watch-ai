@@ -55,23 +55,35 @@ function writeAtomic(p, body) {
 export const name = "speech";
 export const inject = ["llm"];
 
-const seenTypes = new Set();
 const PROBE = "/sdcard/Android/data/com.glslplayground.app/files/speech-probe.txt";
-const DEBUG = process.env.DSH_SPEECH_DEBUG === "1" || true;   // 排查期开着，定位完可关
+const DEBUG = process.env.DSH_SPEECH_DEBUG !== "0";   // 排查期默认开
 
-/** 探针：把收到过的 session 事件类型累积写盘，用于确认真实类型名。 */
+/** 探针：把 assistant/message 的**真实结构**写成一行摘要，用来定位取值为空的原因。 */
 function probe(event) {
   try {
     const t = event?.type ?? "(no-type)";
-    if (seenTypes.has(t)) return;
-    seenTypes.add(t);
-    const lines = [...seenTypes].sort().join("\n");
-    fs.writeFileSync(PROBE, `pid=${process.pid} types(${seenTypes.size}):\n${lines}\n`);
+    // 只在 assistant/message 上留详细摘要（其它类型只记名字，避免刷屏）
+    let line;
+    if (t === "assistant/message") {
+      const msg = event?.data?.message ?? event?.message ?? null;
+      const content = msg?.content;
+      const textLen = Array.isArray(content)
+        ? content.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("").length
+        : -1;
+      line = `[${t}] keys=${Object.keys(event ?? {}).join(",")}`
+        + ` msgKeys=${msg ? Object.keys(msg).join(",") : "null"}`
+        + ` textLen=${textLen}`
+        + ` source=${JSON.stringify(msg?.source ?? null)}`
+        + ` blockTypes=${Array.isArray(content) ? content.map((b) => b?.type).join("|") : "n/a"}`;
+    } else {
+      line = `[${t}]`;
+    }
+    fs.appendFileSync(PROBE, line + "\n");
   } catch (_) {}
 }
 
 export function apply(ctx) {
-  ctx.logger?.info?.("speech 插件已加载（排查探针开启）");
+  ctx.logger?.info?.("speech 插件已加载（诊断探针开启）");
   if (DEBUG) {
     ctx.on("session/event", (_session, event) => probe(event));
   }

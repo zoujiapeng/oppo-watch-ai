@@ -832,6 +832,31 @@ public final class SiriAssistant {
         t = t.replaceAll("\\n{3,}", "$0$0");            // 多个换行压成两个（段落停顿）
         t = t.replaceAll("[ \\t]*\\n[ \\t]*", "$0");    // 行首行尾空白去掉
         t = t.replaceAll("(?m)^ +", "");                // 行首残留空格（表格/缩进留下的）
+        // 表格行被上面的竖线替换弄成 `方案  成本  延迟`：一格一词连念很怪，
+        // 把「同一行里 2~6 字的短词」用、连起来，听感才像话（表格本就只是给人看的）
+        StringBuilder tb = new StringBuilder(t.length());
+        for (String line : t.split("\n", -1)) {
+            String[] parts = line.trim().split("\\s{2,}|\\s+");
+            if (parts.length >= 2 && parts.length <= 8) {
+                // 只对「纯中文、2~4 字」的词做顿号连接 —— 数字/时间戳/文件名被切开会更难听
+                //（实测 `22:55:30` 会被切成 `22、55、30`）
+                boolean allShort = true;
+                for (String w : parts) {
+                    if (w.length() > 4 || !w.matches("[\\u4E00-\\u9FFF]+")) { allShort = false; break; }
+                }
+                if (allShort) {
+                    StringBuilder j = new StringBuilder();
+                    for (String w : parts) {
+                        if (w.isEmpty()) continue;
+                        if (j.length() > 0) j.append('、');
+                        j.append(w);
+                    }
+                    if (j.length() > 0) { tb.append(j).append('\n'); continue; }
+                }
+            }
+            tb.append(line).append('\n');
+        }
+        t = tb.toString();
         t = t.replaceAll("^[，。！？、；：）】”’\\s]+", "");
         t = t.replaceAll("[，。！？、；：（【“‘\\s]+$", "");
         if (t.isEmpty() && hadCode) t = "有代码，略过";
