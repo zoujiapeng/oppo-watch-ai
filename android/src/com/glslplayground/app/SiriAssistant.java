@@ -211,6 +211,8 @@ public final class SiriAssistant {
                     @Override public void run() {
                         if (askInFlight) return;
                         mirrorBuf.setLength(0);
+                        // 新一轮开始 → 方形态的「出波闸门」先关上（只有整轮结束才重新打开）
+                        FloatingBallService.setAssistantTurnEnded(false);
                         // 模型开始生成了 —— 这一刻才算「思考中」
                         if (state != State.LISTENING && state != State.TRANSCRIBING) {
                             setState(State.THINKING);
@@ -259,6 +261,9 @@ public final class SiriAssistant {
                         if (!askInFlight && (state == State.THINKING || state == State.ANSWERING)) {
                             setState(State.IDLE);
                         }
+                        // 整轮结束：球里若还挂着这轮的回答文字，就在球底出一道"进了玻璃的"波
+                        // （用户要求：方形态只有最终结果时才出波，且这道波要与背景同一套折射）
+                        FloatingBallService.setAssistantTurnEnded(true);
                         speakOnce(textToSpeak);
                     }
                 });
@@ -363,6 +368,7 @@ public final class SiriAssistant {
             return;
         }
         say("");
+        FloatingBallService.setAssistantTurnEnded(false);
         setState(State.LISTENING);
         final boolean ok = capture.start(new VoiceCapture.Listener() {
             @Override public void onLevel(final float rms) {
@@ -475,6 +481,7 @@ public final class SiriAssistant {
         askInFlight = false;
         stopTyping();
         FloatingBallService.setAssistantLevel(0f);
+        FloatingBallService.setAssistantTurnEnded(false);
         if (note != null && !note.isEmpty()) toast(note);
         setState(State.IDLE);
     }

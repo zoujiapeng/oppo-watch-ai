@@ -52,6 +52,22 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // 那个页面默认还是 1.8：打开演示页时别顺手推参数，会把球改回磨砂）。
     public float blur = 0.3f;
     public float topDarken = 0.93f, black0 = -1.0f, black1 = -0.01f, edgeBleed = 0.11f;
+    /**
+     * 「波进玻璃」模式：1 = 把 Siri 波先画进背景纹理，再走折射/色散/模糊 ——
+     * 观感就是"玻璃后面的一道光"，跟背景完全同一套光学（用户 2026-10-16 要的方形态效果）；
+     * 0 = 老样子：波直接叠在玻璃上（圆形球聆听/思考时的观感，别动）。
+     */
+    public volatile float waveInGlass = 0f;
+    /** 波在球内的竖直锚点 ny（只在 waveInGlass=1 时生效）。贴球底 ≈ -0.68。 */
+    /**
+     * 球底散光的锚点 ny（只在 waveInGlass=1 时生效）：+1 球顶 / -1 球底。
+     * -0.72 ≈ 贴着球底往上一点，那团光就压在这里。
+     */
+    public volatile float waveNy = -0.72f;
+    /** 散光在竖直方向的半宽（ny）：0.55 ≈ 球高的 55%，从锚点往上柔和衰减。 */
+    public volatile float waveFall = 0.55f;
+    /** 散光亮度增益（prefs 里 float_wave_gain 千分比可调）。 */
+    public volatile float waveGlassGain = 0.15f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -192,6 +208,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
+        "uniform float uWaveInGlass;  // 1 = 方形态收尾：不出波，只在球底打一团散光\n" +
+        "uniform float uWaveAnchor, uWaveFall, uWaveGain;  // 散光：锚点/半宽/亮度\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
@@ -358,7 +376,24 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  }\n" +
         "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
-        "  if(uWaveAmp > 0.001){\n" +
+        // 方形态收尾（uWaveInGlass=1）不画波，只在球底加一团**漫反射散光** ——
+        // 用户 2026-10-16 的最终选择：原来那套"把波烘进背景再折射"要多画一趟纹理，
+        // 上机实测太重；这里退化成**几个 ALU**：一条贴着球底的柔光带 + 横向缓慢流动的色相，
+        // 观感上仍是"被 Siri 波贴着打出来的散光"，但看不到波的形状，也不再有任何额外 pass。
+        "  if(uWaveInGlass > 0.5){\n" +
+        "    float gd = abs(ny - uWaveAnchor);\n" +
+        "    float glow = smoothstep(uWaveFall, 0.0, gd);\n" +
+        "    glow *= glow;\n" +
+        "    float hx2 = clamp(c.x / uHalf.x, -1.0, 1.0);\n" +
+        "    glow *= 1.0 - 0.55*hx2*hx2;\n" +                                  // 两端收一点，像贴着球底的一片光
+        "    float hue = 0.5 + 0.5*sin(hx2*2.2 + iTime*0.5);\n" +               // 横向慢慢流动的色相
+        "    vec3 tint = mix(vec3(0.62,0.78,1.25), vec3(1.15,0.72,0.95), hue);\n" +
+        "    wglow = tint * glow;\n" +                                          // 让赤道线/底缘也吃这团光
+        "    col += tint * glow * uWaveAmp * uWaveGain;\n" +
+        "  }\n" +
+        // 波的常规画法（圆球态聆听/思考用）——方形态收尾时整段跳过
+        "  float waveOnGlass = 1.0 - uWaveInGlass;\n" +
+        "  if(uWaveAmp > 0.001 && waveOnGlass > 0.5){\n" +
         "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
         "    vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
@@ -564,6 +599,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             bgTex = bg.tex;
         }
 
+        // 波的幅度（含音量增益与闸门）
+        float waveAmpEff = waveOn ? waveAmp * (1f + voiceBoost) * waveGate : 0f;
+
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
         buildBlur(bgTex);
 
@@ -595,9 +633,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), black1);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), svBlackOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), waveInGlass);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAnchor"), waveNy);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveFall"), waveFall);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveGain"), waveGlassGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"),
-                waveOn ? waveAmp * (1f + voiceBoost) * waveGate : 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveAmpEff);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), orbMix);
@@ -641,6 +682,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    /**
+     * 把 Siri 波画进背景纹理（屏幕空间）→ 返回"背景 + 波"的新纹理。
+     *
+     * 为什么要多这一趟：老的画法是波直接加在合成结果上（`col += wave`），它永远是**贴在玻璃表面**
+     * 的一层亮条 —— 不参与透镜位移、也没有色散。用户要的是"像背景一样被折射变糊"，
+     * 那就只能先把波放进背景里，再让后面那条既有的折射/色散/模糊链去处理它。
+     *
+     * 锚点用 uWaveNy（ny 单位，+1 球顶 / -1 球底），所以波永远贴着球底，跟文字多少无关。
+     */
     private void buildBlur(int srcTex) {
         useProgram(blurProg);
         bindFullscreen(blurProg);

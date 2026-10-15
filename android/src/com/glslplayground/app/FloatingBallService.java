@@ -250,11 +250,26 @@ public class FloatingBallService extends Service {
     private static final String STATE_REQ_PREFIX = "/sdcard/Android/data/com.glslplayground.app/files/state-";
     private static final String[] STATE_NAMES =
             {"IDLE", "THINKING", "ANSWERING", "LISTENING", "TRANSCRIBING", "OFF"};
+    // 另外两个只给「方形态出波」这条链路用的调试口子（一次性文件，用完即删）：
+    //   state-TURNEND   → 等价于收到 turn/end（球里有字时会在球底出一道进了玻璃的波）
+    //   state-TURNSTART → 等价于新一轮开始（把闸门关回去）
+    // 为什么要它：turn/end 只有真跑完一整轮 DSH 才会有，回归「最终结果才出波」时
+    // 不可能每次都等一次完整对话。
+    private static final String[] STATE_EXTRA =
+            {"TURNEND", "TURNSTART"};
 
     private void pumpStateRequest() {
         long now = android.os.SystemClock.uptimeMillis();
         if (now < nextStateCheck) return;
         nextStateCheck = now + 120;
+        for (final String name : STATE_EXTRA) {
+            java.io.File f = new java.io.File(STATE_REQ_PREFIX + name);
+            if (!f.exists()) continue;
+            f.delete();
+            Log.i("FloatingBall", "state extra (debug): " + name);
+            applyTurnEnded("TURNEND".equals(name));
+            return;
+        }
         for (final String name : STATE_NAMES) {
             java.io.File f = new java.io.File(STATE_REQ_PREFIX + name);
             if (!f.exists()) continue;
@@ -469,6 +484,44 @@ public class FloatingBallService extends Service {
         return siriTextShown && siriStr != null && !siriStr.trim().isEmpty();
     }
 
+    // ── 「整轮结束」信号 + 方形态的出波闸门（2026-10-16 用户要求）──────────────
+    // 需求原话：「方形状态下只有 agent 回复最终结果才能出现 Siri 波，且这道波要像背景一样
+    // 被折射变糊、贴着方形底端不变」。用户选定的判定是 **turn/end**（整轮结束）才出波。
+    // 做法：波不再叠在玻璃表面，而是先画进背景纹理（GlassRenderer.FS_WAVE），
+    // 于是它天然吃到与背景完全相同的折射/放大/色散/模糊；锚点在球底（renderer.waveNy）。
+    private volatile boolean turnEnded = false;
+
+    /** SiriAssistant 在 turn/end 时调用；新一轮开始（onAttemptStart / 新提问 / 清空）时调 false。 */
+    public static void setAssistantTurnEnded(boolean ended) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(() -> s.applyTurnEnded(ended));
+    }
+
+    private void applyTurnEnded(boolean ended) {
+        if (turnEnded == ended) return;
+        turnEnded = ended;
+        Log.i("FloatingBall", "turn ended=" + ended + "（方形态的波闸门 " + (ended ? "开" : "关") + "）");
+        refreshFinalWave();
+    }
+
+    /**
+     * 方形态（球里有字）的出波闸门：**只有整轮结束**才出波，而且波走玻璃、贴球底。
+     * 其它情况（文字还在流、思考中）一律把闸门压到 0 —— 与老行为一致。
+     */
+    private void refreshFinalWave() {
+        if (renderer == null) return;
+        boolean show = siriEnabled && turnEnded && hasBallText();
+        renderer.waveInGlass = show ? 1f : 0f;
+        if (show) {
+            renderer.waveOn = true;
+            setWaveForm(1);              // siriWaveCore；此刻幅度是 0，切形态看不出跳变
+        } else if (hasBallText()) {
+            setWaveForm(-1);             // 有字但这一轮还没结束：保证不出波
+            waveGateTarget = 0f;
+        }
+    }
+
     /** 把状态真正落到波形上（走包络，不硬切形态）。 */
     private void applyAssistantState(String state) {
         if (renderer == null) return;
@@ -485,8 +538,11 @@ public class FloatingBallService extends Service {
             renderer.waveOn = true;
             waveGateTarget = 0f;
             orbWanted = "THINKING".equals(state) ? 1f : 0f;
-            Log.i("FloatingBall", "有字优先：状态 " + state + " 暂不出动画，闸门→0（字没了显示 orbMix="
-                    + orbWanted + "）");
+            // 有字：默认不出波，但**整轮结束后**要在球底出一道"进了玻璃的"波（见 refreshFinalWave）
+            refreshFinalWave();
+            Log.i("FloatingBall", "有字优先：状态 " + state + " 不出圆点（turnEnded="
+                    + turnEnded + " waveInGlass=" + renderer.waveInGlass
+                    + "，字没了显示 orbMix=" + orbWanted + "）");
             return;
         }
         if ("THINKING".equals(state)) {
@@ -2058,7 +2114,10 @@ public class FloatingBallService extends Service {
         } else {
             main.removeCallbacks(siriTick);
             removeSiriText();
-            if (renderer != null) { renderer.siriGeom = false; renderer.svBlackOffset = 0f; }
+            if (renderer != null) {
+                renderer.siriGeom = false; renderer.svBlackOffset = 0f;
+                renderer.waveInGlass = 0f;
+            }
         }
     }
 
@@ -2648,6 +2707,7 @@ public class FloatingBallService extends Service {
         siriStr = text == null ? "" : text;
         if (siriText != null) siriText.setText(displayTextOf(siriStr));
         measureSiriTargets(siriStr);
+        refreshFinalWave();      // 字没了 → 收掉球底那道波；字又来了 → 按 turnEnded 决定要不要出
         boolean prevEmpty = prev == null || prev.trim().isEmpty();
         boolean nowEmpty = siriStr.trim().isEmpty();
         if (prevEmpty && !nowEmpty) {           // 文字出现 → 触发弹出
@@ -2706,6 +2766,7 @@ public class FloatingBallService extends Service {
         // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字层同一时刻藏掉。
         hideSiriTextNow();
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        if (renderer != null) renderer.waveInGlass = 0f;   // 球底那团散光跟着收掉
         float b0 = winSize * 0.9f;
         updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
     }
@@ -2866,6 +2927,8 @@ public class FloatingBallService extends Service {
         // 不会碰到黑区下方那道 Siri 波 —— 而且和字号无关（字号变小、行数变多也照样对）。
         float textTopPx = Math.max(0f, siriTextDy) + dp(4);
         float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
+        // 黑区下沿：**保持原来的样子**（用户 2026-10-16 明确说"原本黑区就不改了，恢复成原来的渐变黑"）。
+        // 即：文字下面留出 siriBlackStep 这段安全距离，且黑区从下沿一路渐变到球底。
         float waveGap = Math.max(0f, Math.min(0.45f, siriBlackStep / 1000f));
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
         tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - waveGap)));
@@ -3157,6 +3220,9 @@ public class FloatingBallService extends Service {
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
+        // 「球底那团散光」的亮度（千分之一）：方形态整轮结束时，像被 Siri 波贴着打出的漫反射。
+        // 做成可调是因为它跟 wallpaper 亮度强相关，肉眼调比改代码快。
+        renderer.waveGlassGain = prefs().getInt("float_wave_gain", 150) / 1000f;
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -3288,6 +3354,7 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
+            renderer.waveGlassGain = prefs().getInt("float_wave_gain", 150) / 1000f;
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;
