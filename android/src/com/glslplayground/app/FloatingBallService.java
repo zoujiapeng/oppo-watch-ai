@@ -2189,6 +2189,7 @@ public class FloatingBallService extends Service {
             wm.addView(tv, siriParams);
             makeTouchTransparent(tv);   // 同上：不用 FLAG_NOT_TOUCHABLE，否则文字也被压到 0.8
             siriText = tv;
+            tv.post(this::applyTextSkipScreenshot);   // 文字也不许出现在截屏里（玻璃已排除，文字以前漏了）
             setupSiriTouchLayer();
         } catch (Exception e) {
             Log.w("FloatingBall", "add siri text failed: " + e);
@@ -3241,9 +3242,33 @@ public class FloatingBallService extends Service {
     /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
     private boolean applySkipScreenshot() {
         if (Build.VERSION.SDK_INT < 29 || glView == null) return false;
+        return skipScreenshotOf(glView.getSurfaceControl(), "glass");
+    }
+
+    /**
+     * 球里那层**文字**也要打 SKIP_SCREENSHOT。
+     *
+     * 为什么：`applySkipScreenshot()` 只处理了玻璃层（SurfaceView 的 SurfaceControl），
+     * 文字是一个普通 View 的独立悬浮窗 —— 结果截屏/录屏里玻璃没了、**文字还在**：
+     * 一张图上凭空浮着球里那段白字（实测：5220 字的长回答截屏时整块白字压在桌面上）。
+     * 普通 View 没有 `getSurfaceControl()`，只能反射走 ViewRootImpl（API 29+ 有这个方法）。
+     */
+    private boolean applyTextSkipScreenshot() {
+        if (Build.VERSION.SDK_INT < 29 || siriText == null) return false;
         try {
-            SurfaceControl sc = glView.getSurfaceControl();
-            if (sc == null) return false;
+            Object vr = android.view.View.class.getMethod("getViewRootImpl").invoke(siriText);
+            if (vr == null) return false;
+            Object sc = vr.getClass().getMethod("getSurfaceControl").invoke(vr);
+            return skipScreenshotOf((SurfaceControl) sc, "text");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "text setSkipScreenshot failed: " + t);
+            return false;
+        }
+    }
+
+    private boolean skipScreenshotOf(SurfaceControl sc, String what) {
+        if (sc == null) return false;
+        try {
             Class<?> txClass = Class.forName("android.view.SurfaceControl$Transaction");
             Object tx = txClass.getDeclaredConstructor().newInstance();
             try {
@@ -3254,9 +3279,10 @@ public class FloatingBallService extends Service {
                 m.invoke(tx, true);
             }
             txClass.getMethod("apply").invoke(tx);
+            Log.i("FloatingBall", "skip-screenshot applied: " + what);
             return true;
         } catch (Throwable t) {
-            Log.w("FloatingBall", "setSkipScreenshot failed: " + t);
+            Log.w("FloatingBall", "setSkipScreenshot failed (" + what + "): " + t);
             return false;
         }
     }
@@ -3424,6 +3450,7 @@ public class FloatingBallService extends Service {
         if (!renderer.selfExcluded && applySkipScreenshot()) {
             renderer.selfExcluded = true;
         }
+        if (siriText != null) applyTextSkipScreenshot();   // 文字层是独立窗口，得单独排除
     }
 
     // ───────────────────────── 参数同步（来自 liquid-glass 页面）─────────────────────────
