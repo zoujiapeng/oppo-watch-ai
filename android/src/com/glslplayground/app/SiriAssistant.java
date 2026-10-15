@@ -96,8 +96,16 @@ public final class SiriAssistant {
             tts = new TextToSpeech(app, new TextToSpeech.OnInitListener() {
                 @Override public void onInit(int status) {
                     ttsReady = status == TextToSpeech.SUCCESS;
+                    Log.i(TAG, "TTS init status=" + status + " ready=" + ttsReady);
                     if (ttsReady) {
-                        try { tts.setLanguage(Locale.CHINA); } catch (Throwable ignored) {}
+                        try {
+                            int lang = tts.setLanguage(Locale.CHINA);
+                            Log.i(TAG, "TTS setLanguage(CHINA) -> " + lang
+                                    + " (LANG_MISSING_DATA=" + TextToSpeech.LANG_MISSING_DATA
+                                    + " LANG_NOT_SUPPORTED=" + TextToSpeech.LANG_NOT_SUPPORTED + ")");
+                        } catch (Throwable e) {
+                            Log.w(TAG, "TTS setLanguage 失败: " + e);
+                        }
                     }
                 }
             });
@@ -239,12 +247,17 @@ public final class SiriAssistant {
             }
 
             @Override public void onTurnEnd() {
-                if (askInFlight) return;
+                // 朗读**不能**被 askInFlight 挡掉：用户通过球说话时 askInFlight=true，
+                // 原来这里连续两道 `if (askInFlight) return;` 会把朗读整个跳过 ——
+                // 而 App 自己那条流式路径又不调用 speak()，结果两条路都不出声（实测就是这个）。
+                // 所以：状态复位仍旧受 askInFlight 约束，朗读用「本轮已念过的内容」去重。
+                final String textToSpeak = speakReplies ? mirrorBuf.toString() : "";
                 main.post(new Runnable() {
                     @Override public void run() {
-                        if (askInFlight) return;
-                        if (state == State.THINKING || state == State.ANSWERING) setState(State.IDLE);
-                        if (speakReplies && mirrorBuf.length() > 0) speak(mirrorBuf.toString());
+                        if (!askInFlight && (state == State.THINKING || state == State.ANSWERING)) {
+                            setState(State.IDLE);
+                        }
+                        speakOnce(textToSpeak);
                     }
                 });
             }
@@ -432,7 +445,7 @@ public final class SiriAssistant {
                         lastAnswer = full == null ? "" : full;
                         if (!lastAnswer.isEmpty()) sayTyped(lastAnswer);   // 交给打字机把剩下的字弹完
                         setState(State.IDLE);
-                        if (speakReplies && !lastAnswer.isEmpty()) speak(lastAnswer);
+                        if (speakReplies && !lastAnswer.isEmpty()) speakOnce(lastAnswer);
                     }
                 });
             }
@@ -671,7 +684,11 @@ public final class SiriAssistant {
     }
 
     private void speak(String text) {
-        if (!ttsReady || tts == null) return;
+        if (!ttsReady || tts == null) {
+            Log.i(TAG, "speak 被调用但 TTS 未就绪（ttsReady=" + ttsReady + "）");
+            return;
+        }
+        Log.i(TAG, "speak 请求: 原文 " + (text == null ? 0 : text.length()) + " 字");
         String fromPlugin = pluginSpokenOrNull();
         if (fromPlugin != null) {
             // 用掉就删，避免下一轮重复念同一份稿子
@@ -689,6 +706,20 @@ public final class SiriAssistant {
             return;
         }
         speakNow(toSpeechText(text), false);
+    }
+
+    private int lastSpokenHash = 0;
+
+    /** 同一段内容只朗读一次（mirror 与本地流两条路都会走到朗读点）。 */
+    private void speakOnce(String text) {
+        if (text == null) return;
+        String t = text.trim();
+        if (t.isEmpty()) return;
+        int h = t.hashCode();
+        if (h == lastSpokenHash) return;
+        lastSpokenHash = h;
+        Log.i(TAG, "speakOnce: " + t.length() + " 字");
+        speak(t);
     }
 
     /** 真正送给 TTS 的那一步（规则清洗版与模型版都走这里）。 */
