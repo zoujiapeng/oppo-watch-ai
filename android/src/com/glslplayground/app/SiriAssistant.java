@@ -676,10 +676,20 @@ public final class SiriAssistant {
      * 没有（插件没装/失败）就回落本地规则清洗。
      * 这样插件是"可选增强"：不装也能用，装了更自然。
      */
-    private String pluginSpokenOrNull() {
+    private String pluginSpokenOrNull() { return pluginSpokenOrNull(0L); }
+
+    /**
+     * 读插件口播稿。
+     *
+     * @param notBeforeMs 只接受这个时刻之后写入的文件。**关键**：插件与本轮不是同一时刻完成的，
+     *   不设下界就会念到**上一轮**残留的稿子（实测：球 23:47:10 读到的 41 字是上一轮的，
+     *   本轮 63 字的稿子 23:47:12 才写好）。传 0 表示不限制（仅用于其他调用点）。
+     */
+    private String pluginSpokenOrNull(long notBeforeMs) {
         try {
             java.io.File f = new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE);
             if (!f.isFile()) return null;
+            if (f.lastModified() < notBeforeMs) return null;   // 上一轮的残留，继续等
             long age = System.currentTimeMillis() - f.lastModified();
             if (age > SPOKEN_FRESH_MS) return null;
             byte[] buf = new byte[(int) Math.min(f.length(), 8 * 1024)];
@@ -734,12 +744,13 @@ public final class SiriAssistant {
         speakLog("speakOnce 进入: " + t.length() + " 字");
         // 等一小会儿插件写的口播稿（它要跑一次模型，通常 1~3 秒）：
         // 不等的话球会在插件写文件之前就把"规则清洗版"念完，好稿子白写。
+        final long turnStartMs = now;      // 本轮起点：只接受这之后写的稿子
         new Thread(new Runnable() {
             @Override public void run() {
                 long wait = waitPluginMs();
                 long t0 = System.currentTimeMillis();
                 speakLog("开始等插件口播稿（最多 " + wait + "ms）");
-                String plugin = waitForPluginSpoken(wait);
+                String plugin = waitForPluginSpoken(wait, turnStartMs);
                 speakLog(plugin != null ? ("等到插件稿 " + plugin.length() + " 字（等了 " + (System.currentTimeMillis() - t0) + "ms）")
                                         : ("没等到插件稿（等满 " + (System.currentTimeMillis() - t0) + "ms）→ 用规则清洗版"));
                 main.post(new Runnable() {
@@ -767,11 +778,11 @@ public final class SiriAssistant {
      * 等插件写下口播稿（轮询 spoken.txt）。等到就取走并删掉；超时返回 null。
      * 在后台线程调用。
      */
-    private String waitForPluginSpoken(long timeoutMs) {
+    private String waitForPluginSpoken(long timeoutMs, long notBeforeMs) {
         if (!speakReplies) return null;
         long until = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < until) {
-            String t = pluginSpokenOrNull();
+            String t = pluginSpokenOrNull(notBeforeMs);
             if (t != null) {
                 try { new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE).delete(); } catch (Throwable ignored) { }
                 speakLog("轮询命中 spoken.txt: " + t.length() + " 字");
