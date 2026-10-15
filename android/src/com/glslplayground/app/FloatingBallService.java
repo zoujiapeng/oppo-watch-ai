@@ -2835,9 +2835,11 @@ public class FloatingBallService extends Service {
 
         float tw, th;
         // 高度上限（屏幕 70%）：先算出来，才能把文字按「装得下几行」截断
-        // 高度上限只看屏幕（0.88 屏高）：不能再用 winH —— 方形态的窗口高度是随文字长的，
-        // 套进上限里会把球锁死在当前高度（字号再涨也长不动）。
-        float maxBallH = screenH * 0.88f;
+        // 高度上限：屏幕的 85%（用户 2026-10-16 要求"高度也限制在屏幕 85%，且上下都不能超出屏幕"）。
+        // 不能再用 winH —— 方形态的窗口高度是随文字长的，套进上限里会把球锁死在当前高度。
+        // 0.85 屏高 ⇒ 球的半高最大 0.425 屏高，clampBallOnScreen() 的夹取区间 [halfH, screenH-halfH]
+        // 永远有效 ⇒ 球必然完整落在屏幕内。
+        float maxBallH = screenH * 0.85f;
         if (siriText != null) {
             // 直接用真实 TextView 的换行结果测量，保证球与文字完全匹配；
             // 封顶后放不下的行用省略号截掉 —— 文字永远待在球里，既不溢出也不占满屏
@@ -3259,7 +3261,7 @@ public class FloatingBallService extends Service {
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
         // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
         // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
-        renderer.waveDropPx = prefs().getInt("float_wave_drop", 92);
+        renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -3394,7 +3396,7 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
-            renderer.waveDropPx = prefs().getInt("float_wave_drop", 92);
+            renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;

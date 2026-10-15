@@ -64,7 +64,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      * 字号一变大球就变高、露出来的波顶也同比变多（用户报的「调字号时波往上跑了」就是这个）。
      * 150px 时球底边缘正好切在波的顶部一点点；想更藏就加大，想多露就减小。
      */
-    public volatile float waveDropPx = 92f;
+    public volatile float waveDropPx = 78f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -402,7 +402,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float orbLum = max(orbRaw.r, max(orbRaw.g, orbRaw.b)) * 1.2;\n" +
         "    vec3 orbGlow = vec3(0.80,0.95,1.25) * (orbLum * uOrbRim);\n" +
         "    wglow = mix(wglow, orbGlow, uOrbMix);\n" +
-        "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis;\n" +
+        // 方形态那截波顶额外提亮 ×2.2：它是**加**在玻璃上的，而方框下半部分往往压着很亮的
+        // 桌面内容，加一点点光在亮底子上等于看不见（用户原话：「波要露一点点出来，
+        // 不是完完全全看不见」）。圆球态不加成 —— 它本来就画在黑区上，对比度足够。
+        "    float waveBoost = mix(1.0, 2.2, uWaveInGlass);\n" +
+        "    col += mix(waveEff, orbEff, uOrbMix) * uWaveAmp * waveVis * waveBoost;\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
         "  col *= mix(0.70,1.,innerEdge);\n" +
