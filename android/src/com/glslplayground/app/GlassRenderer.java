@@ -81,6 +81,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ── 思考中（流体圆点）的成形参数：环半径按屏幕像素给，圆点在任何球里都是等大的圆 ──
     public volatile float orbRadius = 90f;    // 圆点环半径（屏幕像素）
     public volatile float orbOffset = -0.03f; // 环心 ny 偏移（负 = 更靠球底，避开文字）
+    /** orbOffset 的"用户设定值"（有字时会被临时改成"底带位置"，恢复时用它）。 */
+    public float orbOffsetDefault = -0.03f;
     public volatile float orbGain = 1.1f;     // 亮度增益（跟 Siri 波对齐）
     public volatile float orbRim = 1.3f;      // 边缘辉光 = 圆点自身亮度 × 这个系数（跟波对齐，别把球边点亮）
     /** 波↔圆点的交叉淡化进度：0=纯 Siri 波，1=纯流体圆点（见 FloatingBallService.setAssistantState）。 */

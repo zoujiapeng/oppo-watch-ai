@@ -630,18 +630,32 @@ public class FloatingBallService extends Service {
         //   · THINKING（思考/操作/执行命令）→ 流体圆点（处理中）；
         //   · ANSWERING/IDLE 没字 → 交还用户自己的 Siri 模式设定。
         if (hasBallText() && !"LISTENING".equals(state) && !"TRANSCRIBING".equals(state)) {
-            // 有字：幅度压到 0（不出波也不出圆点），只记下"字没了之后该显示什么"。
-            // 形态切换推迟到文字消失那一刻 —— 否则会在文字还在时换脸，破坏连续性。
             renderer.waveOn = true;
-            waveGateTarget = 0f;
-            orbWanted = "THINKING".equals(state) ? 1f : 0f;
-            // 有字：默认不出波，但**整轮结束后**要在球底出一道"进了玻璃的"波（见 refreshFinalWave）
+            if ("THINKING".equals(state) && renderer.waveInGlass <= 0.5f) {
+                // ★ 用户 2026-10-16 新要求：「方形里也要能看到处理中动画 —— 处理中的动画和那段
+                //   文字待在一起等下一个回复」。所以有字时**不再**把圆点压到 0：
+                //   把流体圆点沉到"底部动效带"里（文字区已经不占那条带，见 updateSiriTextPos）。
+                // 位置：球底往上 animBand/2（屏占比），并放大 uOrbOffset 让圆点真的落在那条带上。
+                setWaveForm(2);
+                float halfH = winSize * 0.9f * Math.max(0.05f, tHalfY) * 0.5f;
+                float depthPerNy = Math.max(dp(40), halfH * 0.85f);
+                float wantNy = Math.min(0.85f, (siriAnimBand * 0.5f) / depthPerNy);
+                renderer.orbOffset = Math.max(0.05f, wantNy);
+                setOrbMixTarget(1f);
+                waveGateTarget = 1f;
+                orbWanted = 1f;
+            } else {
+                // 其它（回答中/操作中且没在思考）：文字为主，动效压到 0
+                waveGateTarget = 0f;
+                orbWanted = 0f;
+            }
             refreshFinalWave();
-            Log.i("FloatingBall", "有字优先：状态 " + state + " 不出圆点（turnEnded="
-                    + turnEnded + " waveInGlass=" + renderer.waveInGlass
-                    + "，字没了显示 orbMix=" + orbWanted + "）");
+            Log.i("FloatingBall", "有字 + 状态 " + state + " → 动效="
+                    + (orbWanted > 0.5f ? "底带流体圆点" : "关（文字为主）"));
             return;
         }
+        // 没字：把圆点偏移交还给 renderer 自己的默认值（用户设置，见 applyParams 的 orbOff）
+        renderer.orbOffset = renderer.orbOffsetDefault;
         if ("THINKING".equals(state)) {
             // 只有「思考中」才切到流体圆点
             saveWaveOnce();
@@ -2111,6 +2125,19 @@ public class FloatingBallService extends Service {
     private static final long MD_SCROLL_HOLD_MS = 1500;
     /** 文字层当前是否可触摸（内容超出视口才 true —— 装得下时手势归球）。 */
     private volatile boolean siriTextTouchable = false;
+    /**
+     * 方形底部给"处理中动画"预留的带子占球高的比例。
+     *
+     * 用户要求：「方形回复后进入思考/执行命令时也要看得到处理中动画」——
+     * 以前"有字就把动画压到 0"（那是早期"文字和波不能同时出现"的要求）。
+     * 现在文字区底部让出这条带子，流体圆点沉到这里显示（见 applyAssistantState）。
+     * 想让带子更高/更矮就改这个数（0.10 ~ 0.22 之间比较合适）。
+     */
+    private static final float ANIM_BAND_RATIO = 0.14f;
+
+    /** 方形底部给"处理中动画"预留的带子高度（px）。 */
+    private volatile int siriAnimBand = 0;
+    private int animBandPx = 0;
     /** 文字区视口高度（= 文字窗高度）。 */
     private volatile int siriViewportH = 0;
     /** 球内正文字号 = 设置页「Siri 字号」× 该比例（用户真机定档 0.25 ≈ 18px）。 */
@@ -3556,10 +3583,16 @@ public class FloatingBallService extends Service {
         int topPad = (int) dp(8);           // 与 rebuildMarkdown 的 padTop 保持一致
         int padBottomSafe = (int) dp(14);
         int tw = Math.max((int) dp(40), mdLayoutWidthPx());
-        // 高度 = 球顶+留白 → 球底−留白，但**同时**不能超出屏幕可用范围，
+        // ★ 方形里给"处理中动画"留一条底带（用户要求：方形内也要能看到处理中动画）。
+        //   文字区不占满到球底，底部留出这条带子；带子高度 = 球高的 14%（夹在 70~200px）。
+        float glassHalfH = Math.max(dp(20), (winH - 2f * dp(24)) / 2f);
+        animBandPx = Math.round(Math.max(dp(70), Math.min(dp(200), glassHalfH * 2f * ANIM_BAND_RATIO)));
+        siriAnimBand = animBandPx;
+        // 高度 = 球顶+留白 → 球底−留白（再减动效带），**同时**不能超出屏幕可用范围，
         // 也不能小于 0（球被摆得很高时空间会不够）。空间不足就变矮，由 ScrollView 滚。
         int availTop = Math.round(ballTop + topPad);
-        int availBottom = Math.round(Math.min(ballBottom - padBottomSafe, screenH - (int) dp(8)));
+        int availBottom = Math.round(Math.min(ballBottom - padBottomSafe - animBandPx,
+                screenH - (int) dp(8)));
         int th = Math.max((int) dp(40), availBottom - availTop);
         th = Math.min(th, Math.max((int) dp(40), Math.round(screenH - dp(12))));
         siriViewportH = th;
@@ -3763,6 +3796,7 @@ public class FloatingBallService extends Service {
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
+        renderer.orbOffsetDefault = renderer.orbOffset;   // 有字时会被临时改到"底带"，恢复用这个
         // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
         // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
         renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
