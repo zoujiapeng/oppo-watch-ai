@@ -33,6 +33,19 @@ public final class SiriAssistant {
     public interface Stream {
         /** @param soFar 到目前为止的完整回答文本（增量已合并） */
         void onDelta(String soFar);
+        /**
+         * 一条助手消息收完（**每个 step 一条，非最终回复也会来**）。
+         *
+         * 为什么要这个回调：朗读原来只在 turn/end 发生，于是「先说了两句话、
+         * 再跑两分钟工具」这一整段是哑的。DSH 的 assistant/message 事件是
+         * 按 step 落的（一次模型调用 = 一条），拿它才能做到「一有新回复就念」。
+         *
+         * @param text     这条消息的正文（可能是空串：那一步只有工具调用）
+         * @param turn     DSH 的回合号（取不到时用事件 seq 兜底）
+         * @param step     DSH 的步骤号
+         * @param hasTools 这条消息里带不带工具调用 —— 带 = 处理中的旁白，不带 = 本回合最终回复
+         */
+        void onMessage(String text, long turn, int step, boolean hasTools);
         void onDone(String full);
         void onError(String message);
     }
@@ -45,6 +58,8 @@ public final class SiriAssistant {
         void onAttemptStart();
         void onText(String soFar);
         void onFinal(String text);
+        /** 见 {@link Stream#onMessage}：每个 step 一条，非最终回复也念。 */
+        void onMessage(String text, long turn, int step, boolean hasTools);
         void onTurnEnd();
         void onStatus(String note);
     }
@@ -60,6 +75,19 @@ public final class SiriAssistant {
         /** 常驻镜像：跟着当前会话，AI 一有输出就往球里打。 */
         void startMirror(Mirror mirror);
         void stopMirror();
+    }
+
+    /**
+     * 转写结果交给谁 —— 搜索胶囊里的麦克风走这条路。
+     *
+     * 为什么要一个"出口"而不是直接问：球内文字只允许出现两种东西（你说的那句 + AI 的回答），
+     * 而搜索胶囊要的是"把识别到的字**放进输入框**，再当作用户打的字发出去"。
+     * 所以录音/转写这两步照旧复用 {@link VoiceCapture} + DSH 的 speech/transcribe，
+     * 只有"识别完交给谁"这一处分叉：默认写进球里；带 sink 时交给搜索框。
+     */
+    public interface TranscriptSink {
+        void onTranscript(String text);
+        void onTranscriptFailed(String message);
     }
 
     public enum State { OFF, IDLE, LISTENING, TRANSCRIBING, THINKING, ANSWERING }
@@ -88,6 +116,7 @@ public final class SiriAssistant {
                 app.getSharedPreferences("siri_assistant", Context.MODE_PRIVATE);
         enabled = sp.getBoolean("enabled", true);
         speakReplies = sp.getBoolean("speak", true);
+        speakSteps = sp.getBoolean("speak_steps", true);   // 处理中的非最终回复也念（默认开）
         // 一次性清理：早期版本把 DeepSeek key 存在这里过，现在改用 DSH 插件（不需要 key），
         // 留着只是多一份无用的敏感数据。
         if (sp.contains("speak_key") || sp.contains("speak_model")) {
@@ -252,11 +281,17 @@ public final class SiriAssistant {
                 });
             }
 
+            @Override public void onMessage(final String text, final long turn,
+                                            final int step, final boolean hasTools) {
+                if (askInFlight) return;      // 球自己问的那一轮由本地那条流负责念
+                speakMessage(text, turn, step, !hasTools);
+            }
+
             @Override public void onTurnEnd() {
                 // 朗读**不能**被 askInFlight 挡掉：用户通过球说话时 askInFlight=true，
                 // 原来这里连续两道 `if (askInFlight) return;` 会把朗读整个跳过 ——
                 // 而 App 自己那条流式路径又不调用 speak()，结果两条路都不出声（实测就是这个）。
-                // 所以：状态复位仍旧受 askInFlight 约束，朗读用「本轮已念过的内容」去重。
+                // 所以：状态复位仍旧受 askInFlight 约束，朗读用「本轮已念过的 (turn,step)」去重。
                 final String textToSpeak = speakReplies ? mirrorBuf.toString() : "";
                 main.post(new Runnable() {
                     @Override public void run() {
@@ -267,7 +302,8 @@ public final class SiriAssistant {
                         // （用户要求：方形态只有最终结果时才出波，且这道波要与背景同一套折射）
                         turnSettled = true;          // ★ 只有这里算"最终回复"
                         FloatingBallService.setAssistantTurnEnded(true);
-                        speakOnce(textToSpeak);
+                        // 逐条念过就不再补念（兜底：镜像没收到 assistant/message 时才用它）
+                        speakTurnEnd(textToSpeak);
                     }
                 });
             }
@@ -361,15 +397,23 @@ public final class SiriAssistant {
     }
 
     public void beginListening() {
+        beginListening(null);
+    }
+
+    /** 录音，识别完把字交给 {@code sink}（null = 老路：写进球里再提问）。 */
+    public void beginListening(final TranscriptSink sink) {
         if (!enabled) return;
         if (transport == null) {
             toast("DSH 未连接");
+            if (sink != null) sink.onTranscriptFailed("DSH 未连接");
             return;
         }
         if (!ensureMicPermission()) {
             toast("需要麦克风权限：请在设置里允许后重试");
+            if (sink != null) sink.onTranscriptFailed("需要麦克风权限");
             return;
         }
+        transcriptSink = sink;
         say("");
         FloatingBallService.setAssistantTurnEnded(false);
         setState(State.LISTENING);
@@ -382,37 +426,66 @@ public final class SiriAssistant {
                     @Override public void run() {
                         toast(reason);
                         setState(State.IDLE);
+                        TranscriptSink s = takeTranscriptSink();
+                        if (s != null) s.onTranscriptFailed(reason);
                     }
                 });
             }
         });
-        if (!ok) setState(State.IDLE);
+        if (!ok) {
+            setState(State.IDLE);
+            TranscriptSink s = takeTranscriptSink();
+            if (s != null) s.onTranscriptFailed("录音启动失败");
+        }
+    }
+
+    /** 正在录音（搜索胶囊的麦克风按钮靠它决定"再点一下 = 结束并发送"）。 */
+    public boolean isListening() { return state == State.LISTENING; }
+
+    private volatile TranscriptSink transcriptSink;
+
+    private TranscriptSink takeTranscriptSink() {
+        TranscriptSink s = transcriptSink;
+        transcriptSink = null;
+        return s;
     }
 
     public void finishListening() {
         if (state != State.LISTENING) return;
+        final TranscriptSink sink = takeTranscriptSink();   // 先取走：搜一次只交一次
         setState(State.TRANSCRIBING);
         FloatingBallService.setAssistantLevel(0f);
         byte[] wav = capture.stop();
         if (wav == null) {
             toast("没有录到声音");
             setState(State.IDLE);
+            if (sink != null) sink.onTranscriptFailed("没有录到声音");
             return;
         }
         // 转写期间球里不写字（只留波形随音量呼吸），识别完直接把「你说了什么」显示出来
         final Transport t = transport;
-        if (t == null) { setState(State.IDLE); return; }
+        if (t == null) {
+            setState(State.IDLE);
+            if (sink != null) sink.onTranscriptFailed("DSH 未连接");
+            return;
+        }
         t.transcribe(VoiceCapture.toBase64(wav), new Result<String>() {
             @Override public void ok(final String text) {
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (text == null || text.trim().isEmpty()) {
                             toast("没听清，再说一次");
-                            sayNow("");
                             setState(State.IDLE);
+                            if (sink != null) { sink.onTranscriptFailed("没听清"); return; }
+                            sayNow("");
                             return;
                         }
                         // 先把你说的那句显示在球里，回答到了再逐字替换
+                        if (sink != null) {          // 搜索胶囊：把字交给输入框，由那边决定发不发
+                            setState(State.IDLE);
+                            sink.onTranscript(text.trim());
+                            return;
+                        }
                         sayNow(text.trim());
                         ask(text.trim());
                     }
@@ -424,6 +497,7 @@ public final class SiriAssistant {
                         toast("识别失败：" + message);
                         say("");
                         setState(State.IDLE);
+                        if (sink != null) sink.onTranscriptFailed(message);
                     }
                 });
             }
@@ -449,6 +523,10 @@ public final class SiriAssistant {
                     }
                 });
             }
+            @Override public void onMessage(final String text, final long turn,
+                                            final int step, final boolean hasTools) {
+                speakMessage(text, turn, step, !hasTools);
+            }
             @Override public void onDone(final String full) {
                 main.post(new Runnable() {
                     @Override public void run() {
@@ -457,7 +535,7 @@ public final class SiriAssistant {
                         if (!lastAnswer.isEmpty()) sayTyped(lastAnswer);   // 交给打字机把剩下的字弹完
                         turnSettled = true;          // 这条流自己收完了 → 算最终回复
                         setState(State.IDLE);
-                        if (speakReplies && !lastAnswer.isEmpty()) speakOnce(lastAnswer);
+                        if (!lastAnswer.isEmpty()) speakTurnEnd(lastAnswer);
                     }
                 });
             }
@@ -479,8 +557,23 @@ public final class SiriAssistant {
         sayNow("");
     }
 
+    /**
+     * 静默取消录音：搜索胶囊要接管屏幕时用（不弹 toast、不动球内文字）。
+     * 只掐「正在录/正在转写」这两态 —— 一轮问答（THINKING/ANSWERING）**不许**在这里被掐掉，
+     * 那是 DSH 那边真在跑的任务，用户只是打开了搜索框而已。
+     */
+    public void cancelListeningQuiet() {
+        if (state != State.LISTENING && state != State.TRANSCRIBING) return;
+        capture.cancel();
+        takeTranscriptSink();
+        FloatingBallService.setAssistantLevel(0f);
+        setState(State.IDLE);
+        Log.i(TAG, "cancelListeningQuiet: 录音/转写已静默取消（搜索胶囊接管）");
+    }
+
     private void abort(String note) {
         capture.cancel();
+        takeTranscriptSink();
         if (transport != null) transport.cancel();
         askInFlight = false;
         stopTyping();
@@ -740,8 +833,39 @@ public final class SiriAssistant {
     }
 
     /** DSH 插件（dsh-plugin-speech）写的口播稿；球只读它，不碰 DSH 内部。 */
-    private static final String SPOKEN_FILE = "spoken.txt";
-    private static final long SPOKEN_FRESH_MS = 120000;   // 2 分钟内的才算这一轮
+    private static final String SPOKEN_FILE = "spoken.txt";      // v1：纯文本，没有身份
+    private static final String SPOKEN_JSON = "spoken.json";     // v2：带 (turn,step)，可精确对号
+    /** 插件的心跳文件：它在跑才会有人写口播稿，它没在跑就一秒都不等。 */
+    private static final String PLUGIN_ALIVE = "speech-plugin.alive";
+    private static final long SPOKEN_FRESH_MS = 120000;          // 2 分钟内的才算这一轮
+    /** 心跳超过这么久没更新 = 插件没在跑（插件每 15 秒跳一次）。 */
+    private static final long PLUGIN_ALIVE_FRESH_MS = 45000;
+
+    private long ageOf(String name) {
+        try {
+            java.io.File f = new java.io.File(app.getExternalFilesDir(null), name);
+            if (!f.isFile()) return Long.MAX_VALUE;
+            return System.currentTimeMillis() - f.lastModified();
+        } catch (Throwable e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    /**
+     * 口播稿插件在不在跑？（读它的心跳文件）
+     *
+     * **这就是「莫名其妙停 15 秒」的根治点。** 原来是「看不到插件也盲等满
+     * speak_wait_ms（默认 15000）」—— 插件 10-16 起没被 DSH 加载的那一天多里，
+     * 每一次朗读都实打实等满 15 秒才退化成规则清洗版（speak-trace.log 里
+     * 连着十几条「等满 15xxx ms」）。现在：心跳不在或过期 → 一秒都不等。
+     */
+    private boolean pluginAlive() {
+        long age = ageOf(PLUGIN_ALIVE);
+        return age >= 0 && age < PLUGIN_ALIVE_FRESH_MS;
+    }
+
+    /** 设置页展示用。 */
+    public boolean speechPluginAlive() { return pluginAlive(); }
 
     /**
      * 优先用 DSH 插件改写好的口播稿（若存在且新鲜）；
@@ -751,7 +875,7 @@ public final class SiriAssistant {
     private String pluginSpokenOrNull() { return pluginSpokenOrNull(0L); }
 
     /**
-     * 读插件口播稿。
+     * 读插件口播稿（v1 纯文本 spoken.txt）。
      *
      * @param notBeforeMs 只接受这个时刻之后写入的文件。**关键**：插件与本轮不是同一时刻完成的，
      *   不设下界就会念到**上一轮**残留的稿子（实测：球 23:47:10 读到的 41 字是上一轮的，
@@ -776,87 +900,188 @@ public final class SiriAssistant {
         }
     }
 
-    private void speak(String text) {
-        if (!ttsReady || tts == null) {
-            Log.i(TAG, "speak 被调用但 TTS 未就绪（ttsReady=" + ttsReady + "）");
-            return;
+    /**
+     * 读插件口播稿（v2 带身份的 spoken.json）：只认「就是这条消息」的那份。
+     *
+     * 为什么要身份：插件也会在**处理中间**抢先写稿（正文安静 400ms 就改写），
+     * 那些稿子属于**别的** step。只按"文件够新"取，球会拿中间那段旁白的稿子
+     * 去念最终回复（内容对不上）。带上 (turn, step) 之后就能精确对号。
+     *
+     * @return null = 还没有（继续等）；"" = 插件明说这条不用改写（立刻用本地规则版）
+     */
+    private String readPluginJson(long turn, int step) {
+        try {
+            java.io.File f = new java.io.File(app.getExternalFilesDir(null), SPOKEN_JSON);
+            if (!f.isFile()) return null;
+            if (System.currentTimeMillis() - f.lastModified() > SPOKEN_FRESH_MS) return null;
+            byte[] buf = new byte[(int) Math.min(f.length(), 16 * 1024)];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = in.read(buf);
+            in.close();
+            if (n <= 0) return null;
+            org.json.JSONObject o = new org.json.JSONObject(new String(buf, 0, n, "UTF-8"));
+            if (o.optInt("v", 0) < 2) return null;
+            if (o.optLong("turn", -1L) != turn || (long) o.optInt("step", -1) != step) return null;
+            return o.optString("text", "");
+        } catch (Throwable e) {
+            return null;
         }
-        Log.i(TAG, "speak 请求: 原文 " + (text == null ? 0 : text.length()) + " 字");
-        // 朗读稿只有两个来源：DSH 插件写的口播稿（上文 speakOnce 已等到），
-        // 或本地规则清洗。App 侧不再自己调模型（用的是 DSH 的模型通道，不需要第二份 key）。
-        speakNow(toSpeechText(text), false);
     }
 
-    // 已念过的内容：只在时间窗内去重（原来是单个全局哈希，跨回合会误判"念过了"）
-    private final java.util.LinkedHashMap<Integer, Long> spokenHashes = new java.util.LinkedHashMap<>();
-    private static final long SPOKEN_DEDUPE_MS = 20000;
+    private void dropFile(String name) {
+        try { new java.io.File(app.getExternalFilesDir(null), name).delete(); } catch (Throwable ignored) { }
+    }
 
-    /** 同一段内容在 20 秒内只朗读一次（mirror 与本地流两条路都会走到朗读点）。 */
-    private void speakOnce(String text) {
-        if (text == null) return;
-        final String t = text.trim();
-        if (t.isEmpty()) return;
-        long now = System.currentTimeMillis();
-        java.util.Iterator<java.util.Map.Entry<Integer, Long>> it = spokenHashes.entrySet().iterator();
-        while (it.hasNext()) { if (now - it.next().getValue() > SPOKEN_DEDUPE_MS) it.remove(); }
-        int h = t.hashCode();
-        if (spokenHashes.containsKey(h)) { speakLog("20 秒内已念过，跳过"); return; }
-        spokenHashes.put(h, now);
-        if (spokenHashes.size() > 20) {
-            java.util.Iterator<Integer> k = spokenHashes.keySet().iterator();
-            if (k.hasNext()) { k.next(); k.remove(); }
+    // ── 朗读：一条助手消息念一次（含非最终回复）────────────────────────
+    //
+    // 历史：原来只有 turn/end 那一下调 speakOnce，于是「先说两句话、再跑两分钟
+    // 工具」的整段处理过程是哑的，用户要等到最后才有声音。现在按 DSH 的
+    // assistant/message 事件逐条念（一次模型调用 = 一条 = 一个 step）：
+    //   · 带工具调用的（处理中旁白）→ **立刻念**，什么都不等
+    //   · 不带工具调用的（本回合最终回复）→ 最多等一小会儿插件口播稿
+    // 去重按 (turn, step)：镜像 WebSocket 重连会把历史事件重放一遍，只按文本去重挡不住。
+
+    /** 已念过的 (turn, step)。 */
+    private final java.util.LinkedHashMap<String, Long> spokenSteps = new java.util.LinkedHashMap<>();
+    private static final int SPOKEN_STEPS_MAX = 64;
+
+    /** 最近一次朗读请求的序号：等待插件稿期间又来了新回复，就把旧的那次丢掉（别倒着念）。 */
+    private final java.util.concurrent.atomic.AtomicLong speakGen = new java.util.concurrent.atomic.AtomicLong();
+
+    /** 本轮有没有逐条念过；有的话 turn/end 就不补念一遍。 */
+    private volatile boolean spokeThisTurn = false;
+    private volatile long curTurn = -1;
+
+    /**
+     * 一条助手消息（一个 step）到达 —— 决定「立刻念 / 等一下念 / 不念」。线程安全。
+     *
+     * @param isFinal true = 这条是本回合最终回复（消息里没有工具调用）
+     */
+    private void speakMessage(String text, long turn, int step, boolean isFinal) {
+        if (!speakReplies) return;
+        if (turn <= 0) turn = 1;                       // 兜底：取不到 turn 时别让去重失效
+        final String key = turn + "/" + step;
+        final String raw = text == null ? "" : text.trim();
+        synchronized (spokenSteps) {
+            if (turn != curTurn) { curTurn = turn; spokeThisTurn = false; }
+            long now = System.currentTimeMillis();
+            java.util.Iterator<java.util.Map.Entry<String, Long>> it = spokenSteps.entrySet().iterator();
+            while (it.hasNext()) { if (now - it.next().getValue() > 600000) it.remove(); }
+            if (spokenSteps.containsKey(key)) { speakLog("这一步念过了，跳过 " + key); return; }
+            spokenSteps.put(key, now);
+            while (spokenSteps.size() > SPOKEN_STEPS_MAX) {
+                java.util.Iterator<String> k = spokenSteps.keySet().iterator();
+                if (k.hasNext()) { k.next(); k.remove(); }
+            }
         }
-        speakLog("speakOnce 进入: " + t.length() + " 字");
-        // 等一小会儿插件写的口播稿（它要跑一次模型，通常 1~3 秒）：
-        // 不等的话球会在插件写文件之前就把"规则清洗版"念完，好稿子白写。
-        final long turnStartMs = now;      // 本轮起点：只接受这之后写的稿子
+        if (!isFinal && !speakSteps) { speakLog("非最终回复（" + key + "）：「每步都念」关着，跳过"); return; }
+        if (raw.isEmpty()) return;                     // 纯工具调用那一步：没有可念的字
+        spokeThisTurn = true;
+        speakLog((isFinal ? "最终回复 " : "处理中回复 ") + key + "：" + raw.length() + " 字");
+        startSpeak(raw, isFinal, turn, step);
+    }
+
+    /** 回合末兜底：这一轮一条都没念过才补念（正常情况下上面已经逐条念完了）。 */
+    private void speakTurnEnd(String text) {
+        if (!speakReplies) return;
+        if (spokeThisTurn) { speakLog("本轮已逐条念过，turn/end 不补念"); spokeThisTurn = false; return; }
+        String t = text == null ? "" : text.trim();
+        if (t.isEmpty()) return;
+        startSpeak(t, true, -1L, -1);
+    }
+
+    /** 排一次朗读：该等插件口播稿才等，其余一律立刻念。 */
+    private void startSpeak(final String raw, final boolean isFinal, final long turn, final int step) {
+        final long gen = speakGen.incrementAndGet();
+        // 只有「最终回复」值得等模型写的口播稿（≤100 字），而且**只在插件真的在跑时**才等。
+        // 这两条就是原来那个 15 秒停顿的两半：既不看插件死活，又是全程盲等。
+        boolean wantScript = isFinal && turn > 0 && pluginAlive() && waitPluginMs() > 0;
+        if (!wantScript) {
+            speakLog("不等口播稿（" + (isFinal ? (pluginAlive() ? "等待上限为 0" : "插件没在跑") : "非最终回复")
+                    + "）→ 直接念规则清洗版");
+            // 走主线程排队（TTS 的 stop/speak 一律在主线程调，顺序也就跟着消息顺序）
+            main.post(new Runnable() {
+                @Override public void run() { speak(raw); }
+            });
+            return;
+        }
+        final long wait = waitPluginMs();
+        final long notBeforeMs = System.currentTimeMillis();
         new Thread(new Runnable() {
             @Override public void run() {
-                long wait = waitPluginMs();
                 long t0 = System.currentTimeMillis();
-                speakLog("开始等插件口播稿（最多 " + wait + "ms）");
-                String plugin = waitForPluginSpoken(wait, turnStartMs);
-                speakLog(plugin != null ? ("等到插件稿 " + plugin.length() + " 字（等了 " + (System.currentTimeMillis() - t0) + "ms）")
-                                        : ("没等到插件稿（等满 " + (System.currentTimeMillis() - t0) + "ms）→ 用规则清洗版"));
+                speakLog("开始等插件口播稿（最多 " + wait + "ms，" + turn + "/" + step + "）");
+                String got = waitForPluginSpoken(wait, turn, step, notBeforeMs);
+                speakLog(got == null
+                        ? ("没等到插件稿（等满 " + (System.currentTimeMillis() - t0) + "ms）→ 用规则清洗版")
+                        : (got.isEmpty() ? ("插件说这条不用改写（等了 " + (System.currentTimeMillis() - t0) + "ms）→ 用规则清洗版")
+                                         : ("等到插件稿 " + got.length() + " 字（等了 " + (System.currentTimeMillis() - t0) + "ms）")));
+                final String plugin = got;
                 main.post(new Runnable() {
                     @Override public void run() {
-                        if (plugin != null) speakNow(plugin, true);
-                        else speak(t);
+                        if (speakGen.get() != gen) { speakLog("已被更新的回复取代，丢弃这次朗读"); return; }
+                        if (plugin != null && !plugin.isEmpty()) speakNow(plugin, true);
+                        else speak(raw);
                     }
                 });
             }
         }, "speak-wait").start();
     }
 
-    // 等插件口播稿的时长（默认 15 秒，可用 prefs 的 speak_wait_ms 调）。
-    // 插件是在**回合结束**时才发模型请求，所以 3.5 秒远远不够：
-    // 实测 3.5s/6s 都会"等不到"，球就退化成念规则清洗版（听感就是原文）。
+    /**
+     * 等插件写下**这条消息**的口播稿。等到就取走并删掉；超时返回 null。
+     * 返回 "" 表示插件明说这条不用改写（立刻回落本地规则版，不必等满）。
+     * 在后台线程调用。
+     */
+    private String waitForPluginSpoken(long timeoutMs, long turn, int step, long notBeforeMs) {
+        if (!speakReplies) return null;
+        long until = System.currentTimeMillis() + timeoutMs;
+        while (true) {
+            String js = readPluginJson(turn, step);
+            if (js != null) { dropFile(SPOKEN_JSON); speakLog("轮询命中 spoken.json（对号成功）"); return js; }
+            String t = pluginSpokenOrNull(notBeforeMs);          // v1 兜底：没身份但新鲜的也用
+            if (t != null) { dropFile(SPOKEN_FILE); speakLog("轮询命中 spoken.txt: " + t.length() + " 字"); return t; }
+            if (System.currentTimeMillis() >= until) return null;
+            try { Thread.sleep(120); } catch (InterruptedException e) { return null; }
+        }
+    }
+
+    // 等插件口播稿的上限（默认 2.5 秒，可用 prefs 的 speak_wait_ms 调，0 = 不等）。
+    //
+    // 历史：这里原来是 **15000ms**。那是因为插件在 turn/end 之后才发模型请求，
+    // 球只能硬等；后来插件改成 400ms 防抖、实测 1 秒左右就写好稿子，15 秒就是
+    // 纯粹的"插件死了也要等满"的兜底。
     private long waitPluginMs() {
-        return prefs().getLong("speak_wait_ms", 15000L);
+        return prefs().getLong("speak_wait_ms", 2500L);
     }
     public void setSpeakWaitMs(long ms) {
-        prefs().edit().putLong("speak_wait_ms", Math.max(500L, Math.min(20000L, ms))).apply();
+        prefs().edit().putLong("speak_wait_ms", Math.max(0L, Math.min(8000L, ms))).apply();
     }
     public long getSpeakWaitMs() { return waitPluginMs(); }
 
-    /**
-     * 等插件写下口播稿（轮询 spoken.txt）。等到就取走并删掉；超时返回 null。
-     * 在后台线程调用。
-     */
-    private String waitForPluginSpoken(long timeoutMs, long notBeforeMs) {
-        if (!speakReplies) return null;
-        long until = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < until) {
-            String t = pluginSpokenOrNull(notBeforeMs);
-            if (t != null) {
-                try { new java.io.File(app.getExternalFilesDir(null), SPOKEN_FILE).delete(); } catch (Throwable ignored) { }
-                speakLog("轮询命中 spoken.txt: " + t.length() + " 字");
-                return t;
-            }
-            try { Thread.sleep(200); } catch (InterruptedException e) { return null; }
-        }
-        return null;
+    /** 「每步都念」：处理中的非最终回复也朗读（默认开）。 */
+    private volatile boolean speakSteps = true;
+    public boolean speakSteps() { return speakSteps; }
+    public void setSpeakSteps(boolean v) {
+        speakSteps = v;
+        prefs().edit().putBoolean("speak_steps", v).apply();
     }
+
+    /** 走本地规则清洗再念（不等插件的那种）。 */
+    private void speak(String text) {
+        if (!ttsReady || tts == null) {
+            Log.i(TAG, "speak 被调用但 TTS 未就绪（ttsReady=" + ttsReady + "）");
+            return;
+        }
+        Log.i(TAG, "speak 请求: 原文 " + (text == null ? 0 : text.length()) + " 字");
+        // 朗读稿只有两个来源：DSH 插件写的口播稿（上面已经等到），或本地规则清洗。
+        // App 侧不再自己调模型（用的是 DSH 的模型通道，不需要第二份 key）。
+        speakNow(toSpeechText(text), false);
+    }
+
+    // 最后一道闸：同一段内容短时间内只念一次（镜像重放 / 两条路都走到朗读点时的兜底）
+    private final java.util.LinkedHashMap<Integer, Long> spokenHashes = new java.util.LinkedHashMap<>();
+    private static final long SPOKEN_DEDUPE_MS = 8000;
 
     /** 真正送给 TTS 的那一步（规则清洗版与模型版都走这里）。 */
     private void speakNow(String spoken, boolean byModel) {
@@ -870,6 +1095,18 @@ public final class SiriAssistant {
             out.close();
         } catch (Throwable ignored) { }
         if (spoken.isEmpty()) return;
+        synchronized (spokenHashes) {
+            long now = System.currentTimeMillis();
+            java.util.Iterator<java.util.Map.Entry<Integer, Long>> it = spokenHashes.entrySet().iterator();
+            while (it.hasNext()) { if (now - it.next().getValue() > SPOKEN_DEDUPE_MS) it.remove(); }
+            Integer h = spoken.hashCode();
+            if (spokenHashes.containsKey(h)) { speakLog("8 秒内念过同样内容，跳过"); return; }
+            spokenHashes.put(h, now);
+            while (spokenHashes.size() > 20) {
+                java.util.Iterator<Integer> k = spokenHashes.keySet().iterator();
+                if (k.hasNext()) { k.next(); k.remove(); }
+            }
+        }
         speakLog("交给 TTS: " + spoken.length() + " 字（" + (byModel ? "插件口播稿" : "规则清洗") + "）");
         Log.i(TAG, "speak(" + spoken.length() + "字" + (byModel ? "，口播稿" : "，规则清洗") + "): "
                 + spoken.substring(0, Math.min(80, spoken.length())));

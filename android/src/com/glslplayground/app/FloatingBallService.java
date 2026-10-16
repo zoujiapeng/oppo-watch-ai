@@ -260,6 +260,7 @@ public class FloatingBallService extends Service {
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
             pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
+            pumpSearchRequest();          // 外部（调试脚本）开关搜索胶囊 / 喂一句要发的话
             // requestRender 交给 ball-render-driver 线程（见上），这里只推进各种包络
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
@@ -372,11 +373,23 @@ public class FloatingBallService extends Service {
     // ── 语音助手（安卓前端 ↔ DSH）：球体作为状态显示器 ──────────────────
     // 采集音量 → Siri 波振幅；助手状态 → 光效形态（聆听=声波，思考=流体圆点）
 
+    /** 短振动（双指长按唤起 / 长按取消 都用它，别各自 new 一个 Vibrator）。 */
+    private void vibrate(int ms) {
+        try {
+            android.os.Vibrator vb = (android.os.Vibrator) getSystemService(VIBRATOR_SERVICE);
+            if (vb != null) vb.vibrate(ms);
+        } catch (Throwable ignored) { }
+    }
+
     /** 麦克风实时音量（0..1），驱动球内 Siri 波的呼吸。 */
     public static void setAssistantLevel(final float rms) {
         FloatingBallService s = INSTANCE;
         if (s == null || s.renderer == null) return;
         s.renderer.voiceBoost = Math.max(0f, Math.min(1.6f, rms * 1.7f));
+        // 搜索胶囊里没有 Siri 波可看，录音的"看得见在动"落在麦克风图标的光晕上
+        if (s.searchActive && s.sqRecording && s.searchBar != null) {
+            s.searchBar.setLevel(Math.max(0f, Math.min(1f, rms * 2.4f)));
+        }
     }
 
     // 波 ↔ 流体圆点 的交叉淡化：状态一变就朝目标推进，避免「聆听→思考」时光效瞬间换脸。
@@ -619,6 +632,13 @@ public class FloatingBallService extends Service {
      */
     private void refreshFinalWave() {
         if (renderer == null) return;
+        // ⚠️⚠️ 这个布尔量是"圆点动画看不见"的**真凶**，改之前先读着色器：
+        //   `if (uWaveInGlass > 0.5) { 只画球底那一截波 } else { 圆点/波在这里画 }`
+        // 也就是说 waveInGlass=1 时，**整段流体圆点的绘制被跳过**。
+        // 老代码只要「球里有字」就把它设成 1 → 处理中（读取/运行命令/工具调用）时
+        // 无论怎么调 orbMix/orbOffset 都看不到圆点（用户报的"我还是没看到动画"）。
+        // 现在：**只有整轮结束**（waveHold，最终结果那一刻）才把波沉进玻璃；
+        // 处理中一律 0 → 圆点照常画（有字时沉到动效带、没字时铺在球心）。
         boolean show = siriEnabled && waveHold && hasBallText();
         renderer.waveInGlass = show ? 1f : 0f;
         if (show) {
@@ -628,8 +648,6 @@ public class FloatingBallService extends Service {
             // 一走淡出淡入就是用户看到的"LED 一闪一闪"。方形态固定用 Siri 波，直接钉住。
             if (renderer.waveMode != 1) { renderer.waveMode = 1; waveModePending = -1; }
             waveGateTarget = 1f;
-        } else if (hasBallText()) {
-            waveGateTarget = 0f;         // 有字但这一轮还没结束：不出波
         }
     }
 
@@ -668,8 +686,22 @@ public class FloatingBallService extends Service {
                 orbWanted = 0f;
             }
             refreshFinalWave();
+            final String st = state;
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (renderer == null) return;
+                    Log.i("FloatingBall", "动效收敛后[" + st + "]: orbMix=" + renderer.orbMix
+                            + " waveInGlass=" + renderer.waveInGlass
+                            + " waveGate=" + renderer.waveGate
+                            + " orbOffset=" + renderer.orbOffset);
+                }
+            }, 420);
             Log.i("FloatingBall", "有字 + 状态 " + state + " → 动效="
-                    + (orbWanted > 0.5f ? "底带流体圆点" : "Siri 波（与字共存）"));
+                    + (orbWanted > 0.5f ? "底带流体圆点" : "Siri 波（与字共存）")
+                    + " [实测] waveInGlass=" + renderer.waveInGlass
+                    + " orbMix=" + renderer.orbMix + " waveGate=" + renderer.waveGate
+                    + " orbOffset=" + renderer.orbOffset
+                    + " (着色的分岔：waveInGlass>0.5 就只画球底那截波、圆点整段跳过)");
             return;
         }
         // 没字：圆点回到**默认位置**（正常大小地铺在球里 —— 用户要求「读取/运行命令/工具调用
@@ -930,6 +962,16 @@ public class FloatingBallService extends Service {
         if (wm == null || glView == null || renderer == null) return;
         if (approvalShown && approvalReq != null && req.eventId != null
                 && req.eventId.equals(approvalReq.eventId)) return;
+        // 搜索胶囊开着时不能直接弹面板：两者都靠"同一颗球"的几何，同屏会互相改尺寸。
+        // 先收胶囊、等它彻底交还给球，再把面板弹出来（DSH 那边等这一秒没问题）。
+        if (searchActive || searchClosing) {
+            Log.i("FloatingBall", "审批来了，但搜索胶囊开着 → 先收胶囊，稍后再弹面板");
+            closeSearchMode("审批来了");
+            main.postDelayed(new Runnable() {
+                @Override public void run() { showApprovalPanel(req); }
+            }, 900);
+            return;
+        }
 
         saveOriginalBall();
         approvalReq = req;
@@ -2694,13 +2736,14 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 代理窗口（唯一接用户手势的窗口）：agent 注入触摸期间必须从命中测试里消失。 */
+    /** 代理窗口（唯一接用户手势的窗口）：agent 注入触摸期间、以及搜索胶囊期间必须让路。 */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
-        int want = agentActing ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
+        boolean blind = agentActing || searchActive || searchClosing;
+        int want = blind ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
         int now = ballTouchParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         if (want == now) return;
-        ballTouchParams.flags = agentActing
+        ballTouchParams.flags = blind
                 ? (ballTouchParams.flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
                 : (ballTouchParams.flags & ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
         updateProxyWindow();
@@ -2809,6 +2852,18 @@ public class FloatingBallService extends Service {
             int startX, startY;
             long lastTapAt;
             boolean dragging, longFired;
+            /** 双指按住不动 SEARCH_HOLD_MS = 唤起搜索胶囊（用户要的入口）。 */
+            final Runnable twoFingerHold = new Runnable() {
+                @Override public void run() {
+                    if (twoHoldFired || dragging) return;
+                    if (!twoDown) return;                    // 手指已经抬起来了
+                    twoHoldFired = true;
+                    Log.i("FloatingBall", "search: 双指长按 → 唤起搜索胶囊");
+                    vibrate(30);
+                    enterSearchMode("双指长按");
+                }
+            };
+            boolean twoDown = false, twoHoldFired = false;
             /** 按住不动 480ms = 长按取消（录音中或正在问答时）。 */
             final Runnable longPress = new Runnable() {
                 @Override public void run() {
@@ -2817,41 +2872,54 @@ public class FloatingBallService extends Service {
                     SiriAssistant a = SiriAssistant.peek();
                     if (a != null && a.enabled()) {
                         a.cancelByGesture();
-                        try {
-                            android.os.Vibrator vb = (android.os.Vibrator)
-                                    getSystemService(android.content.Context.VIBRATOR_SERVICE);
-                            if (vb != null) vb.vibrate(35);
-                        } catch (Throwable ignored) {}
+                        vibrate(35);
                     }
                 }
             };
             @Override public boolean onTouch(View view, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_POINTER_DOWN:
-                    case MotionEvent.ACTION_POINTER_UP:
-                        // ★ 用户要求：「无论什么状态下，双指拖动就恢复为初始形状」。
-                        // 这里不区分是按下还是抬起（只要出现过第二根手指就算双指），
-                        // 立即：清空所有文字 + 解除钉住 + 收回初始圆球。
+                        // 第二根手指落下 = 双指手势的起点。这里不再立刻复位形状，
+                        // 而是分成两种意图（用户要求）：
+                        //   · 双指**拖动** → 还是老行为：强制回到初始形状（见 ACTION_MOVE）
+                        //   · 双指**长按** → 唤起搜索胶囊（SEARCH_HOLD_MS 后触发）
+                        //   · 双指快速点一下（没动、也没按够）→ 松手时补一次复位，老手感不丢
                         if (e.getPointerCount() >= 2) {
-                            Log.i("FloatingBall", "双指手势 → 强制回到初始形状");
-                            forceHomeShape("双指手势");
+                            twoDown = true;
+                            twoHoldFired = false;
+                            main.removeCallbacks(longPress);     // 双指时不要再触发"长按取消"
+                            main.removeCallbacks(twoFingerHold);
+                            main.postDelayed(twoFingerHold, SEARCH_HOLD_MS);
                             return true;
                         }
                         return true;
                     case MotionEvent.ACTION_DOWN:
                         // 审批球挂着时不抢手势：屏幕这时候归审批球用
                         if (approvalShown) return false;
+                        if (searchActive) return false;         // 搜索胶囊期间屏幕归胶囊
                         // 球上才算（代理窗口比球略大，多出来的边不响应）
                         if (!inBallAtRaw(e.getRawX(), e.getRawY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
                         startX = params.x; startY = params.y;
                         dragging = false;
                         longFired = false;
+                        twoDown = false;
+                        twoHoldFired = false;
                         main.removeCallbacks(longPress);
                         main.postDelayed(longPress, 480);
                         return true;
                     case MotionEvent.ACTION_MOVE: {
                         float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
+                        if (twoDown) {
+                            if (!twoHoldFired && moved > dp(12)) {   // 双指拖动了 → 老行为：复位
+                                main.removeCallbacks(twoFingerHold);
+                                Log.i("FloatingBall", "双指拖动 → 强制回到初始形状");
+                                forceHomeShape("双指拖动");
+                                twoHoldFired = true;
+                                return true;
+                            }
+                            if (twoHoldFired) return true;
+                        }
                         if (!dragging) {
                             if (moved <= dp(10)) return true;        // 还没算拖动
                             dragging = true;
@@ -2860,9 +2928,20 @@ public class FloatingBallService extends Service {
                         moveBallDrag(startX + (e.getRawX() - downX), startY + (e.getRawY() - downY));
                         return true;
                     }
+                    case MotionEvent.ACTION_POINTER_UP: {
+                        main.removeCallbacks(twoFingerHold);
+                        if (twoDown && !twoHoldFired) {              // 双指没按够就松手：补一次复位
+                            Log.i("FloatingBall", "双指手势 → 强制回到初始形状");
+                            forceHomeShape("双指手势");
+                            twoHoldFired = true;
+                        }
+                        return true;
+                    }
                     case MotionEvent.ACTION_UP: {
                         main.removeCallbacks(longPress);
-                        if (longFired) return true;
+                        main.removeCallbacks(twoFingerHold);
+                        twoDown = false;
+                        if (longFired || twoHoldFired) return true;
                         float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
                         if (dragging || moved >= dp(10)) return true;    // 拖动过就只是拖动
                         long now = System.currentTimeMillis();
@@ -2880,6 +2959,8 @@ public class FloatingBallService extends Service {
                     }
                     case MotionEvent.ACTION_CANCEL:
                         main.removeCallbacks(longPress);
+                        main.removeCallbacks(twoFingerHold);
+                        twoDown = false;
                         return true;
                     default:
                         return false;
@@ -2931,6 +3012,7 @@ public class FloatingBallService extends Service {
      */
     private void clampBallOnScreen() {
         if (wm == null || glView == null || renderer == null) return;
+        if (searchActive) return;      // 搜索胶囊的位置由胶囊那份几何自己管（updateSearchWindows）
         float base = winSize * 0.9f;
         if (base <= 0f) return;
         // ⚠️ 两个坑（都实测踩过，"长回复结束后球上下跳、像跳出屏幕"就是这个）：
@@ -3244,6 +3326,16 @@ public class FloatingBallService extends Service {
 
     /** 悬浮窗「请求 y → 实际屏幕 y」的系统 inset（本机 96px 状态栏）。 */
     private float winY0() {
+        // ★ 先问 glView 自己的真实屏幕位置 —— 这是唯一在"窗口贴在屏幕最上沿"时也算得对的来源。
+        // 踩过的坑：搜索层会把窗口顶到 y=0（整屏），那时 renderer.winY 正好是 0，
+        // 而老实现要求 `renderer.winY > 0` 才算数 → inset 被当成 0 → 胶囊里那行输入框
+        // 整体下移一个状态栏（实测行在 347、胶囊在 253，差 94px）。
+        if (glView != null && params != null) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            float d = loc[1] - params.y;
+            if (d >= 0 && d < screenH / 4f) return d;
+        }
         if (renderer != null && winH > 0 && renderer.winY > 0) {
             float d = renderer.winY - params.y;
             if (d >= 0 && d < screenH / 4f) return d;
@@ -3359,6 +3451,7 @@ public class FloatingBallService extends Service {
 
     private void measureSiriTargets(String s) {
         if (approvalShown) return;      // 面板在屏上：球尺寸归面板管，别在这儿改
+        if (searchActive) return;       // 搜索胶囊在屏上：球尺寸归弹簧管（同一颗球，两套几何别互写）
         // ⚠️ 重入守卫（实测踩过、很隐蔽）：本方法里会调 showSiriTextNow()，
         // 它可能触发 rebuildMarkdown() → 又回头调 measureSiriTargets()。
         // 递归那一层会把 tHalfY 覆盖成"按文字高度算的值"，**比真实需要的小**，
@@ -3477,6 +3570,10 @@ public class FloatingBallService extends Service {
             // 生长要跟手（0.06s），收起要从容（0.22s）—— 收字时从大方框缩回圆球，
             // 太快就是"啪一下跳回去"（用户报的"上下跳动"）
             float k = 1f - (float) Math.exp(-dt / Math.max(0.02f, siriEaseTau));
+            // 搜索胶囊：几何**不由**这条指数缓动驱动，走自己的欠阻尼弹簧（searchStep 直接写 a*）
+            if (searchActive) {
+                searchStep(dt);
+            } else {
             // 面板挂着时**每帧把目标值钉回审批那一套**：Siri 那条路（镜像打字、静默清空、
             // 新一轮提问）随时可能调 measureSiriTargets() 把 tHalf* 改成小球尺寸，
             // 这里不许它影响面板 —— 面板撤走时才把控制权交还（approvalShown=false）。
@@ -3490,6 +3587,7 @@ public class FloatingBallService extends Service {
             aHalfY += (tHalfY - aHalfY) * k;
             aCorner += (tCorner - aCorner) * k;
             aBlack += (tBlack - aBlack) * k;
+            }
             if (renderer != null) {
                 renderer.siriGeom = true;
                 renderer.svBlackOffset = aBlack;
@@ -3505,7 +3603,8 @@ public class FloatingBallService extends Service {
             // 窗口跟着**动画值**走：文字期的方框是"一步步"量出来的（每换一行跳一次），
             // 而收字回圆球时更是从 1044x2097 一次性掉回 787x573 —— 用户看到的就是"上下跳"。
             // 这里按 16ms 的节拍让它跟着缓动值连续变，只在变化超过阈值时才真的动窗口。
-            if (!approvalShown && siriEnabled && aMaster > 0.02f) {
+            // 搜索层：玻璃窗是整屏（进场时设好，不动），输入行的摆放由 searchStep 负责
+            if (!searchActive && !approvalShown && siriEnabled && aMaster > 0.02f) {
                 float baseS = winSize * 0.9f;
                 maybeUpdateSiriWindowSmooth(baseS * aHalfX * aMaster, baseS * aHalfY * aMaster);
             }
@@ -3516,7 +3615,7 @@ public class FloatingBallService extends Service {
                         winSize * 0.9f * aHalfY * aMaster,
                         renderer != null ? renderer.winX : params.x,
                         renderer != null ? renderer.winY : params.y);
-            } else {
+            } else if (!searchActive) {
                 updateSiriTextPos();
             }
             main.postDelayed(this, 16);
@@ -3536,6 +3635,9 @@ public class FloatingBallService extends Service {
      */
     private void rememberHomeIfMinimal() {
         if (renderer == null || winW <= 0 || winH <= 0) return;
+        // ⚠️ 搜索胶囊期间**绝不能**记家：小黑球比最小圆球还小，判据会认成"最小形态"，
+        // 于是把小黑球的中心记成新的家（这个坑和"方框缩回途中误记家"是同一类，见下）。
+        if (searchActive) return;
         // ⚠️ 判据必须用「目标几何 + 本轮没出过字 + 窗口也是最小窗口」，**不能只看动画值**：
         // 方框缩回圆球的过程中，动画值会途经最小尺寸，而那一刻窗口还停在被 clamp 顶上来的
         // 位置 —— 于是把那个位置记成了"家"，球从此永久偏上去。
@@ -3783,8 +3885,14 @@ public class FloatingBallService extends Service {
      * 一张图上凭空浮着球里那段白字（实测：5220 字的长回答截屏时整块白字压在桌面上）。
      * 普通 View 没有 `getSurfaceControl()`，只能反射走 ViewRootImpl（API 29+ 有这个方法）。
      */
+    /** 文字层是否已经成功打过 SKIP_SCREENSHOT（成功一次就够，别每 500ms 重打）。 */
+    private volatile boolean textSkipShotDone = false;
+
     private boolean applyTextSkipScreenshot() {
-        return applySkipScreenshotTo(siriText, "text");
+        if (textSkipShotDone) return true;
+        boolean ok = applySkipScreenshotTo(siriText, "text");
+        if (ok) textSkipShotDone = true;
+        return ok;
     }
 
     /**
@@ -3870,6 +3978,636 @@ public class FloatingBallService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         if (glView == null) setupOverlay();
         return START_NOT_STICKY;
+    }
+
+    // ═══════════ 搜索层：metaball-search.html 原样移植（双指长按唤起）═══════════
+    //
+    // 用户要求原话（2026-10-17，两次强调）：
+    //   「它长按就隐藏球，然后出现小黑球，然后要和 Metaball→Search 页面里从顶部拿到的黑球
+    //     一模一样，并且要复用 Metaball→Search 页面的动画和效果，**而不是球的变体**。」
+    //
+    // 所以这一版是**搬**，不是"借鉴"：
+    //   · 形状层 = 演示页那段 FRAG **整段**移植（SearchLayerShader.java，只改了四处必须改的：
+    //     去掉 #version、bgcol 换成抓屏纹理、fwidth 换成固定 1.5px、输出改成悬浮窗的预乘 alpha）；
+    //   · 动画层 = 演示页那份 CPU 弹簧（class Spring）+ 状态机（IDLE/DRAG/CAPSULE/RETRACT）
+    //     与它那组参数（ω=11 / ζ=0.72 / K=64 / height=18 / refract=14 …）逐条照抄；
+    //   · 手势起手换成"双指长按"（用户要求），起手后**球的玻璃层整趟让路**：
+    //     `renderer.searchMode = true`，那一帧画的是演示页那一层，球一点不参与。
+    //
+    // 唯一"我们自己的"部分是：① 唤起手势（双指长按，演示页是从顶部拖）；
+    // ② 小黑球的出生点 = 球当时的球心（演示页是手指位置）；③ 胶囊里那行 DOM
+    //    （🔍 输入框 🎤）是安卓 View，不是网页 —— 版式仍照演示页的 #search 抄。
+
+    /** 演示页的 P（单位 = CSS px；安卓这边 1 CSS px = 1 dp，交给 shader 前再乘 density）。 */
+    private static final float SQ_P_K = 64f;        // 融合半径 k
+    private static final float SQ_P_HEIGHT = 18f;   // 透镜高度 height
+    private static final float SQ_P_REFRACT = 14f;  // 折射强度（负向）
+    private static final float SQ_P_HL = 1.5f;      // 高光强度
+    private static final float SQ_P_AB = 0.12f;     // 色差
+    private static final float SQ_P_CONT = 0.5f;    // 黑玻璃（容器）强度
+    private static final float SQ_OM = 11f;         // 弹簧频率 ω
+    private static final float SQ_ZE = 0.72f;       // 阻尼比 ζ
+    private static final float SQ_EDGE = 26f;       // 顶部黑边高度（CSS px）
+    private static final float SQ_R = 34f;          // 拖拽液滴半径（CSS px）
+    private static final float SQ_CAP_H = 50f;      // 胶囊高（手机档）
+    private static final float SQ_CAP_MARGIN = 44f; // 胶囊左右留白（sw - 44）
+    private static final float SQ_CAP_TOP = 70f;    // 胶囊 y = EDGE + 70
+    private static final float SQ_CAP_MAX_W = 560f; // 桌面档封顶（sw ≥ 600 时用）
+    private static final long SQ_DROP_MS = 260;     // 小黑球先单独待一会儿再弹开（演示页是等人松手）
+    private static final long SEARCH_HOLD_MS = 520; // 双指按住多久算"长按"（唤起搜索层）
+
+    private boolean searchActive = false;      // 搜索层在屏上（含进场/出场动画）
+    private boolean searchClosing = false;      // 正在出场（挡住重复进入）
+    private boolean searchOpen = false;         // 胶囊已落定、可以打字
+    private long searchGen = 0;                 // 进/出各 +1：延迟任务用它作废旧回调
+    private long searchArmAt = 0;               // 全屏"点空白关掉"层开始接受点击的时刻
+    private int sqPhase = 0;                    // 0=OFF 1=DRAG(小黑球) 2=CAPSULE 3=RETRACT
+    private float sqDropCx = 0f, sqDropCy = 0f; // 小黑球的出生点（屏幕 px，= 球当时的球心）
+    private BallSearchBar searchBar;
+    private WindowManager.LayoutParams searchBarParams;
+    private View searchOutside;
+    private WindowManager.LayoutParams searchOutsideParams;
+    private int sqBarX = Integer.MIN_VALUE, sqBarY, sqBarW, sqBarH;
+    private boolean sqRecording = false;        // 麦克风正在录
+
+    /** 一维欠阻尼弹簧（半隐式欧拉）—— 与 metaball-search.html 的 class Spring 逐行一致。 */
+    private static final class MorphSpring {
+        float x, v, target, om = SQ_OM, ze = SQ_ZE;
+        MorphSpring(float v0) { x = target = v0; }
+        MorphSpring cfg(float om, float ze) { this.om = om; this.ze = ze; return this; }
+        void jump(float v0) { x = target = v0; v = 0f; }
+        void to(float t) { target = t; }
+        void step(float dt) {
+            v += (om * om * (target - x) - 2f * ze * om * v) * dt;
+            x += v * dt;
+        }
+    }
+
+    // 演示页那个 sp 对象：cx/cy = 液滴中心，bx/by = 半宽/半高，k/dark/cont = 材质（全是 CSS px 或 0..1）
+    private final MorphSpring sqCx = new MorphSpring(0f);
+    private final MorphSpring sqCy = new MorphSpring(0f);
+    private final MorphSpring sqBx = new MorphSpring(SQ_R);
+    private final MorphSpring sqBy = new MorphSpring(SQ_R);
+    private final MorphSpring sqK = new MorphSpring(SQ_P_K);
+    private final MorphSpring sqDark = new MorphSpring(1f);
+    private final MorphSpring sqCont = new MorphSpring(0f);
+
+    private float sqDensity() {
+        return Math.max(0.5f, getResources().getDisplayMetrics().density);
+    }
+
+    /** 演示页的 capsuleRect()（单位 CSS px / dp）。 */
+    private float[] capsuleRect() {
+        float sw = screenW / sqDensity();                       // 屏宽（dp）
+        float w = sw < 600f ? sw - SQ_CAP_MARGIN : Math.min(SQ_CAP_MAX_W, sw * 0.62f);
+        float h = sw < 600f ? SQ_CAP_H : 56f;
+        return new float[]{ sw / 2f, SQ_EDGE + (sw < 600f ? SQ_CAP_TOP : 96f), w, h };
+    }
+
+    /** 演示页的 setMorphSprings()：四个形状弹簧都换成 P.om/P.ze。 */
+    private void sqSetMorphSprings() {
+        sqCx.cfg(SQ_OM, SQ_ZE);
+        sqCy.cfg(SQ_OM, SQ_ZE);
+        sqBx.cfg(SQ_OM, SQ_ZE);
+        sqBy.cfg(SQ_OM, SQ_ZE);
+    }
+
+    /** 搜索框是不是开着（设置页 / 调试脚本读）。 */
+    public static boolean isSearchBoxOpen() {
+        FloatingBallService s = INSTANCE;
+        return s != null && (s.searchActive || s.searchClosing);
+    }
+
+    public static boolean isSearchBoxTyping() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.searchOpen;
+    }
+
+    /** 从外面（设置页按钮 / 文件钩子）把搜索层叫出来。 */
+    public static void openSearchBox(String why) {
+        final FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() { s.enterSearchMode("外部：" + why); }
+        });
+    }
+
+    public static void closeSearchBox(String why) {
+        final FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() { s.closeSearchMode("外部：" + why); }
+        });
+    }
+
+    /**
+     * 唤起：**球隐藏** → 小黑球出现在球原来的球心 → 弹开成胶囊 → 输入行凝聚 + 键盘。
+     *
+     * 演示页的对应关系：pointerdown 建液滴（跟手弹簧 18/0.95），pointerup 之后
+     * setMorphSprings() 换成（11/0.72）并朝 capsuleRect 弹。我们这里没有"拖"这一段，
+     * 所以：长按 = 液滴出生（DRAG 材质：深黑 + k=64），SQ_DROP_MS 之后自动"松手"。
+     */
+    void enterSearchMode(String why) {
+        if (searchActive || searchClosing) return;
+        if (approvalShown || approvalClosing) {
+            Log.i("FloatingBall", "search: 审批球在屏上，先不开搜索框");
+            return;
+        }
+        if (wm == null || glView == null || params == null || renderer == null) return;
+        if (!siriEnabled) applySiriEnabled(true);   // 窗口/节拍那条路要活着（球本身不参与渲染）
+        if (!siriEnabled) return;
+        searchActive = true;
+        searchClosing = false;
+        searchOpen = false;
+        sqPhase = 1;
+        final long gen = ++searchGen;
+        SiriAssistant a = SiriAssistant.peek();
+        if (a != null) a.cancelListeningQuiet();     // 录音中 → 掐掉；正在问答的一轮不动它
+        forceHideAllText();                          // 球内文字先藏掉（siriStr 留着，出来还在）
+        applyBallTouchability();                     // 搜索期间屏幕归搜索层
+        // ── 记下球此刻的屏幕球心（小黑球从这儿出生）── 必须在窗口改尺寸之前算
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        sqDropCx = loc[0] + winW * 0.5f;
+        sqDropCy = loc[1] + winH * 0.5f;
+        float d = sqDensity();
+        // ── 窗口铺满整屏：演示页是整屏 demo，这一层要能画到顶部黑边与整个胶囊 ──
+        glassBufW = glassBufH = -1;
+        try { glView.getHolder().setFixedSize(0, 0); } catch (Throwable ignored) { }
+        winW = screenW;
+        winH = screenH;
+        params.width = screenW;
+        params.height = screenH;
+        params.x = 0;
+        params.y = -Math.round(winY0());
+        params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+        if (renderer != null) { renderer.winPixelW = screenW; renderer.winPixelH = screenH; }
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        glView.post(winSync);
+        // ── 液滴初值：演示页 pointerdown 那一段（cx/cy 跟手 18/0.95，bx/by 用 P 的值）──
+        sqCx.jump(sqDropCx / d);
+        sqCy.jump(sqDropCy / d);
+        sqBx.jump(SQ_R);
+        sqBy.jump(SQ_R);
+        sqK.jump(SQ_P_K);
+        sqDark.jump(1f);
+        sqCont.jump(0f);
+        sqCx.cfg(18f, 0.95f);
+        sqCy.cfg(18f, 0.95f);
+        sqBx.cfg(SQ_OM, SQ_ZE);
+        sqBy.cfg(SQ_OM, SQ_ZE);
+        if (renderer != null) {
+            renderer.searchMode = true;              // 球整趟让路：这一帧画的是演示页那一层
+            renderer.sValid = 1f;
+            renderer.sDensity = d;
+        }
+        ensureSearchWindows();
+        searchArmAt = android.os.SystemClock.uptimeMillis() + 900;
+        Log.i("FloatingBall", "search: 进入（" + why + "）小黑球 @(" + Math.round(sqDropCx)
+                + "," + Math.round(sqDropCy) + ") 球已隐藏");
+        main.postDelayed(new Runnable() {
+            @Override public void run() { sqToCapsule(gen); }
+        }, SQ_DROP_MS);
+    }
+
+    /** 演示页 pointerup 那一支：换成 P 的弹簧、朝 capsuleRect 弹，材质深黑→浅、k 收小、容器淡入。 */
+    private void sqToCapsule(final long gen) {
+        if (gen != searchGen || !searchActive || sqPhase != 1) return;
+        sqPhase = 2;
+        sqSetMorphSprings();
+        float[] c = capsuleRect();
+        sqCx.to(c[0]);
+        sqCy.to(c[1]);
+        sqBx.to(c[2] * 0.5f);
+        sqBy.to(c[3] * 0.5f);
+        sqDark.to(0f);
+        sqK.to(10f);
+        sqCont.to(1f);
+        Log.i("FloatingBall", "search: 小黑球弹开成胶囊 cx=" + Math.round(c[0] * sqDensity())
+                + " cy=" + Math.round(c[1] * sqDensity())
+                + " 半宽/半高=" + Math.round(c[2] * 0.5f * sqDensity())
+                + "/" + Math.round(c[3] * 0.5f * sqDensity()));
+        searchOpen = true;
+        if (searchBar != null) {
+            searchBar.setVisibility(View.VISIBLE);
+            searchBar.materialize(true, 0);          // 演示页 #search.appear：从模糊里凝聚（0.55s）
+        }
+        focusSearchInput();
+    }
+
+    /** 演示页 retract()：被吸回顶部黑边（cy → EDGE*0.3、bx/by → 1、材质回深黑、容器淡出）。 */
+    void closeSearchMode(String why) {
+        if (!searchActive || searchClosing) return;
+        searchClosing = true;
+        searchOpen = false;
+        sqPhase = 3;
+        final long gen = ++searchGen;
+        Log.i("FloatingBall", "search: 退出（" + why + "）");
+        if (sqRecording) {                            // 还在录音就先掐掉，别让麦克风一直开着
+            SiriAssistant a = SiriAssistant.peek();
+            if (a != null) a.cancelListeningQuiet();
+            sqRecording = false;
+        }
+        if (searchBar != null) {
+            searchBar.setRecording(false);
+            searchBar.materialize(false, 0);
+        }
+        hideSearchIme();
+        main.postDelayed(new Runnable() {
+            @Override public void run() { removeSearchWindows(); }
+        }, 170);
+        sqSetMorphSprings();
+        sqCy.to(SQ_EDGE * 0.3f);
+        sqBx.to(1f);
+        sqBy.to(1f);
+        sqDark.to(1f);
+        sqK.to(SQ_P_K);
+        sqCont.to(0f);
+        // 收尾由 searchStep 判：演示页是 `if (state === 'RETRACT' && sp.by.x < 2.5) state = 'IDLE'`
+    }
+
+    /** 每帧推进（siriTick 在 searchActive 时调用）：走演示页那套弹簧，然后把值写进 renderer。 */
+    private void searchStep(float dt) {
+        sqCx.step(dt); sqCy.step(dt); sqBx.step(dt); sqBy.step(dt);
+        sqK.step(dt); sqDark.step(dt); sqCont.step(dt);
+        float d = sqDensity();
+        if (renderer != null) {
+            renderer.searchMode = true;
+            renderer.sBlobCx = sqCx.x * d;
+            renderer.sBlobCy = sqCy.x * d;
+            renderer.sBlobHx = sqBx.x * d;
+            renderer.sBlobHy = sqBy.x * d;
+            renderer.sEdge = SQ_EDGE * d;
+            renderer.sK = sqK.x * d;
+            renderer.sHeight = SQ_P_HEIGHT * d;
+            renderer.sRefract = SQ_P_REFRACT * d;
+            renderer.sHlAmt = SQ_P_HL;
+            renderer.sAb = SQ_P_AB;
+            renderer.sDark = Math.max(0f, Math.min(1f, sqDark.x));
+            renderer.sCont = Math.max(0f, Math.min(1f, sqCont.x)) * SQ_P_CONT;
+            renderer.sValid = 1f;
+        }
+        if (sqPhase == 3 && sqBy.x < 2.5f) {          // 演示页的回落判据
+            finishSearchClose(searchGen);
+            return;
+        }
+        updateSearchWindows();
+    }
+
+    /**
+     * 输入行窗口跟着弹簧矩形走（演示页是每帧设 DOM 的 left/top/width/height，一模一样）。
+     * 只在真的变了才 updateViewLayout（整屏窗口那个教训：别每帧跨进程摆窗）。
+     */
+    private void updateSearchWindows() {
+        if (!searchActive || wm == null || searchBar == null || searchBarParams == null) return;
+        float d = sqDensity();
+        int bw = Math.max(2, Math.round(2 * sqBx.x * d));
+        int bh = Math.max(2, Math.round(2 * sqBy.x * d));
+        int bx = Math.round(sqCx.x * d - bw * 0.5f);
+        int by = Math.round(sqCy.x * d - bh * 0.5f - winY0());
+        if (Math.abs(bw - sqBarW) <= 2 && Math.abs(bh - sqBarH) <= 2
+                && Math.abs(bx - sqBarX) <= 2 && Math.abs(by - sqBarY) <= 2) return;
+        sqBarW = bw; sqBarH = bh; sqBarX = bx; sqBarY = by;
+        searchBarParams.width = bw;
+        searchBarParams.height = bh;
+        searchBarParams.x = bx;
+        searchBarParams.y = by;
+        try { wm.updateViewLayout(searchBar, searchBarParams); } catch (Throwable ignored) { }
+    }
+
+    private void finishSearchClose(long gen) {
+        if (gen != searchGen) return;
+        Log.i("FloatingBall", "search: 收回到顶部黑边，交还给球");
+        searchActive = false;                          // 先交还几何通道，下面立刻把窗口收回球窗
+        if (renderer != null) { renderer.searchMode = false; renderer.sValid = 0f; }
+        float base = winSize * 0.9f;
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
+        params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED;
+        updateSiriWindow(base * minHalfX, base * minHalfY);   // 窗口从整屏收回球窗
+        measureSiriTargets(siriStr);                         // 有字就按字重排（方形态），没字就是圆球
+        clampBallOnScreen();
+        // 代理触摸窗口这时可能还是"整屏大小"：先别让它接手，等窗口真的收完再放行
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                searchClosing = false;
+                applyBallTouchability();
+            }
+        }, 180);
+    }
+
+    /** 演示页的搜索行（🔍 输入框 🎤）+ 一块全屏"点空白关掉"层。 */
+    private void ensureSearchWindows() {
+        if (wm == null) return;
+        if (searchOutside == null) {
+            View v = new View(this);
+            v.setBackgroundColor(0x00000000);
+            v.setClickable(true);
+            searchOutsideParams = overlayParams(screenW, screenH,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            searchOutsideParams.x = 0;
+            searchOutsideParams.y = -Math.round(winY0());     // 铺满整屏（含状态栏那一带）
+            searchOutsideParams.softInputMode =
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+            // 「点空白处关掉」要防两个坑（实测踩过第一个）：
+            //  ① **唤起那串手势的尾巴**：手指还按着的时候这一层就挂上了，代理窗口一让路，
+            //     同一串手势剩下的 ACTION_UP 就落到这里 —— 表现为"搜索框刚出现就自己关掉"。
+            //     所以只认**从本层自己 DOWN 开始**的那一串（sawDown）。
+            //  ② 手指抬起有先后 → 不在 ACTION_POINTER_UP 上判定，只看最后一个 ACTION_UP。
+            v.setOnTouchListener(new View.OnTouchListener() {
+                boolean sawDown = false;
+                @Override public boolean onTouch(View view, MotionEvent e) {
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            sawDown = true;
+                            return true;
+                        case MotionEvent.ACTION_UP:
+                            if (!sawDown) return true;
+                            sawDown = false;
+                            if (android.os.SystemClock.uptimeMillis() < searchArmAt) return true;
+                            float[] c = capsuleRect();
+                            float d = sqDensity();
+                            float dx = Math.abs(e.getRawX() - c[0] * d) / Math.max(1f, c[2] * 0.5f * d);
+                            float dy = Math.abs(e.getRawY() - c[1] * d) / Math.max(1f, c[3] * 0.5f * d);
+                            Log.i("FloatingBall", "search: 全屏层收到点击 (" + Math.round(e.getRawX())
+                                    + "," + Math.round(e.getRawY()) + ") 胶囊外=" + (dx > 1f || dy > 1f));
+                            if (dx > 1f || dy > 1f) closeSearchMode("点空白处");
+                            return true;
+                        case MotionEvent.ACTION_CANCEL:
+                            sawDown = false;
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+            try { wm.addView(v, searchOutsideParams); searchOutside = v; }
+            catch (Throwable t) { Log.w("FloatingBall", "add search outside failed: " + t); }
+        }
+        if (searchBar == null) {
+            BallSearchBar bar = new BallSearchBar(this);
+            bar.setListener(new BallSearchBar.Listener() {
+                @Override public void onSubmit(String text) { submitSearch(text); }
+                @Override public void onMicTap() { onSearchMicTap(); }
+            });
+            // 故意**不带** FLAG_NOT_FOCUSABLE：悬浮窗能拿焦点，EditText 才收得到输入法
+            // （审批面板那三个坑同源，见 HANDOFF「自由输入」一节）。
+            searchBarParams = overlayParams(2, 2,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            searchBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+            bar.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override public void onFocusChange(View v, boolean hasFocus) {
+                    if (hasFocus && searchActive && searchOpen) {
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() { showSearchIme(); }
+                        }, 80);      // 窗口焦点会被系统抢走，拿到就补一次
+                    }
+                }
+            });
+            // 返回键：键盘弹着时第一下由输入法吃掉（收键盘），第二下才轮到我们 → 收起胶囊。
+            // ⚠️ 三个钩子都要挂（实测只挂第一个收不到）：OnKeyListener 只在"这个 View 自己
+            // 拿着焦点"时回调，而焦点在 EditText 上；而悬浮窗**没有 Activity** —— 没人处理的
+            // 按键走不到 Activity.onKeyDown，只能靠 addOnUnhandledKeyEventListener（API 28+）。
+            final android.view.View.OnKeyListener backEater = new android.view.View.OnKeyListener() {
+                @Override public boolean onKey(View v, int code, android.view.KeyEvent ev) {
+                    if (code == android.view.KeyEvent.KEYCODE_BACK
+                            && ev.getAction() == android.view.KeyEvent.ACTION_UP) {
+                        closeSearchMode("返回键");
+                        return true;
+                    }
+                    return false;
+                }
+            };
+            bar.setFocusableInTouchMode(true);
+            bar.setOnKeyListener(backEater);
+            bar.input().setOnKeyListener(backEater);
+            if (Build.VERSION.SDK_INT >= 28) {
+                bar.addOnUnhandledKeyEventListener(new View.OnUnhandledKeyEventListener() {
+                    @Override public boolean onUnhandledKeyEvent(View v, android.view.KeyEvent ev) {
+                        return backEater.onKey(v, ev.getKeyCode(), ev);
+                    }
+                });
+            }
+            bar.setVisibility(View.INVISIBLE);
+            try {
+                wm.addView(bar, searchBarParams);
+                searchBar = bar;
+                Log.i("FloatingBall", "search: 输入行窗口已建");
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "add search bar failed: " + t);
+            }
+        }
+    }
+
+    private void removeSearchWindows() {
+        hideSearchIme();
+        if (searchBar != null) {
+            searchBar.resetMaterial();
+            searchBar.setVisibility(View.INVISIBLE);
+        }
+        if (searchBar != null && wm != null) {
+            try { wm.removeView(searchBar); } catch (Throwable ignored) { }
+            searchBar = null;
+            searchBarParams = null;
+            sqBarX = Integer.MIN_VALUE;
+        }
+        if (searchOutside != null && wm != null) {
+            try { wm.removeView(searchOutside); } catch (Throwable ignored) { }
+            searchOutside = null;
+            searchOutsideParams = null;
+        }
+    }
+
+    private void focusSearchInput() {
+        main.removeCallbacks(searchFocusTask);
+        main.postDelayed(searchFocusTask, 240);   // 抬手之后再要焦点（键盘一弹窗口会动）
+    }
+
+    private final Runnable searchFocusTask = new Runnable() {
+        @Override public void run() { doFocusSearchInput(); }
+    };
+
+    private void doFocusSearchInput() {
+        if (searchBar == null || !searchActive) return;
+        try {
+            searchBar.requestFocus();             // 先让窗口拿焦点
+            searchBar.focusInput();               // 再让 EditText 拿焦点
+            showSearchIme();
+            Log.i("FloatingBall", "search: 请求输入焦点 winFocus=" + searchBar.hasWindowFocus());
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "search focus failed: " + t);
+        }
+    }
+
+    private void showSearchIme() {
+        if (searchBar == null) return;
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+            imm.showSoftInput(searchBar.input(), 0);
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "search ime failed: " + t);
+        }
+    }
+
+    private void hideSearchIme() {
+        if (searchBar == null) return;
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.hideSoftInputFromWindow(searchBar.getWindowToken(), 0);
+        } catch (Throwable ignored) { }
+    }
+
+    /** 键盘回车 / IME 发送：把文字交给 DSH（先收搜索层，再提问，回答落在球里）。 */
+    private void submitSearch(String text) {
+        final String t = text == null ? "" : text.trim();
+        if (t.isEmpty()) return;
+        Log.i("FloatingBall", "search: 发送 " + t.length() + " 字：" + t);
+        if (searchBar != null) {
+            searchBar.setText("");
+            searchBar.materialize(false, 0);
+        }
+        closeSearchMode("发送");
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                SiriAssistant a = SiriAssistant.get(FloatingBallService.this);
+                if (a == null) return;
+                if (!a.enabled()) {
+                    Log.w("FloatingBall", "search: 语音助手没开，这句话没发出去");
+                    android.widget.Toast.makeText(FloatingBallService.this, "DSH 语音助手没开",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                ensureSiriForAssistant();
+                a.ask(t);
+            }
+        }, 700);            // 等球回来（收层 ≈ 0.5s）再提问，文字才不会撞上搜索层的几何
+    }
+
+    /**
+     * 胶囊里的麦克风：第一下开始录，第二下结束并发送（转写结果先填进输入框，再自动发）。
+     * 转写走 DSH 那条现成的 speech/transcribe（和双击球说话同一条路），
+     * 只是识别完的字交给搜索框，而不是写进球里。
+     */
+    private void onSearchMicTap() {
+        SiriAssistant a = SiriAssistant.get(this);
+        if (!a.enabled()) {
+            Log.w("FloatingBall", "search: 语音助手没开，麦克风不可用");
+            android.widget.Toast.makeText(this, "DSH 语音助手没开",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (sqRecording || a.isListening()) {
+            a.finishListening();
+            sqRecording = false;
+            if (searchBar != null) searchBar.setTranscribing();
+            return;
+        }
+        sqRecording = true;
+        if (searchBar != null) { searchBar.setRecording(true); searchBar.setLevel(0f); }
+        a.beginListening(new SiriAssistant.TranscriptSink() {
+            @Override public void onTranscript(final String text) {
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        sqRecording = false;
+                        if (searchBar != null) searchBar.setRecording(false);
+                        if (!searchActive) return;
+                        Log.i("FloatingBall", "search: 语音识别到 " + text.length() + " 字：" + text);
+                        if (searchBar != null) searchBar.setText(text);
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() { submitSearch(text); }
+                        }, 450);                      // 让用户先看见"听到了什么"，再发出去
+                    }
+                });
+            }
+            @Override public void onTranscriptFailed(final String message) {
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        sqRecording = false;
+                        if (searchBar != null) searchBar.setRecording(false);
+                        Log.w("FloatingBall", "search: 转写失败 " + message);
+                    }
+                });
+            }
+        });
+    }
+
+    // ── 搜索层的调试口子（和 state-* / ballshot 同一套：一次性文件，用完即删）──
+    //   files/search-open   → 把搜索层叫出来（不必做双指长按）
+    //   files/search-close  → 收回去
+    //   files/search-type   → 文件内容填进输入框（不发送）
+    //   files/search-ask    → 文件内容 = 要发的文本（等价于"打字 + 回车"）
+    //   files/search-mic    → 等价于点一下麦克风
+    // 为什么需要：真机注入双指长按/输入法在当前工具链里做不到，版式和发送链路必须能脚本化回归。
+    private long nextSearchCheck = 0;
+
+    private void pumpSearchRequest() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now < nextSearchCheck) return;
+        nextSearchCheck = now + 120;
+        File dir = gateDir();
+        // 兜底不变量：搜索不在进行中，就绝不允许留着那两块窗口 ——
+        // 全屏"点空白关掉"层要是在异常路径上留下来，整块屏幕就点不动了。
+        if (!searchActive && !searchClosing && (searchOutside != null || searchBar != null)) {
+            Log.w("FloatingBall", "search: 发现搜索窗口残留（状态机没走上），强制收掉");
+            removeSearchWindows();
+        }
+        File fOpen = new File(dir, "search-open");
+        if (fOpen.exists()) {
+            fOpen.delete();
+            Log.i("FloatingBall", "search: 文件钩子 search-open");
+            enterSearchMode("文件钩子");
+        }
+        File fClose = new File(dir, "search-close");
+        if (fClose.exists()) {
+            fClose.delete();
+            closeSearchMode("文件钩子");
+        }
+        File fMic = new File(dir, "search-mic");
+        if (fMic.exists()) {
+            fMic.delete();
+            onSearchMicTap();
+        }
+        // search-type：只把字填进输入框（不发送）—— 用来验证"键盘上的回车/发送键"那条路
+        File fType = new File(dir, "search-type");
+        if (fType.exists()) {
+            String txt = readSmallString(fType, 2000);
+            fType.delete();
+            final String t = txt.trim();
+            if (!t.isEmpty()) {
+                if (!searchActive && !searchClosing) enterSearchMode("文件钩子 search-type");
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (searchBar != null) {
+                            searchBar.setText(t);
+                            searchBar.focusInput();
+                            Log.i("FloatingBall", "search: 文件钩子 search-type 填了 " + t.length()
+                                    + " 字（等键盘回车）");
+                        }
+                    }
+                }, 1500);
+            }
+        }
+        File fAsk = new File(dir, "search-ask");
+        if (fAsk.exists()) {
+            String txt = readSmallString(fAsk, 2000);
+            fAsk.delete();
+            final String t = txt.trim();
+            Log.i("FloatingBall", "search: 文件钩子 search-ask=" + t);
+            if (!t.isEmpty()) {
+                if (!searchActive && !searchClosing) enterSearchMode("文件钩子 search-ask");
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (searchBar != null) searchBar.setText(t);
+                        submitSearch(t);
+                    }
+                }, 1500);
+            }
+        }
     }
 
     // ───────────────────────── 悬浮窗 ─────────────────────────

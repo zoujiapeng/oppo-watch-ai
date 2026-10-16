@@ -35,6 +35,26 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float svMaster = 1f, svHalfX = 0.37f, svHalfY = 0.25f, svCorner = 1f;
     public volatile float svPosX = 0.5f, svPosY = 0.5f;
     public volatile float svBlackOffset = 0f;   // 黑区整体下移量（Siri 行数越多越负）
+    /**
+     * 搜索胶囊（双指长按唤起）：0 = 普通球；1 = 整块形状「上黑下透」的深色玻璃。
+     *
+     * 形状本身不在这里，它还是走 svHalfX/svHalfY/svCorner —— 因为「圆 / 胶囊 / 圆角矩形」
+     * 在 sdRoundRect 里本来就是**同一个原语**（metaball-search.html 的注释也是这么写的），
+     * 所以「小黑球 → 黑团 → 搜索胶囊」只是这三个数在弹，不需要第二套几何。
+     * 这里只管材质：顶上纯黑（用户要的"先是一团黑"）→ 往下慢慢透出折射。
+     */
+
+
+    // ── 搜索层（metaball-search.html 原样移植的那一层）────────────────────────
+    // 用户要求：「长按就隐藏球，然后出现小黑球，和 Metaball→Search 里从顶部拿到的黑球一模一样，
+    // 复用那个页面的动画和效果，而不是球的变体」。所以这一层**不是**球的形变：
+    // 它跑的是演示页自己那段 FS（SearchLayerShader），球那一趟渲染整趟让路。
+    public volatile boolean searchMode = false;
+    public volatile float sBlobCx = 0f, sBlobCy = 0f, sBlobHx = 1f, sBlobHy = 1f;  // 屏幕像素（y 向下）
+    public volatile float sEdge = 0f, sK = 64f, sHeight = 18f, sRefract = 14f;
+    public volatile float sHlAmt = 1.5f, sAb = 0.12f, sDark = 1f, sCont = 0f, sValid = 0f;
+    public volatile float sDensity = 2.75f;   // 物理像素 / CSS px（演示页的 uDpr）
+    private int searchProg = 0;
 
     private OnSurfaceReady readyCb;
 
@@ -222,6 +242,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
         "uniform vec3 uPanelAccent;\n" +
+
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
@@ -466,6 +487,51 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  gl_FragColor = vec4(sd < uMargin ? old : live, 1.0);\n" +
         "}\n";
 
+    /**
+     * 搜索层合成：把 {@link SearchLayerShader} 那套 uniform 摆好，整屏画一遍。
+     *
+     * 坐标约定必须和演示页一致：shader 里 `p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y)`
+     * 是"y 向下"的画布像素；我们的画布是**绘制缓冲**，所以给进去的每个长度量都要
+     * 乘 `k`（缓冲像素/窗口像素）—— 不这么做的话，降分辨率渲染时胶囊会整体缩一圈
+     * （球的方形态当年就是栽在这个双重/缺失缩放上，见 HANDOFF「降分辨率的坑」）。
+     */
+    private void drawSearchLayer(int bgTex) {
+        if (searchProg == 0) return;
+        float k = (winPixelW > 0 && winW > 0) ? (float) winW / (float) winPixelW : 1f;
+        float invK = 1f / Math.max(k, 1e-3f);
+        float dpr = Math.max(0.5f, sDensity) * k;      // 演示页的 uDpr（CSS px → 画布 px）
+        useProgram(searchProg);
+        bindFullscreen(searchProg);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, winW, winH);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurSrcTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(searchProg, "iBg"), 0);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(searchProg, "iBlur"), 1);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(searchProg, "uRes"), winW, winH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(searchProg, "uScreen"), screenW, screenH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(searchProg, "uWinPos"), winX, winY);
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(searchProg, "uBlob"),
+                sBlobCx * k, sBlobCy * k, Math.max(sBlobHx, 0.5f) * k, Math.max(sBlobHy, 0.5f) * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uEdge"), sEdge * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uK"), sK * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uHeight"), sHeight * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uRefract"), sRefract * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uHlAmt"), sHlAmt);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uAb"), sAb);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uDpr"), dpr);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uDark"),
+                Math.max(0f, Math.min(1f, sDark)));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uCont"),
+                Math.max(0f, Math.min(1f, sCont)));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uValid"), sValid);
+        // 屏幕 UV 方向：抓屏纹理是"屏幕像素、y 向下"，而 bgcol 收到的是画布像素 → 乘 invK 回到窗口像素
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uPxToScreen"), invK);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
+    }
+
     // ─────────────────────────── GL 生命周期 ───────────────────────────
     @Override public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -475,6 +541,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         capProg = build(VS, FS_CAP);
         blurProg = build(VS, FS_BLUR);
         compProg = build(VS, FS_COMP);
+        searchProg = build(VS, SearchLayerShader.FRAG);   // metaball-search 那一层（原样移植）
         maskProg = build(VS, FS_MASK);
 
         int[] b = new int[1];
@@ -627,6 +694,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
         buildBlur(bgTex);
+
+        // ── 搜索层：演示页那一套（球整趟让路）──────────────────────────────
+        // 抓屏/抠图/模糊三趟照旧复用（搜索层的折射就是要"球窗之外的真实桌面"），
+        // 只是合成换成 metaball-search 的 FS。
+        if (searchMode) {
+            drawSearchLayer(bgTex);
+            return;
+        }
 
         // Pass 3: 折射 + 合成 → 窗口
         useProgram(compProg);

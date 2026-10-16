@@ -27,6 +27,12 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 思考中是流体圆点、回答完文字消散、球缩回原本那颗水晶球）。DSH 侧一行没改，
 走的是它已经在给浏览器用的 HTTP / WebSocket 接口。
 
+不想说话时**双指长按这颗球**就能打字问它：球当场让路，换 **metaball-search 那一层本身**
+（不是球的形变）—— 小黑球从球原来的位置冒出来，再照演示页那套弹簧与材质弹成顶部一条
+**玻璃搜索胶囊**（🔍 输入框 🎤，光标也是演示页那颗发光白条）。键盘回车直接发送，
+点麦克风则是"录音 → 转写 → 自动发送"，点空白/返回键收回去并把球还回来。
+见 [`OPERATIONS.md`](android/docs/OPERATIONS.md) 第三·五节。
+
 | 你想干什么 | 看这份 |
 |---|---|
 | **换一台手机装（给 AI 的操作清单 + 体检命令 + 踩坑表）** | [`android/docs/DEPLOY_OTHER_PHONE.md`](android/docs/DEPLOY_OTHER_PHONE.md) |
@@ -37,11 +43,12 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | **全部操作说明**（手势 / 状态 / 每个开关 / 调试口子 / 日志速查） | [`android/docs/OPERATIONS.md`](android/docs/OPERATIONS.md) |
 | **朗读为什么好听**：用 DSH 自己的模型把回复改写成口播稿 | [`dsh-plugin-speech/README.md`](dsh-plugin-speech/README.md) |
 
-**朗读回答**：球念的不是原文，而是一份「口播稿」—— 一个 DSH 插件
-（[`dsh-plugin-speech`](dsh-plugin-speech/README.md)）在每回合结束时，用你**当前会话的模型**
-把回复压成一句到三句（≤100 字）再交给 TTS。所以 **不需要第二份 API key**，
-DSH 那边也不改一行代码；插件挂了或没装，球会自动回落到本地的规则清洗（去掉 markdown /
-代码块 / 表格 / emoji，路径与时间戳保持完整），朗读不会因此停摆。
+**朗读回答**：DSH 里**每来一条新回复就念**（一个 step 一条，**包括不是最终回复的那些**：
+跑工具前的旁白立刻就念）。**本回合最终回复**则优先念「口播稿」—— 一个 DSH 插件
+（[`dsh-plugin-speech`](dsh-plugin-speech/README.md)）用你**当前会话的模型**把回复压成
+一句到三句（≤100 字）再交给 TTS；最多等它 2.5 秒，**插件没在跑就一秒都不等**。
+所以 **不需要第二份 API key**，DSH 那边也不改一行代码；插件挂了或没装，球会自动回落到
+本地的规则清洗（去掉 markdown / 代码块 / 表格 / emoji，路径与时间戳保持完整），朗读不会因此停摆。
 
 一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，但没有语音助手）。
 

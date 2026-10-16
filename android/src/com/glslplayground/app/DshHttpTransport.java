@@ -175,6 +175,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                                     cb.onDelta(buf.toString());
                                 }
                             }
+                            // 逐条朗读：球自己问的这一轮同样每个 step 念一次
+                            cb.onMessage(body, turnOf(ev), stepOf(ev), hasToolCall(ev));
                         } else if ("turn/end".equals(type) || "session/removed".equals(type)) {
                             synchronized (lock) { done[0] = true; lock.notifyAll(); }
                         }
@@ -385,6 +387,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             if ("assistant/message".equals(type)) {
                 String body = textOf(ev);
                 if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
+                // 逐条朗读用：**每个 step** 的 assistant/message 都回调一次（含非最终回复）。
+                // 事件里带 turn/step，球拿它去重、也拿它跟插件口播稿对号。
+                cb.onMessage(body, turnOf(ev), stepOf(ev), hasToolCall(ev));
             } else if ("turn/end".equals(type)) {
                 cb.onTurnEnd();
             }
@@ -565,6 +570,35 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         return sb.toString();
     }
 
+    /**
+     * 事件的回合号。assistant/message 的数据里带 turn/step（DSH 一步一条消息）；
+     * 万一某个版本没带，就用事件的 seq 当身份，保证「同一件事只念一次」不失效。
+     */
+    private static long turnOf(JSONObject event) {
+        JSONObject data = event.optJSONObject("data");
+        long turn = data == null ? -1L : data.optLong("turn", -1L);
+        if (turn > 0) return turn;
+        return event.optLong("seq", -1L);
+    }
+
+    private static int stepOf(JSONObject event) {
+        JSONObject data = event.optJSONObject("data");
+        return data == null ? 0 : (int) data.optLong("step", 0L);
+    }
+
+    /** 这条消息里有没有工具调用 —— 有 = 处理中的旁白，没有 = 本回合最终回复。 */
+    private static boolean hasToolCall(JSONObject event) {
+        JSONObject data = event.optJSONObject("data");
+        JSONObject message = data == null ? null : data.optJSONObject("message");
+        JSONArray content = message == null ? null : message.optJSONArray("content");
+        if (content == null) return false;
+        for (int i = 0; i < content.length(); i++) {
+            JSONObject block = content.optJSONObject(i);
+            if (block != null && "tool-call".equals(block.optString("type"))) return true;
+        }
+        return false;
+    }
+
     // ── 给审批流用的几个入口（同一个 cookie / 同一个地址）────────────────
 
     /** 换一次签名 cookie 并把 cookie 串交出去（WebSocket 握手要带它）。 */
@@ -669,20 +703,30 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     /** 从 DSH 启动日志里取 launch token；直接读不到就用 root 读。 */
     private String readLaunchToken() {
         for (String path : TOKEN_LOGS) {
-            String t = grepToken(readHeadQuietly(path));
+            String t = grepToken(readTailQuietly(path, 262144));
             if (t != null) return t;
-            t = grepToken(rootCat(path));
+            t = grepToken(rootTail(path, 262144));
             if (t != null) return t;
         }
         return null;
     }
 
+    /**
+     * 取**最后一个** token，不是第一个。
+     *
+     * ⚠️ 这是个真踩过的坑（2026-10-17）：`dsh.log` 是**追加**写的（看门狗 `>>`），
+     * DSH 每重启一次就多一行启动横幅，而**只有最新那个 token 有效**。
+     * 老实现返回第一个 → DSH 一重启，球就再也认证不上；日志只有一句
+     * `DSH 未下发会话 cookie (HTTP 303)`（旧 token 换来的 303 不带 set-cookie），
+     * 看起来像 DSH 的毛病，其实是读错了行。
+     */
     private static String grepToken(String text) {
         if (text == null) return null;
+        String found = null;
         int from = 0;
         while (true) {
             int at = text.indexOf("token=", from);
-            if (at < 0) return null;
+            if (at < 0) return found;
             int i = at + 6;
             StringBuilder sb = new StringBuilder();
             while (i < text.length()) {
@@ -690,31 +734,35 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 if (Character.isLetterOrDigit(c) || c == '-' || c == '_') { sb.append(c); i++; }
                 else break;
             }
-            if (sb.length() >= 16) return sb.toString();
+            if (sb.length() >= 16) found = sb.toString();
             from = at + 6;
         }
     }
 
-    private static String readHeadQuietly(String path) {
+    /** 读文件**尾部** max 字节 —— token 在启动横幅里，日志长了只读头会错过最新那次启动。 */
+    private static String readTailQuietly(String path, int max) {
         File f = new File(path);
         if (!f.isFile() || !f.canRead()) return null;
-        InputStream in = null;
+        java.io.RandomAccessFile raf = null;
         try {
-            in = new FileInputStream(f);
-            byte[] buf = new byte[262144];
-            int n = in.read(buf);
+            raf = new java.io.RandomAccessFile(f, "r");
+            long len = raf.length();
+            raf.seek(Math.max(0, len - max));
+            byte[] buf = new byte[(int) Math.min(max, Math.max(0, len))];
+            int n = raf.read(buf);
             return n <= 0 ? null : new String(buf, 0, n, Charset.forName("UTF-8"));
         } catch (Throwable t) {
             return null;
         } finally {
-            close(in);
+            try { if (raf != null) raf.close(); } catch (Throwable ignored) { }
         }
     }
 
-    private static String rootCat(String path) {
+    private static String rootTail(String path, int max) {
         Process p = null;
         try {
-            p = new ProcessBuilder("su", "-c", "head -c 262144 " + path).redirectErrorStream(false).start();
+            p = new ProcessBuilder("su", "-c", "tail -c " + max + " " + path)
+                    .redirectErrorStream(false).start();
             String out = read(p.getInputStream());
             p.waitFor();
             return out;

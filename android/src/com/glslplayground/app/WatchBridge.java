@@ -487,6 +487,38 @@ public class WatchBridge {
         });
     }
 
+    /** 「每步都念」：处理中的非最终回复也朗读（AI 一有新回复就出声）。 */
+    @JavascriptInterface
+    public boolean getAssistantSpeakSteps() {
+        return SiriAssistant.get(act).speakSteps();
+    }
+
+    @JavascriptInterface
+    public void setAssistantSpeakSteps(final boolean v) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setSpeakSteps(v); }
+        });
+    }
+
+    /** 等插件口播稿的上限（毫秒）。0 = 一秒都不等，直接念规则清洗版。 */
+    @JavascriptInterface
+    public int getAssistantSpeakWaitMs() {
+        return (int) SiriAssistant.get(act).getSpeakWaitMs();
+    }
+
+    @JavascriptInterface
+    public void setAssistantSpeakWaitMs(final int ms) {
+        ui(new Runnable() {
+            public void run() { SiriAssistant.get(act).setSpeakWaitMs(ms); }
+        });
+    }
+
+    /** 口播稿插件在不在跑（读它的心跳文件）：没在跑时球一秒都不等。 */
+    @JavascriptInterface
+    public boolean getSpeechPluginAlive() {
+        return SiriAssistant.get(act).speechPluginAlive();
+    }
+
 
     @JavascriptInterface
     public String getAssistantEndpoint() {
@@ -509,6 +541,23 @@ public class WatchBridge {
                 SiriAssistant.get(act).ask(text);
             }
         });
+    }
+
+    /** 打开搜索胶囊（双指长按的等价入口；调版式 / 验收用，不必真做那个手势）。 */
+    @JavascriptInterface
+    public void openSearchBox() {
+        FloatingBallService.openSearchBox("设置页");
+    }
+
+    @JavascriptInterface
+    public void closeSearchBox() {
+        FloatingBallService.closeSearchBox("设置页");
+    }
+
+    /** 搜索胶囊是不是开着（含进出场动画）。 */
+    @JavascriptInterface
+    public boolean isSearchBoxOpen() {
+        return FloatingBallService.isSearchBoxOpen();
     }
 
     /** 等同于点一下球：开始/结束聆听，或打断当前一轮。 */

@@ -159,6 +159,16 @@
     <div class="row" style="margin-top:16px"><label>DSH 语音助手（点球说话）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
       <div class="row"><label>朗读回答</label><div class="switch" id="swAsstSpeak"></div></div>
+      <div id="speakBox" style="display:none">
+        <div class="row" style="margin-top:8px"><label>处理中也念（每条回复都念）</label><div class="switch" id="swAsstSteps"></div></div>
+        <div class="row" style="margin-top:10px"><label>等口播稿上限</label><span class="v" id="vSpeakWait">2.5s</span></div>
+        <input type="range" id="speakWait" min="0" max="8000" step="250" value="2500">
+        <div class="muted" style="margin-top:6px">口播稿插件：<b id="speakPlugin">—</b>。
+          <b>开</b>=最终回复最多等这么久拿模型写的短稿（插件实测约 1 秒写好），等不到就用本地规则清洗版；
+          <b>0</b>=一秒都不等。<b>插件没在跑时一秒都不等</b>，与这个滑块无关。</div>
+        <div class="muted" style="margin-top:6px">「处理中也念」= DSH 每个 step 的回复都念（含跑工具前的旁白）。
+          处理中的旁白又短又干净，<b>立刻念、不等口播稿</b>；只有本回合的最终回复才等上面那个上限。</div>
+      </div>
       <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
       <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
       <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
@@ -168,9 +178,20 @@
         <button id="btnAsstClear">清空球内文字</button>
         <button id="btnBallShot">保存球体截图</button>
       </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnSearchOpen">打开搜索框（调版式）</button>
+        <button id="btnSearchClose">关掉搜索框</button>
+      </div>
+      <div class="muted" style="margin-top:6px"><b>搜索框（打字问 DSH）</b>：<b>双指长按</b>水晶球（任何状态下都行）→
+        球缩成小黑球 →「一团黑」弹开成胶囊 → 🔍 输入框 🎤 从模糊里凝聚出来。<br>
+        打字后按<b>键盘回车（发送键）</b>直接把这句话发给 DSH；点右边的 <b>🎤</b> 开始录音、<b>再点一次</b>结束，
+        识别到的字会先填进输入框再自动发出去。<b>点空白处 / 返回键</b>收起胶囊。<br>
+        老的 <b>双指拖动</b>手势保持不变（仍是"回到初始形状"）；胶囊停在小黑球原来的高度，
+        键盘弹出来时整条胶囊会自动上移躲开键盘。</div>
       <div class="muted" style="margin-top:8px">手势：<b>双击水晶球</b>开始说话（球变回小球、波形跟着你的声音呼吸），
         <b>再双击</b>结束并发送 —— 识别完先把你说的那句话显示在球里，随后回答逐字替换它；
-        <b>长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作。单击不响应。</div>
+        <b>单指长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作；单击不响应；
+        <b>双指长按</b>=打开打字搜索框，<b>双指拖动</b>=回到初始形状。</div>
       <div class="muted" style="margin-top:6px">转写交给本机 DSH 的语音插件（该接口是整段返回、没有逐字中间结果），
         所以说话时只有波形反馈，识别完立刻把「你说了什么」显示出来。</div>
       <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
@@ -482,6 +503,37 @@
     try { W.setAssistantSpeak(on); } catch (e) {}
     syncAsst();
   });
+  // 每步都念 + 等口播稿上限 + 插件在不在跑
+  var swAsstSteps = document.getElementById('swAsstSteps');
+  var speakBox = document.getElementById('speakBox');
+  var speakWait = document.getElementById('speakWait');
+  var vSpeakWait = document.getElementById('vSpeakWait');
+  var speakPlugin = document.getElementById('speakPlugin');
+  function fmtWait(ms) { return ms <= 0 ? '不等' : (parseFloat((ms / 1000).toFixed(2)) + 's'); }
+  function syncSpeak() {
+    var on = swAsstSpeak.classList.contains('on');
+    speakBox.style.display = on ? 'block' : 'none';
+    if (!on) return;
+    var steps = true;
+    try { steps = !!W.getAssistantSpeakSteps(); } catch (e) {}
+    swAsstSteps.classList.toggle('on', steps);
+    try { var ms = W.getAssistantSpeakWaitMs(); if (ms !== undefined && ms !== null) speakWait.value = ms; } catch (e) {}
+    vSpeakWait.textContent = fmtWait(parseInt(speakWait.value, 10));
+    var alive = false;
+    try { alive = !!W.getSpeechPluginAlive(); } catch (e) {}
+    speakPlugin.textContent = alive ? '在跑（心跳正常）' : '没在跑（不等口播稿）';
+  }
+  syncSpeak();
+  swAsstSteps.addEventListener('click', function () {
+    var on = !swAsstSteps.classList.contains('on');
+    try { W.setAssistantSpeakSteps(on); } catch (e) {}
+    swAsstSteps.classList.toggle('on', on);
+  });
+  speakWait.addEventListener('input', function () {
+    vSpeakWait.textContent = fmtWait(parseInt(speakWait.value, 10));
+    try { W.setAssistantSpeakWaitMs(parseInt(speakWait.value, 10)); } catch (e) {}
+  });
+  setInterval(syncSpeak, 3000);
   asstUrl.addEventListener('change', function () {
     try { W.setAssistantEndpoint(asstUrl.value); } catch (e) {}
   });
@@ -536,6 +588,15 @@
 
   // 实时回读球内文字 / 助手状态，确认 DSH 的回答真的写进了球里
   var ballTextEl = document.getElementById('ballText');
+  var btnSearchOpen = document.getElementById('btnSearchOpen');
+  if (btnSearchOpen) btnSearchOpen.addEventListener('click', function () {
+    try { W.openSearchBox(); } catch (e) {}
+  });
+  var btnSearchClose = document.getElementById('btnSearchClose');
+  if (btnSearchClose) btnSearchClose.addEventListener('click', function () {
+    try { W.closeSearchBox(); } catch (e) {}
+  });
+
   var asstStateEl = document.getElementById('asstState');
   var ballSiriEl = document.getElementById('ballSiri');
   var mirrorEl = document.getElementById('mirrorState');

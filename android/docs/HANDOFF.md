@@ -1393,3 +1393,165 @@ sh /sdcard/stream3.sh
 dumpsys window windows | grep -A14 glslplayground | grep mAttrs   # 收字后应回到 146,919
 logcat -d | grep "ball window ->"                                  # 收字过程应是连续的一串尺寸
 ```
+
+## 朗读 v2：每条回复都念 + 15 秒怪停顿的根因（2026-10-17）
+
+### 用户的两句话
+
+1. 「只要有新的回复就朗读，不是最终回复也要朗读」；
+2. 「朗读的停顿太久了很奇怪，帮我查一下原因」。
+
+### 根因：那个"停顿"是**盲等满 15 秒**
+
+`speak-trace.log` 里最近十几次朗读全是同一个形状：
+
+```
+speakOnce 进入: 907 字 → 开始等插件口播稿（最多 15000ms）
+  → 没等到插件稿（等满 15149ms）→ 交给 TTS 713 字（规则清洗）
+```
+
+球在念之前会等 DSH 插件写的口播稿，等不到就**等满 `speak_wait_ms`（默认 15000）**才回落。
+而插件那时根本没在跑：
+
+- `~/.dsh/profiles/web/package.json` 的 `dependencies` 里有 `dsh-plugin-speech`，但
+  **`dsh.profile.bundles` 里没有它** —— 2026-10-16 02:15 装 `dsh-web-mobile-fix` 时
+  `dsh plugin add` 重写了 package.json，把手工加的 bundle 登记**抹掉了**；
+- 插件日志最后一笔停在 10-16 02:13:47，DSH 10-16 09:25 重启后再没加载过。
+
+所以：**每一次朗读都实打实停 15 秒**，然后念规则清洗版。
+
+### 顺便修掉的第二件事：只有最终回复才念
+
+原来只有 `turn/end`（镜像路径）和本地流的 `onDone` 调 `speakOnce`，
+中间每个 step 的 `assistant/message`（跑工具前的旁白）虽然**球里出字了**，却一声不响。
+
+### 改法
+
+**球側（`SiriAssistant.java` / `DshHttpTransport.java`）**
+
+- `Mirror` / `Stream` 两个接口都加了 `onMessage(text, turn, step, hasTools)`：
+  DSH 的 `assistant/message` 是**一步一条**，`turn`/`step` 从 `event.data` 取
+  （取不到就用 `seq` 兜底）；`hasTools` = 这条消息带不带 tool-call 块
+  （**不带 = 本回合最终回复**，因为 agent loop 里"没有 tool-call 就 return completed"）。
+- 每条消息都念一次，按 `(turn, step)` 去重（镜像 WebSocket 重连会重放事件，
+  只按文本哈希去重挡不住）：
+  - 处理中的旁白 → **立刻念**（规则清洗，短句本来就好听）；
+  - 最终回复 → 才去等插件口播稿，且**只在插件心跳新鲜时**等，上限默认 2500ms。
+- 心跳：`files/speech-plugin.alive`（插件每 15 秒 touch，球 45 秒内算"在跑"）。
+  **插件没在跑 → 一秒都不等** —— 这一条是对这次事故的直接免疫。
+- 口播稿带身份：`files/spoken.json = {v,turn,step,text}`，球只认 `(turn,step)` 对得上的那份；
+  `text` 为空串 = 插件说"这条我没稿子，念你本地那版"（太短/改写失败都这么回），
+  球因此**立刻**回落，不必等满超时。
+- `turn/end` 只在"本轮一条都没念过"时兜底补念。
+- 朗读排了序：`speakGen` 序号 + 主线程排队，等待期间来了新消息就丢掉旧的那次（不会倒着念）。
+
+**插件側（`dsh-plugin-speech/lib/index.js` v2）**
+
+- 只改写「不带 tool-call」的那条 = 最终回复（v1 取"本回合最长正文"，可能取到中间旁白）；
+- 写 `spoken.json`（带身份）+ `spoken.txt`（纯文本，老版球兜底）+ 心跳文件；
+- 正文 < 60 字直接跳过模型，写空稿让球立刻出声；
+- **登记改放 `~/.dsh/profiles/web/cordis.patch.yml`**（profile 自己的 patch 层，
+  `dsh plugin add` 不碰它），不再写 `dsh.profile.bundles`。
+
+**设置页**：新增「处理中也念（每条回复都念）」（`speak_steps`，默认开）、
+「等口播稿上限」（`speak_wait_ms`，默认 2500，0 = 不等）、
+状态行「口播稿插件：在跑 / 没在跑」（`WatchBridge.getSpeechPluginAlive()`）。
+
+### 实测核对（改完当天）
+
+```
+speak-trace.log: 处理中回复 1/90：93 字
+                 不等口播稿（非最终回复）→ 直接念规则清洗版
+                 交给 TTS: 87 字（规则清洗）        ← 3ms，零等待
+```
+
+另一个发现：改 `cordis.patch.yml` 会**触发热重载**（插件当场就被加载了），
+但 **ESM 模块按路径缓存**，改 `lib/index.js` 必须重启 DSH 进程才生效。
+
+## metaball 搜索层：双指长按 → 小黑球 → 搜索胶囊（2026-10-17 新增，**移植**不是仿制）
+
+### 用户要的是什么（两次强调，第一版做错了一次）
+
+> 「把 Metaball→Search 里的东西**原封不动地搬出来**」
+> 「它长按就**隐藏球**，然后出现小黑球，然后要和 Metaball→Search 页面里**从顶部拿到的黑球
+> 一模一样**，并且要**复用那个页面的动画和效果，而不是球的变体**」
+
+**第一版做错了**：我让球自己形变过去（复用球那段 shader，加 `uSearchK` 材质分支、
+把球的 SDF 从圆弹成胶囊）。用户看完直接说"理解错了"。区别在于：那仍然是**球的变体**，
+而用户要的是**演示页那一层本身**。
+
+### 现在是怎么做的（"搬"的三条）
+
+| 层 | 从哪搬 | 落在哪 |
+|---|---|---|
+| 形状/材质 | `metaball-search.html` 的 `const FRAG = \`…\`` | `SearchLayerShader.java`（**整段抄**，只改 4 处必须改的） |
+| 动画/手感 | 演示页的 `class Spring` + `P` 参数 + 状态机（IDLE/DRAG/CAPSULE/RETRACT） | `FloatingBallService` 的 `MorphSpring` + `SQ_*` 常量 + `sqPhase` |
+| 界面 | 演示页 `#search` 那段 DOM/CSS | `BallSearchBar.java`（🔍 输入框 🎤，含自绘发光光标） |
+
+着色器只改了四处（都在 `SearchLayerShader` 的头注释里标了 ★）：
+① 去掉 `#version 300 es`、`outColor`→`gl_FragColor`（本机是 GLES2）；
+② `bgcol()` 从"内嵌壁纸 + textureLod 取 mip"换成**本机抓屏的两张纹理**（清晰 iBg / 模糊 iBlur，
+   语义与演示页的 lod 一致）；
+③ `fwidth()`（GLES2 要扩展）→ 固定 1.5 物理像素 AA；
+④ 输出：演示页是整屏 demo、形状外画壁纸；我们是**悬浮窗**，形状外必须透明 →
+   只保留演示页那层软阴影（预乘 alpha），另加一行远处像素早退。
+**其余公式（sdf_union 梯度感知 smin / 圆弧剖面折射 / 8 抽样圆盘 / 色差 / edge_bleed /
+2.2px 双光高光 / crush 压暗）一个字没动** —— 这份代码的价值就是"和演示页逐行对得上"。
+
+### 渲染怎么接进来的（球整趟让路）
+
+搜索层跑在**球那个 GLSurfaceView** 里（同一条抓屏/抠图/模糊管线），但走的是**另一个 program**：
+`GlassRenderer.searchMode = true` 时 `onDrawFrame` 直接 `drawSearchLayer(bgTex); return;` ——
+球那趟合成一点不算。窗口在进场时铺满整屏（`params = 0,-winY0(),screenW,screenH`，
+缓冲设回全分辨率），所以演示页的"顶部黑边 + 胶囊"能画到屏幕边缘。
+`uDpr` 仍然传 density（演示页的 CSS px → 画布 px），所以胶囊尺寸和演示页一样是 50dp 高。
+
+### 踩过的四个坑（都实测过）
+
+1. **`winY0()` 在"窗口贴屏幕最上沿"时算成 0**：老实现要求 `renderer.winY > 0` 才算数，
+   而整屏窗口的 winY 正好是 0 → 输入行整体下移一个状态栏（实测行在 347、胶囊在 253）。
+   现在改为**先问 `glView.getLocationOnScreen()`**（唯一在 y=0 时也对得上的来源）。
+2. **放大镜贴到了胶囊左边缘**：我一开始把左边距写成 `14dp - hot`（hot 是麦克风的热区 padding），
+   但放大镜没有热区 —— 用户一眼看出来"搜索按钮偏左一点点"。现在左边距 = 14dp、右边距 = 0。
+3. **全屏"点空白关掉"层会被唤起手势的尾巴点到**：手指还按着的时候这一层就挂上了，代理窗口
+   一让路，同一串手势剩下的 `ACTION_UP` 就落到它头上 → "搜索框刚出现就自己关掉"。
+   现在只认**从本层自己 DOWN 开始**的那一串 + 800ms 静默期。
+4. **悬浮窗收不到返回键**：`OnKeyListener` 只在"这个 View 自己拿焦点"时回调（焦点其实在
+   EditText 上），而**悬浮窗没有 Activity**，没人处理的键走不到 `Activity.onKeyDown`。
+   现在三个钩子都挂：bar、EditText、`addOnUnhandledKeyEventListener`（API 28+）。
+
+### 顺带修掉的一个真 bug：DSH launch token 读的是**最旧**那个
+
+`dsh.log` 是**追加**写的（看门狗 `>>`），DSH 每重启一次就多一行启动横幅，而**只有最新那个
+token 有效**。老 `grepToken` 返回第一个 → DSH 一重启球就再也认证不上，日志只有一句
+`DSH 未下发会话 cookie (HTTP 303)`（旧 token 的 303 不带 set-cookie），看起来像 DSH 的毛病。
+现在：取最后一个 token + 读文件**尾部** 256KB。实测改完立刻 `authenticated against …`。
+
+### 怎么调 / 怎么验
+
+```bash
+D=/sdcard/Android/data/com.glslplayground.app/files
+touch $D/search-open                      # 打开（不必真做双指长按）
+printf '你好' > $D/search-type            # 只填字（再用键盘回车发）
+printf '你好' > $D/search-ask             # 一条龙：打开 → 填字 → 发送
+touch $D/search-mic                       # 点一下麦克风（再点一次=结束并转写发送）
+touch $D/search-close
+logcat -d | grep -E "search: "            # 全程日志
+printf '' > $D/ballshot && su -c "cp /data/user/0/com.glslplayground.app/files/ball-capture.png /sdcard/cap.png"
+```
+
+设置页「DSH 语音助手」里也有两个按钮：**打开搜索框（调版式）** / **关掉搜索框**。
+
+### 已验证 / 未验证
+
+- ✅ **双指长按真机跑通**（日志 `search: 进入（…）小黑球 @(540,1302) 球已隐藏`，用户实测多次）。
+- ✅ **球确实让路**：`renderer.searchMode` 那一帧画的是演示页那层，抓帧里没有球。
+- ✅ **小黑球 → 胶囊**的弹簧与材质（抓帧对过：顶部黑边 + 胶囊 + 软阴影 + 折射背景）。
+- ✅ **发光光标**：连抓 6 帧，x≈163 那一列亮/灭交替（1.12s 里 60% 亮）。
+- ✅ **打字 + 键盘回车发送**：`search: 发送 N 字` → `ws stream done: N text-deltas` → 球里出字 + TTS。
+- ✅ **麦克风**：`state=LISTENING` → 再点 `state=TRANSCRIBING` → 转写回来走 `TranscriptSink`
+  （没声音时正确回落 `search: 转写失败 没听清`）。
+- ✅ 点空白 / 发送 / 返回键 都能收，收完球**精确回到原来的家**（`siri window place: home=(…)`）。
+- ⚠️ **没验到的**：真实语音走一遍"录音→识别→自动发送"；浅色桌面下胶囊底部的折射观感
+  （设置页/桌面偏暗，看不透）；胶囊里那行字在**极亮背景**下的可读性。
+- ⚠️ 双指长按的 520ms 阈值、SQ_DROP_MS=260（小黑球单独待多久）只有用户能定。
