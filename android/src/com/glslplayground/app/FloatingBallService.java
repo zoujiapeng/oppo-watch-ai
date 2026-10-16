@@ -520,9 +520,14 @@ public class FloatingBallService extends Service {
                 cur.idleSettle = null;
                 cur.stateNow = "IDLE";
                 cur.applyAssistantState("IDLE");
-                cur.releaseTextHold();          // 本轮结束 → 球回初始圆球形态
-                Log.i("FloatingBall", "idle settle 到点 → 交还 Siri 波 / 空白（安静了 "
-                        + IDLE_SETTLE_MS + "ms）");
+                // ⚠️ 这里**绝对不能**再 releaseTextHold()（老代码就是在这收的）。
+                // DSH 一个回合里会多次报 THINKING→IDLE（工具调用之间的空档就是），
+                // 只要某个空档超过 IDLE_SETTLE_MS，方形态就被无条件收掉 ——
+                // 用户看到的"处理中动画几秒就不见了 / 球自己缩回圆球"就是这个。
+                // 用户规则：**只有最终回复**才收回初始形状，那一刻由
+                // SiriAssistant.quietTick 在安静 1.5s 后调 releaseHoldForFinalReply()。
+                Log.i("FloatingBall", "idle settle 到点 → 只交还光效，**不收方形态**"
+                        + "（收回只由最终回复触发，安静了 " + IDLE_SETTLE_MS + "ms）");
             }
         };
         s.main.postDelayed(s.idleSettle, IDLE_SETTLE_MS);
@@ -645,13 +650,16 @@ public class FloatingBallService extends Service {
                 waveGateTarget = 1f;
                 orbWanted = 1f;
             } else {
-                // 其它（回答中/操作中且没在思考）：文字为主，动效压到 0
-                waveGateTarget = 0f;
+                // 其它状态（回答中/空闲）：文字 + Siri 波共存。
+                // 用户 2026-10-16 澄清：「圆点不等于波，当初没要求波不和字共存」——
+                // 所以这里**不再压到 0**，波照常放（球底那道波与文字可以同时出现）。
+                setWaveForm(1);
+                waveGateTarget = 1f;
                 orbWanted = 0f;
             }
             refreshFinalWave();
             Log.i("FloatingBall", "有字 + 状态 " + state + " → 动效="
-                    + (orbWanted > 0.5f ? "底带流体圆点" : "关（文字为主）"));
+                    + (orbWanted > 0.5f ? "底带流体圆点" : "Siri 波（与字共存）"));
             return;
         }
         // 没字：把圆点偏移交还给 renderer 自己的默认值（用户设置，见 applyParams 的 orbOff）
@@ -1802,6 +1810,8 @@ public class FloatingBallService extends Service {
 
     private void ensureApprovalWindows() {
         if (wm == null) return;
+        // 面板的三层窗口也要排除出抓屏（否则玻璃会折射面板自己的按钮，见 applySkipScreenshotTo）
+        scheduleApprovalSkipScreenshot();
         if (approvalContent != null && approvalContent.getParent() == null) {
             try { wm.addView(approvalContent, approvalContentParams); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval content failed: " + t); }
@@ -2798,6 +2808,17 @@ public class FloatingBallService extends Service {
             };
             @Override public boolean onTouch(View view, MotionEvent e) {
                 switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_POINTER_DOWN:
+                    case MotionEvent.ACTION_POINTER_UP:
+                        // ★ 用户要求：「无论什么状态下，双指拖动就恢复为初始形状」。
+                        // 这里不区分是按下还是抬起（只要出现过第二根手指就算双指），
+                        // 立即：清空所有文字 + 解除钉住 + 收回初始圆球。
+                        if (e.getPointerCount() >= 2) {
+                            Log.i("FloatingBall", "双指手势 → 强制回到初始形状");
+                            forceHomeShape("双指手势");
+                            return true;
+                        }
+                        return true;
                     case MotionEvent.ACTION_DOWN:
                         // 审批球挂着时不抢手势：屏幕这时候归审批球用
                         if (approvalShown) return false;
@@ -2921,6 +2942,36 @@ public class FloatingBallService extends Service {
         Log.i("FloatingBall", "clampBallOnScreen: 球心 (" + Math.round(cx) + "," + Math.round(cy)
                 + ") → (" + Math.round(newCx) + "," + Math.round(newCy) + ")"
                 + " 半宽/半高=" + Math.round(halfW) + "/" + Math.round(halfH));
+    }
+
+    /**
+     * **强制回到初始形状**（双指手势 / 用户主动收球时用）。
+     *
+     * 做三件事：① 解除文字钉住；② 彻底隐藏所有文字（同 releaseTextHold 的顺序要求）；
+     * ③ 清空本轮保持状态并把几何落回最小圆球。任何状态下都可用。
+     */
+    void forceHomeShape(String why) {
+        Log.i("FloatingBall", "forceHomeShape: " + why);
+        SiriAssistant a = SiriAssistant.peek();
+        if (a != null) a.cancelByGesture();      // 顺手取消正在进行的这一轮（录音/问答）
+        setAssistantPinned(false);
+        siriStr = "";
+        forceHideAllText();                      // ① + ②
+        textHold = false;                        // ③ 本轮保持直接作废
+        releasingHold = true;
+        holdHalfX = holdHalfY = 0f;
+        siriEaseTau = 0.22f;
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        if (renderer != null) {
+            renderer.waveInGlass = 0f;
+            renderer.orbOffset = renderer.orbOffsetDefault;
+        }
+        if (glView != null) {
+            glassBufW = glassBufH = -1;
+            try { glView.getHolder().setFixedSize(0, 0); } catch (Throwable ignored) { }
+        }
+        float b0 = winSize * 0.9f;
+        updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
     }
 
     /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
@@ -3714,15 +3765,52 @@ public class FloatingBallService extends Service {
      * 普通 View 没有 `getSurfaceControl()`，只能反射走 ViewRootImpl（API 29+ 有这个方法）。
      */
     private boolean applyTextSkipScreenshot() {
-        if (Build.VERSION.SDK_INT < 29 || siriText == null) return false;
+        return applySkipScreenshotTo(siriText, "text");
+    }
+
+    /**
+     * 给**任意**悬浮窗 View 打 SKIP_SCREENSHOT（抓屏/录屏不再包含它）。
+     *
+     * 为什么需要通用版：审批面板有**三层独立窗口**（文字块 / 选项滚动 / 输入行）。
+     * 它们以前从来没打过这个标记 → 出现在 MediaProjection 的抓屏画面里
+     * → 球壳的液态玻璃把抓屏当背景采样 → **玻璃里折射出面板自己的按钮**
+     * （用户报的"审批界面的液态玻璃会折射里面的按钮本身，怪怪的"）。
+     * 窗口刚 add 时 SurfaceControl 可能还没 native 对象，所以返回 false 让调用方稍后重试。
+     */
+    private boolean applySkipScreenshotTo(View v, String what) {
+        if (Build.VERSION.SDK_INT < 29 || v == null) return false;
         try {
-            Object vr = android.view.View.class.getMethod("getViewRootImpl").invoke(siriText);
+            Object vr = android.view.View.class.getMethod("getViewRootImpl").invoke(v);
             if (vr == null) return false;
             Object sc = vr.getClass().getMethod("getSurfaceControl").invoke(vr);
-            return skipScreenshotOf((SurfaceControl) sc, "text");
+            if (sc == null) return false;
+            try {
+                Object valid = sc.getClass().getMethod("isValid").invoke(sc);
+                if (Boolean.FALSE.equals(valid)) return false;      // 还没画出来 → 下轮再来
+            } catch (Throwable ignored) { }
+            return skipScreenshotOf((SurfaceControl) sc, what);
         } catch (Throwable t) {
-            Log.w("FloatingBall", "text setSkipScreenshot failed: " + t);
+            Log.w("FloatingBall", what + " setSkipScreenshot failed: " + t);
             return false;
+        }
+    }
+
+    /** 面板窗口的抓屏排除：窗口刚建时 SurfaceControl 可能无效，重试几次。 */
+    private void scheduleApprovalSkipScreenshot() {
+        if (Build.VERSION.SDK_INT < 29) return;
+        for (int i = 0; i < 6; i++) {
+            final int attempt = i;
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    boolean ok1 = applySkipScreenshotTo(approvalContent, "approval-content");
+                    boolean ok2 = applySkipScreenshotTo(approvalActionsScroll, "approval-actions");
+                    boolean ok3 = applySkipScreenshotTo(approvalInputRow, "approval-input");
+                    if ((ok1 || approvalContent == null) && (ok2 || approvalActionsScroll == null)
+                            && (ok3 || approvalInputRow == null)) {
+                        Log.i("FloatingBall", "审批面板抓屏排除完成（第 " + (attempt + 1) + " 次尝试）");
+                    }
+                }
+            }, 120L + i * 220L);
         }
     }
 
