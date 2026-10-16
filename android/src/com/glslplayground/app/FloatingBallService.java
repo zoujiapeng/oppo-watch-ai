@@ -427,6 +427,8 @@ public class FloatingBallService extends Service {
     private static final long IDLE_SETTLE_MS = 3500;
 
     private float waveGateTarget = 1f;
+    /** 流体圆点的目标 ny 偏移（有字 → 底部动效带；没字 → 默认位置），由渲染节拍平滑推进。 */
+    private volatile float orbOffsetTarget = -0.03f;
     private int waveModePending = -1;          // 淡出到底时要切到的形态（-1=不切）
     private static final long WAVE_FADE_MS = 180;
 
@@ -447,6 +449,13 @@ public class FloatingBallService extends Service {
             return;
         }
         float step = dt * 1000f / WAVE_FADE_MS;
+        // 圆点偏移平滑跟随目标（有字→底带 / 没字→默认）。直接赋值会跳一下，这里 200ms 左右收敛。
+        if (renderer != null) {
+            float cur = renderer.orbOffset, tgt = orbOffsetTarget;
+            float k = Math.min(1f, step / 0.12f * 0.5f);
+            if (Math.abs(tgt - cur) < 0.004f) renderer.orbOffset = tgt;
+            else renderer.orbOffset = cur + (tgt - cur) * Math.max(0.06f, k);
+        }
         float g = renderer.waveGate;
         g += Math.max(-step, Math.min(step, waveGateTarget - g));
         if (Math.abs(waveGateTarget - g) < 0.01f) g = waveGateTarget;
@@ -644,8 +653,9 @@ public class FloatingBallService extends Service {
                 setWaveForm(2);
                 float halfH = winSize * 0.9f * Math.max(0.05f, tHalfY) * 0.5f;
                 float depthPerNy = Math.max(dp(40), halfH * 0.85f);
+                // 有字：圆点沉到"底部动效带"（不压字）。没字时会被下面各分支改回默认值。
                 float wantNy = Math.min(0.85f, (siriAnimBand * 0.5f) / depthPerNy);
-                renderer.orbOffset = Math.max(0.05f, wantNy);
+                orbOffsetTarget = Math.max(0.05f, wantNy);
                 setOrbMixTarget(1f);
                 waveGateTarget = 1f;
                 orbWanted = 1f;
@@ -662,8 +672,12 @@ public class FloatingBallService extends Service {
                     + (orbWanted > 0.5f ? "底带流体圆点" : "Siri 波（与字共存）"));
             return;
         }
-        // 没字：把圆点偏移交还给 renderer 自己的默认值（用户设置，见 applyParams 的 orbOff）
-        renderer.orbOffset = renderer.orbOffsetDefault;
+        // 没字：圆点回到**默认位置**（正常大小地铺在球里 —— 用户要求「读取/运行命令/工具调用
+        // 和思考是同一个状态，要用同一个动画」，而工具执行期间球里通常没字，
+        // 那时圆点若还沉在底部窄带里，就几乎看不到动画）。
+        // 没字 → 0（圆点铺在球心）。注意不能直接用用户那个 -0.03 的默认值：
+        // 扁球里 hy 小，-0.03*hy 几乎等于没偏移，反而会让圆点被球底切掉一块。
+        orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
         if ("THINKING".equals(state)) {
             // 只有「思考中」才切到流体圆点
             saveWaveOnce();
