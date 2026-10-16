@@ -4237,7 +4237,6 @@ public class FloatingBallService extends Service {
             renderer.sBlobCy = sqCy.x * d;
             renderer.sBlobHx = sqBx.x * d;
             renderer.sBlobHy = sqBy.x * d;
-            renderer.sEdge = SQ_EDGE * d;
             renderer.sK = sqK.x * d;
             renderer.sHeight = SQ_P_HEIGHT * d;
             renderer.sRefract = SQ_P_REFRACT * d;

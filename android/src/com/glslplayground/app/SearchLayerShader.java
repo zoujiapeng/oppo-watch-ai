@@ -14,7 +14,11 @@ package com.glslplayground.app;
  *   ★3 `fwidth()` 在 GLES2 要 GL_OES_standard_derivatives（不是所有机器都开）→ 换成固定
  *      1.5 物理像素 AA（球体那条管线本来就是这么做的，观感一致）；
  *   ★4 输出：演示页是整屏 demo，形状外画壁纸；我们是悬浮窗，**窗外必须透明** ——
- *      形状内输出玻璃、形状外只留演示页那层软阴影（预乘 alpha），并加了一行远处像素早退。
+ *      形状内输出玻璃、形状外只留演示页那层软阴影（预乘 alpha），并加了一行远处像素早退；
+ *   ★5 **删掉顶部黑边**（演示页的 `bar` 半平面 / uniform `uEdge`）。用户原话：
+ *      「要删掉出现搜索框时那个碰到屏幕最顶端的黑区」。所以不再和 bar 做 smin 融合，
+ *      形状就是 blob 自己；材质权重 `wb` 恒为 1（= 演示页里"离边缘很远、已落地"那一档，
+ *      于是 darkAmt 直接跟 uDark 走：拖拽=深黑、落定=浅玻璃）。
  *
  * 要改手感/参数请改 Java 侧那几个 uniform（见 FloatingBallService 的 SQ_* 常量），
  * 不要在这里动公式 —— 这一份的价值就是"跟演示页逐行对得上"。
@@ -30,7 +34,6 @@ final class SearchLayerShader {
         "uniform sampler2D iBlur; // 模糊抓屏\n" +
         "uniform float uPxToScreen; // 绘制缓冲像素 → 屏幕像素（降分辨率渲染时 > 1）\n" +
         "uniform vec4  uBlob;   // cx, cy, halfX, halfY (px, y 向下)\n" +
-        "uniform float uEdge;   // 顶部黑边高度\n" +
         "uniform float uK;      // 融合半径\n" +
         "uniform float uHeight, uRefract, uHlAmt, uAb, uDpr, uCont;\n" +
         "uniform float uDark;   // 液滴材质 1=贴边黑玻璃 0=落地浅磨砂\n" +
@@ -57,25 +60,13 @@ final class SearchLayerShader {
         "  return vec4(d, grad, 1.0);\n" +
         "}\n" +
         "\n" +
-        "// ---------- 苹果 sdf_union:梯度感知 smooth min ----------\n" +
-        "// QuartzCore ShaderUtils_::sdf_union 逐行翻译\n" +
-        "vec4 sdfUnion(vec4 a, vec4 b, float k){\n" +
-        "  if (b.w == 0.0) b = vec4(10000.0, 0.0, 0.0, 0.0);     // half 0x70E2\n" +
-        "  float kEff = k * clamp(0.5 - 0.5 * dot(a.yz, b.yz), 0.0, 1.0) + 1e-4;\n" +
-        "  float h = clamp(0.5 + 0.5 * (b.x - a.x) / kEff, 0.0, 1.0);\n" +
-        "  float d = mix(b.x, a.x, h) - kEff * h * (1.0 - h);    // IQ 多项式 smin\n" +
-        "  vec2  g = mix(b.yz, a.yz, h);                         // 梯度同步混合\n" +
-        "  return vec4(d, normalize(g + vec2(1e-5)), 1.0);\n" +
-        "}\n" +
-        "\n" +
         "void main(){\n" +
         "  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);  // y 向下,对齐 UI 坐标\n" +
         "\n" +
-        "  vec4 bar  = vec4(p.y - uEdge, 0.0, 1.0, 1.0);            // 顶部黑边 = 半平面\n" +
+        "  // ★5 不再和顶部黑边(bar)做梯度感知 smin：形状就是 blob 自己\n" +
         "  vec4 blob = sdRoundBox(p, uBlob.xy, uBlob.zw, min(uBlob.z, uBlob.w));\n" +
         "  blob.w = uValid;\n" +
-        "  vec4 s = sdfUnion(bar, blob, uK);\n" +
-        "  float d = s.x;  vec2 g = s.yz;\n" +
+        "  float d = blob.x;  vec2 g = blob.yz;\n" +
         "\n" +
         "    // 悬浮层加的一行：离形状太远的像素直接丢掉（软阴影到这里只剩 1%，看不见）\n" +
         "  if (d > 96.0 * uDpr) { gl_FragColor = vec4(0.0); return; }\n" +
@@ -85,7 +76,8 @@ final class SearchLayerShader {
         "\n" +
         "  // ---------- 玻璃 = 折射 + 高光,无 face color ----------\n" +
         "  // 公式同 QuartzCore sdf_glass_displacement/highlight,参数取 z1han siri27 标定\n" +
-        "  float wb = uValid * clamp(0.5 + 0.5 * (bar.x - blob.x) / 24.0, 0.0, 1.0);\n" +
+        "  // ★5 没有顶部黑边了 → 权重恒为 1（即演示页里「离边缘很远、已落地」那一档）\n" +
+        "  float wb = uValid;\n" +
         "  float darkAmt = mix(1.0, uDark, wb);\n" +
         "\n" +
         "  // 梯度向\"中心径向\"微混 8%,透镜更圆润(只对液滴,bar 区域 wb≈0)\n" +

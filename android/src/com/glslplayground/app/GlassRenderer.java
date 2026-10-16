@@ -51,7 +51,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // 它跑的是演示页自己那段 FS（SearchLayerShader），球那一趟渲染整趟让路。
     public volatile boolean searchMode = false;
     public volatile float sBlobCx = 0f, sBlobCy = 0f, sBlobHx = 1f, sBlobHy = 1f;  // 屏幕像素（y 向下）
-    public volatile float sEdge = 0f, sK = 64f, sHeight = 18f, sRefract = 14f;
+    public volatile float sK = 64f, sHeight = 18f, sRefract = 14f;   // 顶部黑边已按用户要求删掉（见 SearchLayerShader ★5）
     public volatile float sHlAmt = 1.5f, sAb = 0.12f, sDark = 1f, sCont = 0f, sValid = 0f;
     public volatile float sDensity = 2.75f;   // 物理像素 / CSS px（演示页的 uDpr）
     private int searchProg = 0;
@@ -515,7 +515,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(searchProg, "uWinPos"), winX, winY);
         GLES20.glUniform4f(GLES20.glGetUniformLocation(searchProg, "uBlob"),
                 sBlobCx * k, sBlobCy * k, Math.max(sBlobHx, 0.5f) * k, Math.max(sBlobHy, 0.5f) * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uEdge"), sEdge * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uK"), sK * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uHeight"), sHeight * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(searchProg, "uRefract"), sRefract * k);
