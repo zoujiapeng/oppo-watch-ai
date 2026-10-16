@@ -75,6 +75,16 @@
   </div>
 
   <div class="grp" id="grpFloat" style="display:none">
+    <div class="gh">调试覆盖层</div>
+    <div class="row"><label>坐标条 / 触摸轨迹（开发者选项）</label><div class="switch" id="swDbgOverlay"></div></div>
+    <div class="muted" style="margin-top:6px">开发者选项里的那两个覆盖层：屏幕顶部那条 <b>坐标/速度/压力</b> 条，
+      以及触摸时的 <b>彩色十字线</b>。它们由系统绘制（不属于本 App），装了这颗球之后基本没用 —— 在这里一次关掉。<br>
+      写系统设置需要权限；被拒时点下面的「授权」给一次即可（本机有 root，也会自动尝试 root 通道）。</div>
+    <div class="btns" style="margin-top:8px">
+      <button id="btnDbgOverlayAuth">授权（修改系统设置）</button>
+    </div>
+    <div class="muted" style="margin-top:4px">当前权限：<b id="dbgPermState">—</b></div>
+
     <div class="gh">悬浮水晶球</div>
     <div class="row"><label>悬浮于桌面</label><div class="switch" id="swFloat"></div></div>
     <div class="row" style="margin-top:12px;margin-bottom:8px"><label>采集方式</label></div>
@@ -99,13 +109,11 @@
     </div>
     <div class="row" style="margin-top:12px"><label>Siri 模式 (文字形变球)</label><div class="switch" id="swSiri"></div></div>
     <div id="siriBox" style="display:none;margin-top:8px">
-      <input type="text" id="siriText" placeholder="输入文字，球实时变形">
-      <div class="btns">
-        <button id="btnSiriClear">清空</button>
-        <button id="btnSiriDemo">演示</button>
-      </div>
-      <div class="row" style="margin-top:8px"><label>文字距球顶 (px)</label><span class="v" id="vSiriDy">10</span></div>
+      <div class="row" style="margin-top:8px"><label>黑区下沿位置 (px)</label><span class="v" id="vSiriDy">10</span></div>
       <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
+      <div class="muted" style="margin-top:6px">只影响<b>黑区下沿</b>（球里那块深色的下边界）。<br>
+        文字本身的位置由富文本排版固定（顶部 8px），不再受这个滑块影响。<br>
+        <span style="opacity:.75">（旧版它叫「文字距球顶」，现在那个作用已废弃。）</span></div>
       <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
       <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
       <div class="row" style="margin-top:10px"><label>球内回复字号比例</label><span class="v" id="vMdRatio">0.25</span></div>
@@ -120,6 +128,16 @@
       <div class="muted" style="margin-top:6px">「离线预览」会往球里灌一段<b>示例 markdown</b>（表格 / 标题 / 列表 / 引用 / 代码块全都有）并
         <b>钉住不消散</b>，这样不用等 DSH 回话就能拖上面的滑块调字号。<br>
         想改示例内容：编辑 <code>/sdcard/Android/data/com.glslplayground.app/files/md-sample.md</code> 再点一次预览。</div>
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;color:#9AA5B4;font-size:13px">调试：手动灌一句话进球的旧模式</summary>
+        <div class="muted" style="margin-top:6px">这里是<b>旧的纯文本通道</b>（球内任意文字，不解析 markdown）。
+          调字号/排版请用上面的「离线预览」，它更接近真实回复。</div>
+        <input type="text" id="siriText" placeholder="输入文字，球实时变形（纯文本）">
+        <div class="btns">
+          <button id="btnSiriClear">清空球内文字</button>
+          <button id="btnSiriDemo">演示</button>
+        </div>
+      </details>
       <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
       <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
       <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
@@ -544,6 +562,27 @@
   siriSz.addEventListener('input', function () {
     vSiriSz.textContent = siriSz.value;
     try { W.setSiriTextSp(parseInt(siriSz.value, 10)); } catch (e) {}
+  });
+
+  // 调试覆盖层开关（pointer_location / show_touches）
+  var swDbg = document.getElementById('swDbgOverlay');
+  var dbgPerm = document.getElementById('dbgPermState');
+  function syncDbg() {
+    var on = false, perm = false;
+    try { on = W.getDebugOverlay(); } catch (e) {}
+    try { perm = W.hasOverlayWritePermission(); } catch (e) {}
+    if (swDbg) swDbg.classList.toggle('on', !!on);
+    if (dbgPerm) dbgPerm.textContent = perm ? '已授权' : '未授权（会尝试 root 通道）';
+  }
+  syncDbg();
+  if (swDbg) swDbg.addEventListener('click', function () {
+    var on = !swDbg.classList.contains('on');
+    try { W.setDebugOverlay(on); } catch (e) {}
+    setTimeout(syncDbg, 500);
+  });
+  var bAuthDbg = document.getElementById('btnDbgOverlayAuth');
+  if (bAuthDbg) bAuthDbg.addEventListener('click', function () {
+    try { W.requestOverlayWritePermission(); } catch (e) {}
   });
 
   // 离线预览球内排版

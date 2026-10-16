@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.glslplayground.app"
     android:versionCode="20"
     android:versionName="1.2">
@@ -14,6 +15,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 语音助手：录音交给本机 DSH 的语音插件转写；网络只用于 127.0.0.1 的 DSH HTTP API -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 调试覆盖层开关：写 pointer_location / show_touches（开发者选项里那两个） -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application

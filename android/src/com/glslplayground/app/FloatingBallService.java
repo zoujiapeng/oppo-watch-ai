@@ -1092,7 +1092,7 @@ public class FloatingBallService extends Service {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackground(optionBackground(0x22FFFFFF));
+            row.setBackground(optionBackground(0xCCFFFFFF));   // 实色浅底（原 0x22 几乎全透）
             row.setPadding(apOptPadX, Math.round(apOptPadY * 0.6f), Math.round(apOptPadX * 0.5f),
                     Math.round(apOptPadY * 0.6f));
             android.widget.LinearLayout.LayoutParams rowLp =
@@ -1130,7 +1130,7 @@ public class FloatingBallService extends Service {
                     android.graphics.Typeface.NORMAL));
             approvalSend.setGravity(Gravity.CENTER);
             approvalSend.setPadding(apOptPadX, Math.round(9 * d), apOptPadX, Math.round(9 * d));
-            approvalSend.setBackground(optionBackground(withAlpha(AP_ACCENT_ASK, 0x66)));
+            approvalSend.setBackground(optionBackground(AP_ACCENT_ASK));   // 实色
             approvalSend.setClickable(true);
             approvalSend.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { submitCustomAnswer(); }
@@ -1331,19 +1331,20 @@ public class FloatingBallService extends Service {
      */
     private android.graphics.drawable.Drawable optionBackground(int color) {
         float d = getResources().getDisplayMetrics().density;
+        // ⚠️ 全部实色（alpha=0xFF）：半透明按钮会让玻璃折射透上来（见 solidBlend 的注释）
         android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
         g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
         g.setCornerRadius(16f * d * AP_SCALE);
-        g.setStroke(Math.max(1, Math.round(d)), withAlpha(color, 0x7A));
-        g.setColors(new int[]{ blend(color, 0x3A), blend(color, 0x1C) });
+        g.setStroke(Math.max(1, Math.round(d)), withAlpha(solidBlend(color, 0.75f), 0xFF));
+        g.setColors(new int[]{ solidBlend(color, 0.42f), solidBlend(color, 0.22f) });
         g.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
-        // 按下态单独给一版：同样形状，整体提亮
+        // 按下态：整体提亮，同样实色
         android.graphics.drawable.GradientDrawable pressed =
                 new android.graphics.drawable.GradientDrawable();
         pressed.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
-        pressed.setCornerRadius(16f * d);
-        pressed.setStroke(Math.max(1, Math.round(d)), withAlpha(color, 0xB0));
-        pressed.setColors(new int[]{ blend(color, 0x6E), blend(color, 0x40) });
+        pressed.setCornerRadius(16f * d * AP_SCALE);
+        pressed.setStroke(Math.max(1, Math.round(d)), withAlpha(solidBlend(color, 1.0f), 0xFF));
+        pressed.setColors(new int[]{ solidBlend(color, 0.78f), solidBlend(color, 0.50f) });
         pressed.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
         return new android.graphics.drawable.StateListDrawable() {{
             addState(new int[]{android.R.attr.state_pressed}, pressed);
@@ -1351,17 +1352,21 @@ public class FloatingBallService extends Service {
         }};
     }
 
-    /** 把语义色按比例叠到深底上，得到一层「淡色玻璃」。 */
-    private static int blend(int color, int alpha) {
-        return withAlpha(color, alpha);
-    }
-
-    private static int lighten(int c) {
-        int a = (c >>> 24) & 0xFF;
-        int r = Math.min(255, (int) (((c >> 16) & 0xFF) * 1.35f));
-        int g = Math.min(255, (int) (((c >> 8) & 0xFF) * 1.35f));
-        int b = Math.min(255, (int) ((c & 0xFF) * 1.35f));
-        return (a << 24) | (r << 16) | (g << 8) | b;
+    /**
+     * 把语义色压成**不透明**的实色（与面板深底按比例混）。
+     *
+     * 为什么需要：审批/提问的选项按钮原来是半透明的（`withAlpha(accent, 0x33)` ≈ 20%），
+     * 面板窗口虽然排在玻璃**上面**，但按钮自身半透明时，底下玻璃的折射/黑顶会直接透上来 ——
+     * 用户观感就是"液态玻璃在折射按钮本身，怪怪的"（多个选项的提问面板尤其明显）。
+     * 这里强制 alpha=0xFF，只保留语义色的色相。
+     */
+    private static int solidBlend(int accent, float t) {
+        int ar = (accent >> 16) & 0xFF, ag = (accent >> 8) & 0xFF, ab = accent & 0xFF;
+        int br = 0x14, bg = 0x18, bb = 0x1F;      // 面板深底（AP_PANEL_BG 附近）
+        int r = Math.round(br + (ar - br) * t);
+        int g = Math.round(bg + (ag - bg) * t);
+        int b = Math.round(bb + (ab - bb) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
     private android.graphics.drawable.Drawable panelBackground() {

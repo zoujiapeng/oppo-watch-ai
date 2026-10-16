@@ -330,6 +330,86 @@ public class WatchBridge {
         });
     }
 
+    // ── 开发者选项里的"覆盖层"开关（用户要求能在 App 里关掉）───────────────
+    //   pointer_location：屏幕顶部那条坐标/速度/压力条 + 十字准线
+    //   show_touches    ：触摸轨迹的彩色十字线（截图里那些绿/品红线就是它）
+    // 这两个是系统设置（归属 package=android，开发者选项），不是本 App 画的。
+    // 写它需要 WRITE_SETTINGS：有权限就直接写；没有就退回 root/shell 的 `settings` 命令。
+
+    @JavascriptInterface
+    public boolean hasOverlayWritePermission() {
+        try {
+            return android.provider.Settings.System.canWrite(act);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    @JavascriptInterface
+    public void requestOverlayWritePermission() {
+        ui(new Runnable() {
+            public void run() {
+                try {
+                    android.content.Intent i = new android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS);
+                    i.setData(android.net.Uri.parse("package:" + act.getPackageName()));
+                    i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    act.startActivity(i);
+                } catch (Throwable t) {
+                    Toast.makeText(act, "打不开授权页，请手动到 设置→应用→特殊权限→修改系统设置",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    /** 读"调试覆盖层"是否开着（任一开着就算开）。 */
+    @JavascriptInterface
+    public boolean getDebugOverlay() {
+        return sysGet("pointer_location") == 1 || sysGet("show_touches") == 1;
+    }
+
+    /** 一次性开关两个覆盖层。 */
+    @JavascriptInterface
+    public void setDebugOverlay(final boolean on) {
+        ui(new Runnable() {
+            public void run() {
+                boolean ok1 = sysPut("pointer_location", on ? 1 : 0);
+                boolean ok2 = sysPut("show_touches", on ? 1 : 0);
+                if (!ok1 && !ok2) {
+                    Toast.makeText(act, "写系统设置被拒绝：点下面的「授权」按钮给一次权限",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    private int sysGet(String key) {
+        try {
+            return android.provider.Settings.System.getInt(act.getContentResolver(), key, 0);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** 先试正常写入，失败退回 root/shell 的 `settings put`（本机有 root，App 别处也这么用）。 */
+    private boolean sysPut(String key, int value) {
+        try {
+            if (android.provider.Settings.System.canWrite(act)) {
+                android.provider.Settings.System.putInt(act.getContentResolver(), key, value);
+                if (sysGet(key) == value) return true;
+            }
+        } catch (Throwable ignored) { }
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{
+                    "su", "-c", "settings put system " + key + " " + value});
+            p.waitFor();
+            return sysGet(key) == value;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @JavascriptInterface
     public int getSiriBlackStep() {
         return act.getSiriBlackStep();
