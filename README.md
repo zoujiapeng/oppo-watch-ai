@@ -60,6 +60,26 @@ pm install -r glsl-playground.apk
 # 注意：这个开关不持久 —— 重启手机 / 重装 / 被系统杀掉之后都要再点一次
 ```
 
+### 从源码构建 / Build the APK from source
+
+只要一台装了 **Termux** 的安卓机（不需要 Android Studio、不需要 gradle）：
+
+```bash
+pkg install openjdk-17 python aapt2 d8 apksigner   # 工具链（本机都是现成的）
+git clone https://github.com/zoujiapeng/oppo-watch-ai.git
+cd oppo-watch-ai/android
+bash build.sh          # javac → d8 → aapt2 → apksigner，单体 APK 出在仓库根目录
+pm install -r ../glsl-playground.apk
+```
+
+`build.sh` 只做四件事：`aapt2` 链资源 → `javac --release 8` 编 Java → `d8` 转 dex →
+`apksigner` 用仓库里的自签名 keystore 签出来。首次运行会自动下载一个 `android.jar`（~30MB）到
+`.build/`，之后离线可编。改完代码想只做语法检查：
+
+```bash
+javac --release 8 -classpath .build/android.jar -d .build/javac-check $(find .build/gen src -name '*.java')
+```
+
 ## Demos
 
 | Demo | 说明 | 交互 |
@@ -105,4 +125,14 @@ python3 -m http.server 8000   # 然后访问 http://localhost:8000
 
 ## License
 
-MIT
+**MIT** —— 代码、shader、文档、APK 全部同许可，可商用、可改、可闭源分发，只需保留版权与许可声明。
+完整文本见 [`LICENSE`](LICENSE)。
+
+| 部分 | 许可 |
+|---|---|
+| 三个 WebGL / GLSL demo（`*.html`） | MIT |
+| 安卓悬浮球（`android/`、`glsl-playground.apk`） | MIT |
+| DSH 口播稿插件（`dsh-plugin-speech/`） | MIT |
+
+> 液态玻璃的折射/色散/黑顶参数、SDF 与 `sdf_union` 的公式来自对 iOS QuartzCore
+> 的逆向记录（`metaball-search.html` 头部注释），属于公开的逆向资料整理，未包含任何 Apple 二进制。
