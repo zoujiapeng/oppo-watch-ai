@@ -1358,3 +1358,26 @@ tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);         // 贴边变薄 → 圆�
 
 对比图：`docs/glass-convo-before.png` / `docs/glass-convo-after.png`（都是 `files/show-glass`
 打开时拍的合成画面，就是用户眼睛看到的那一帧）。
+
+
+### 四修：真正把"直边"从面板上拿掉（2026-10-23 最终版）
+
+三修之后用户拍图仍然说「依然存在」。复盘：只要**暗度沿 y 变化**，人眼就会把它读成
+"一个直角方块"——曲线再平滑也一样（台阶在感知上，不在数学上）。所以面板/卡片干脆
+**不做竖向黑顶**：
+
+| 参数 | 之前 | 现在（菜单 / 长按卡片） |
+|---|---|---|
+| `zTopDarken` | 0.88（顶黑底透） | **0.0**（完全没有 y 方向的暗度项） |
+| `zScrim` | 0.30 | 0.46（整块均匀烟熏，白字有底） |
+| `zFrost` | 0.82 | 0.85 |
+| `zoneBlur` | 1.25 | **9.0**（1.25 在 `buildBlur()` 里只是 1px 级别，等于没糊 → 桌面文字直接透进面板） |
+
+另一处"黑矩形"来自系统：SurfaceFlinger 里 SurfaceView 自带一层
+`Background for SurfaceView`，`isOpaque=1 color=(0,0,0,1)` —— **窗口大小的纯黑矩形**，
+只要 GL 这一帧没铺满（面板四周 14dp 留白、或 surface 刚 resize 的几帧）它就露出来。
+`setupOverlay()` 里给 glView 设了 `setBackgroundColor(TRANSPARENT)`，那层不再是不透明黑。
+
+四区（圆）仍然保留 `uTopDarken=0.80` 的黑顶 —— 圆形的暗顶是球的观感，不会读成方块。
+
+合成截图：`docs/glass-switcher-final.png`（带文字）与 `docs/glass-switcher-glass.png`（纯玻璃）。

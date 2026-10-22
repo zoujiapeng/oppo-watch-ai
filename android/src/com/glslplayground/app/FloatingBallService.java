@@ -4155,16 +4155,21 @@ public class FloatingBallService extends Service {
     }
 
     private boolean skipScreenshotOf(SurfaceControl sc, String what) {
+        return skipScreenshotOf(sc, what, true);
+    }
+
+    /** on=false 用来**撤销**标记（调试口子 show-glass 要拍合成画面）。 */
+    private boolean skipScreenshotOf(SurfaceControl sc, String what, boolean on) {
         if (sc == null) return false;
         try {
             Class<?> txClass = Class.forName("android.view.SurfaceControl$Transaction");
             Object tx = txClass.getDeclaredConstructor().newInstance();
             try {
                 Method m = txClass.getMethod("setSkipScreenshot", SurfaceControl.class, boolean.class);
-                m.invoke(tx, sc, true);
+                m.invoke(tx, sc, on);
             } catch (NoSuchMethodException e) {
                 Method m = txClass.getMethod("setSkipScreenshot", boolean.class);
-                m.invoke(tx, true);
+                m.invoke(tx, on);
             }
             txClass.getMethod("apply").invoke(tx);
             Log.i("FloatingBall", "skip-screenshot applied: " + what);
@@ -4984,14 +4989,13 @@ public class FloatingBallService extends Service {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
         }
-        // 卡片面板：和菜单同一套烟熏玻璃（黑顶往下渐隐，底部留出真折射）
+        // 卡片面板：**整块均匀烟熏**（不要竖向黑顶 —— 那正是"直边黑块"的唯一来源）
         zGlassMaterial(Math.min(holdListRect[2], holdListRect[3]) * 0.5f, 0.62f, 0.45f);
         renderer.zGlow = 0f;
-        renderer.zFrost = 0.82f;
+        renderer.zFrost = 0.85f;
         renderer.zRefract = Math.max(dp(14), Math.min(holdListRect[2], holdListRect[3]) * 0.34f);
-        renderer.zTopDarken = 0.88f;
-        renderer.zCapPow = 1.55f;
-        renderer.zScrim = 0.30f;
+        renderer.zTopDarken = 0.0f;
+        renderer.zScrim = 0.46f;
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5563,16 +5567,16 @@ public class FloatingBallService extends Service {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
         }
-        // 菜单面板：和球同一套透镜；黑顶从顶边压到 55% 处渐隐，底部留给真折射
-        // 菜单面板：黑顶一路压到 78% 处（白字才有底），最后 20% 留给"真玻璃"——
-        // 底缘那条亮弧 + 折射就是从这里露出来的（球的黑区也是这么收的）
+        // 菜单面板：和球同一套透镜，但**没有竖向黑顶** —— 整块均匀烟熏。
+        // 之前那版"顶黑下透"的渐变就是用户看到的"锋利的黑色长方形"：只要暗度沿 y 变化、
+        // 变化又集中在顶部一小段，人眼看到的就是一个直角方块（哪怕曲线是连续的）。
+        // 现在改成：uTopDarken=0 + 均匀 scrim（0.46）→ 没有台阶、没有任何"边"。
         zGlassMaterial(Math.min(menuRect[2], menuRect[3]) * 0.5f, 0.55f, 0.30f);
         renderer.zGlow = 0f;
-        renderer.zFrost = 0.82f;
+        renderer.zFrost = 0.85f;
         renderer.zRefract = Math.max(dp(16), Math.min(menuRect[2], menuRect[3]) * 0.34f);
-        renderer.zTopDarken = 0.88f;
-        renderer.zCapPow = 1.55f;
-        renderer.zScrim = 0.30f;
+        renderer.zTopDarken = 0.0f;
+        renderer.zScrim = 0.46f;
         renderer.zShape = s;
         renderer.zMeta = m;
         renderer.sHlAmt = 1.5f;
@@ -6705,12 +6709,21 @@ public class FloatingBallService extends Service {
         if (fShowGlass.exists()) {
             fShowGlass.delete();
             debugShowGlass = true;
-            Log.i("FloatingBall", "debug: 玻璃留在抓屏里（重新进一次状态才会生效）");
+            // 已经打过标记的 Surface 要主动撤掉，否则这一趟还是拍不到玻璃
+            if (glView != null) {
+                try { skipScreenshotOf(glView.getSurfaceControl(), "glass", false); } catch (Throwable ignored) { }
+            }
+            renderer.selfExcluded = false;
+            Log.i("FloatingBall", "debug: 玻璃留在抓屏里");
         }
         File fHideGlass = new File(dir, "hide-glass");
         if (fHideGlass.exists()) {
             fHideGlass.delete();
             debugShowGlass = false;
+            if (glView != null) {
+                try { skipScreenshotOf(glView.getSurfaceControl(), "glass", true); } catch (Throwable ignored) { }
+                renderer.selfExcluded = true;
+            }
             Log.i("FloatingBall", "debug: 玻璃重新排除出抓屏");
         }
         File fOpen = new File(dir, "zone-open");
@@ -6912,6 +6925,11 @@ public class FloatingBallService extends Service {
         glView.setEGLContextClientVersion(2);
         glView.setEGLConfigChooser(8, 8, 8, 8, 0, 0);
         glView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+        // SurfaceView 自带一层 "Background for SurfaceView"（SurfaceFlinger 里能看到
+        // color=(0,0,0,1) isOpaque=1）—— 它就是窗口那块**纯黑矩形**：只要 GL 这一帧还没
+        // 铺满（面板窗口四周 14dp 留白、或 surface 刚 resize 的那几帧），它就会露出来。
+        // 设成透明后，那层不再是不透明的黑。
+        glView.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winW, winH);

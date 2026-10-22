@@ -85,7 +85,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float zHeight = 18f;        // 保留字段（旧参数，已不参与绘制）
     public volatile float zDensity = 2.75f;
     /** 玻璃面板的磨砂力度（只作用于 zoneMode；球仍然用 {@link #blur}）。 */
-    public volatile float zoneBlur = 1.25f;
+    public volatile float zoneBlur = 9f;   // 面板是"一片玻璃"：要真的糊（球的 0.3 只是不糊）
     private int zoneProg = 0;
 
     private OnSurfaceReady readyCb;
