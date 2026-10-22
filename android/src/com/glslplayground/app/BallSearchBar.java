@@ -198,10 +198,12 @@ public class BallSearchBar extends LinearLayout {
      */
     public void setBackdrop(boolean on) {
         if (!on) { setBackground(null); return; }
+        // 和搜索胶囊同一套观感：几乎全圆角、极淡的深色底 + 一圈发丝亮边。
+        // （真正的折射在搜索层里；对话卡这条是独立小窗，只能用同色同形去对齐。）
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xB3080A0E);
-        bg.setCornerRadius(dp(26));
-        bg.setStroke(Math.round(dp(0.8f)), 0x40FFFFFF);
+        bg.setColor(0x33000000);
+        bg.setCornerRadius(dp(21));
+        bg.setStroke(Math.round(dp(0.8f)), 0x4DFFFFFF);
         setBackground(bg);
     }
 

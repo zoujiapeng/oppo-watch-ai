@@ -5164,7 +5164,7 @@ public class FloatingBallService extends Service {
                 ? siriText.getWidth() + Math.round(dp(22))
                 : Math.round(screenW * SIRI_W_RATIO);
         int w = Math.max(Math.round(dp(160)), Math.min(screenW - Math.round(dp(48)), squareW));
-        int h = Math.round(dp(42));
+        int h = Math.round(dp(40));
         int x = (screenW - w) / 2;                 // 输入框居中（侧栏按钮已删除）
         int y = convoChromeY(h);
         convoBarParams.width = w;
@@ -5184,7 +5184,7 @@ public class FloatingBallService extends Service {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             int ballBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
-            y = ballBottom + Math.round(dp(10));
+            y = ballBottom + Math.round(dp(8));      // 与方形底边保持恒定 8dp
         }
         return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
     }
