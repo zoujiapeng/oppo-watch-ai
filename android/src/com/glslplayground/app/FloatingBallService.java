@@ -2226,7 +2226,8 @@ public class FloatingBallService extends Service {
 
     public static void setSiriText(String text) {
         FloatingBallService s = INSTANCE;
-        if (s != null && s.convoOpen && (text == null || text.isEmpty())) {
+        if (s != null && s.convoOpen && !s.suppressConvoAutoClose
+                && (text == null || text.isEmpty())) {
             s.main.post(new Runnable() {
                 @Override public void run() { s.closeConversation("球回到初始态"); }
             });
@@ -4391,6 +4392,7 @@ public class FloatingBallService extends Service {
         holdLevel = 0;
         holdZoneHover = -1;
         holdFocus = -1;
+        swipeAnchorX = 0;
         holdItems.clear();
         holdDir = null;
         prefetchZonesData();
@@ -4581,6 +4583,7 @@ public class FloatingBallService extends Service {
     private long holdLevelAt = 0;
     private int holdPointers = 1;
     private float holdLevelX = 0;
+    private float swipeAnchorX = 0;
     private boolean holdPendingExpand = false;
     private int holdFocus = -1;
     private long holdFocusAt = 0;
@@ -4635,25 +4638,24 @@ public class FloatingBallService extends Service {
         int i = nearestRow(rawY);
         // 一级（工作目录）：双指**往右滑一点点**就进入该目录选会话
         // （用户：长按→左上显示工作目录，然后双指往右滑一点点进目录；不要求滑到屏幕边缘）
-        if (holdLevel == 1) {
-            float dx = rawX - holdLevelX;
-            if (dx > dp(22)) {
-                if (i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
-                    Log.i("FloatingBall", "zones: 右滑 " + Math.round(dx) + "px → 进入「"
-                            + holdItems.get(i).label + "」选会话");
-                    openHoldSessions(holdItems.get(i).data);
-                    return;
-                }
-                // 列表还在载入（只有"载入中"那一行）→ 记下来，等数据到了自动进
-                holdPendingExpand = true;
-                Log.i("FloatingBall", "zones: 右滑时列表未就绪，挂起展开");
+        // 方向判定永远盯着**手指当前坐标**相对上一次转折点的位移（不是"进入这一级时的 X"），
+        // 这样手指在半路往右/往左推一点点就能生效，不会因为起点太远而失效。
+        float dx = rawX - swipeAnchorX;
+        if (holdLevel == 1 && dx > dp(10)) {
+            swipeAnchorX = rawX;
+            if (i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
+                Log.i("FloatingBall", "zones: 右滑 " + Math.round(dx) + "px → 进入「"
+                        + holdItems.get(i).label + "」选会话");
+                openHoldSessions(holdItems.get(i).data);
+                return;
             }
+            holdPendingExpand = true;
+            Log.i("FloatingBall", "zones: 右滑时列表未就绪，挂起展开");
         }
-        // 二级（会话）：往左移动 → 退回上一级（选工作目录）
-        if (holdLevel >= 2 && rawX < holdLevelX - dp(36)) {
-            Log.i("FloatingBall", "zones: 左移 → 退回工作目录列表");
+        if (holdLevel >= 2 && dx < -dp(10)) {
+            Log.i("FloatingBall", "zones: 左滑 " + Math.round(dx) + "px → 退回工作目录列表");
             holdLevel = 1;
-            holdLevelX = rawX;
+            swipeAnchorX = rawX;
             openHoldDirs();
             return;
         }
@@ -4777,7 +4779,7 @@ public class FloatingBallService extends Service {
         boolean sameLevel = (holdLevel == level) && title.equals(holdTitle);
         holdLevel = level;
         holdLevelAt = android.os.SystemClock.uptimeMillis();
-        if (!sameLevel) holdLevelX = lastHoldX;    // 同一级的刷新不要重置"起始 X"，否则右滑距离会被吃掉
+        if (!sameLevel) { holdLevelX = lastHoldX; swipeAnchorX = lastHoldX; }
         holdPointers = 1;
         holdTitle = title;
         holdItems.clear();
@@ -5001,6 +5003,9 @@ public class FloatingBallService extends Service {
     // 所以这里不新造界面：球的方形（Siri 文字态）+ 底部一条输入 + 左边一个侧栏按钮。
 
     private boolean convoOpen = false;
+    private boolean convoStashed = false;
+    private String convoStashText = "";
+    private boolean suppressConvoAutoClose = false;
     private String convoSessionId = null, convoTitle = null;
     private BallSearchBar convoBar;
     private WindowManager.LayoutParams convoBarParams;
@@ -5090,7 +5095,7 @@ public class FloatingBallService extends Service {
         int w = Math.min(screenW - 2 * side - Math.round(dp(36)), Math.round(dp(520)));
         int h = Math.round(dp(48));
         int x = (screenW - w) / 2 + side / 2;
-        int y = Math.round(screenH * 0.70f);
+        int y = convoChromeY(h);
         convoBarParams.width = w;
         convoBarParams.height = h;
         convoBarParams.x = x;
@@ -5103,6 +5108,31 @@ public class FloatingBallService extends Service {
         convoBar.resetMaterial();
         convoBar.materialize(true, 0);      // 凝聚出现（构造时 alpha=0，不调这个就永远看不见）
         convoSideBtn.setVisibility(View.VISIBLE);
+    }
+
+    /** 输入行贴着方形球的下沿（球被上下拖动后也要跟着走）。 */
+    private int convoChromeY(int h) {
+        int y = Math.round(screenH * 0.70f);
+        if (glView != null) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            int ballBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
+            y = ballBottom + Math.round(dp(10));
+        }
+        return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
+    }
+
+    private void updateConvoChrome() {
+        if (!convoOpen || convoBar == null || convoBarParams == null) return;
+        int h = convoBarParams.height;
+        int y = convoChromeY(h);
+        if (Math.abs(convoBarParams.y - (y - Math.round(winY0()))) < 2) return;
+        convoBarParams.y = y - Math.round(winY0());
+        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+        if (convoSideBtn != null && convoSideParams != null) {
+            convoSideParams.y = y + (h - convoSideParams.height) / 2 - Math.round(winY0());
+            try { wm.updateViewLayout(convoSideBtn, convoSideParams); } catch (Throwable ignored) { }
+        }
     }
 
     private void showConvoIme() {
@@ -5311,6 +5341,17 @@ public class FloatingBallService extends Service {
         exitGlassPanel();
         applyBallTouchability();
         restoreBarIfStashed();               // 是从状态 2 进来的就把胶囊放回去
+        if (convoStashed) {                  // 参数面板关掉：把对话内容放回来
+            convoStashed = false;
+            suppressConvoAutoClose = false;
+            if (convoSessionId != null) {
+                setSiriText(convoStashText == null ? "" : convoStashText);
+                if (convoBar != null) convoBar.setVisibility(View.VISIBLE);
+                if (convoSideBtn != null) convoSideBtn.setVisibility(View.VISIBLE);
+                updateConvoChrome();
+                Log.i("FloatingBall", "convo: 参数面板关闭，恢复对话内容");
+            }
+        }
     }
 
     private void removeMenuWindows() {
@@ -5470,6 +5511,17 @@ public class FloatingBallService extends Service {
     // ── 参数（Agent 预设 / 模型 / 推理等级 / 权限 / 发送目录）──────────────
 
     private void openSettingsMenu() {
+        // 从对话卡里双指长按进来的：先把对话内容暂时收起（否则参数面板和对话文字叠在一起很乱）
+        if (convoOpen && !convoStashed) {
+            convoStashed = true;
+            convoStashText = siriStr == null ? "" : siriStr;
+            suppressConvoAutoClose = true;
+            setSiriText("");
+            suppressConvoAutoClose = false;
+            if (convoBar != null) convoBar.setVisibility(View.GONE);
+            if (convoSideBtn != null) convoSideBtn.setVisibility(View.GONE);
+            Log.i("FloatingBall", "convo: 打开参数面板，先收起对话内容");
+        }
         List<BallGlassMenu.Row> rows = new ArrayList<>();
         rows.add(new BallGlassMenu.Row("Agent 预设", cur("send_preset", "跟随默认"), false));
         String modelName = prefs().getString("send_model", "");
@@ -6706,6 +6758,7 @@ public class FloatingBallService extends Service {
             syncWinPosDone();
             return;
         }
+        updateConvoChrome();            // 对话卡的输入行贴着球下沿（球上下拖动时跟着走）
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // ⚠️ 这里**不要**再周期性 rememberHomeIfMinimal()：平滑跟窗时窗口会滞后动画十几像素，
