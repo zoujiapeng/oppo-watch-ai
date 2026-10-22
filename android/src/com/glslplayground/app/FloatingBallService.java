@@ -5239,6 +5239,12 @@ public class FloatingBallService extends Service {
         final File attach = pendingAttach;
         final String attachName = pendingAttachName;
         convoLastUser = text;
+        if (attach != null && attach.length() > 8L * 1024 * 1024) {
+            setSiriText("· 文件太大（" + (attach.length() / 1024 / 1024) + " MB），上限 8 MB，未发送");
+            if (convoBar != null) convoBar.setHint("文件太大，未发送");
+            clearAttachment();
+            return;
+        }
         convoHadText = true;
         String echo = convoLastUserBlock();
         if (attach != null) echo += "\n［附件］" + (attachName == null ? attach.getName() : attachName);

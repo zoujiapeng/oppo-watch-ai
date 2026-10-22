@@ -26,6 +26,8 @@ public class BallAttachPickerActivity extends Activity {
 
     private static final String TAG = "BallAttach";
     private static final int REQ_PICK = 4101;
+    /** 附件上限：DSH 的 file part 走 base64 JSON，整份要在内存里过一遍，8 MB 是安全线。 */
+    private static final long MAX_BYTES = 8L * 1024 * 1024;
 
     interface Result {
         void onPicked(File file, String name);
@@ -64,6 +66,16 @@ public class BallAttachPickerActivity extends Activity {
         }
         Uri uri = data.getData();
         String name = displayName(uri);
+        long size = sizeOf(uri);
+        if (size > MAX_BYTES) {
+            Log.w(TAG, "文件过大 " + size + " bytes（上限 " + MAX_BYTES + "），不复制、不发送");
+            android.widget.Toast.makeText(this,
+                    "文件太大（" + (size / 1024 / 1024) + " MB），上限 "
+                            + (MAX_BYTES / 1024 / 1024) + " MB",
+                    android.widget.Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
         try {
             File dir = new File(getCacheDir(), "attach");
             if (!dir.exists()) dir.mkdirs();
@@ -87,6 +99,18 @@ public class BallAttachPickerActivity extends Activity {
             Log.w(TAG, "copy failed: " + t);
         }
         finish();
+    }
+
+    /** 先问系统这个 Uri 有多大（拿不到就当 0，交给后面的复制上限兜底）。 */
+    private long sizeOf(Uri uri) {
+        try (android.database.Cursor c =
+                     getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.SIZE);
+                if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx);
+            }
+        } catch (Throwable ignored) { }
+        return 0;
     }
 
     private String displayName(Uri uri) {
