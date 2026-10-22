@@ -82,6 +82,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float zFrost = 0.8f;
     /** 黑顶衰减指数：越大越"只在最顶上黑"（面板 1.6 / 圆区 1.4）。 */
     public volatile float zCapPow = 1.6f;
+    /** 贴边压暗强度：0 = 完全不要那圈"薄黑边"（面板默认 0），圆区 0.65。 */
+    public volatile float zEdgeShade = 0f;
+    /** 外阴影强度：面板 0.25（很淡），圆区 0.5。 */
+    public volatile float zShadow = 0.25f;
     public volatile float zHeight = 18f;        // 保留字段（旧参数，已不参与绘制）
     public volatile float zDensity = 2.75f;
     /** 玻璃面板的磨砂力度（只作用于 zoneMode；球仍然用 {@link #blur}）。 */
@@ -600,6 +604,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap0"), zCap0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap1"), zCap1);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCapPow"), zCapPow);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uEdgeShade"), zEdgeShade);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uShadow"), zShadow);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uEdgeBleed"), zEdgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uScrim"), zScrim);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uGlow"), zGlow);

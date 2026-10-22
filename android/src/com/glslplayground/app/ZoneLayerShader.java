@@ -36,6 +36,7 @@ final class ZoneLayerShader {
         "uniform float uRefract, uBandRatio, uDome, uAb, uHlAmt, uCont, uValid, uDpr;\n" +
         // 黑顶：ny 从 -1(顶) 到 +1(底)，cap0 处最黑、cap1 处完全透明
         "uniform float uTopDarken, uCap0, uCap1, uEdgeBleed, uScrim, uGlow, uFrost;\n" +
+        "uniform float uEdgeShade, uShadow;   // 贴边压暗强度(0=完全不要) / 外阴影强度\n" +
         "uniform float uCapPow;   // 黑顶衰减指数（越大越只在最顶上黑）\n" +
         "uniform vec4  uS0, uS1, uS2, uS3, uS4;   // cx,cy,halfX,halfY\n" +
         "uniform vec4  uM0, uM1, uM2, uM3, uM4;   // act, dark, cornerRadius, enabled\n" +
@@ -91,6 +92,10 @@ final class ZoneLayerShader {
         "  float sd   = min(d, 0.0);\n" +
         "  float xr   = clamp(1.0 + sd / band, 0.0, 1.0);\n" +
         "  float amp  = circleMap(xr) * uRefract;\n" +
+        // ★ 2026-10-23 五修：最外 14dp 不做位移。否则边缘那一圈采的是**玻璃外面**的画面
+        //   （深色桌面上就是一圈黑、亮桌面上就是一圈白），看过去正好像"贴了一圈边框"。
+        //   把位移在贴边处收回 0，边界两侧采到的是同一块背景，边就只剩亮线，没有暗圈。
+        "  amp *= smoothstep(0.0, 14.0 * uDpr, -d);\n" +
         // 方向：SDF 梯度 + 一点"球面径向"，扁形状也不会出现两侧对称的假折射
         "  vec2 radial = normalize(vec2(lp.x, bBest.x * lp.y / max(bBest.y, 0.001)) + 1e-5);\n" +
         "  vec2 gr = normalize(mix(gBest, radial, clamp(uDome, 0.0, 1.0) * 0.35));\n" +
@@ -108,9 +113,11 @@ final class ZoneLayerShader {
         "  refr = mix(refr, bgFrost(p + gr * amp), clamp(uFrost, 0.0, 1.0));\n" +
         // 和球同一句冷调（玻璃对背景的"轻微染色"）
         "  refr = mix(refr, refr * vec3(0.94, 0.96, 1.0) + vec3(0.010, 0.012, 0.020), 0.22);\n" +
-        // 贴边处再压一点，玻璃的"厚度"感（球上 innerEdge 那句）
-        "  float innerEdge = smoothstep(0.0, -18.0 * uDpr, d);\n" +
-        "  refr *= mix(0.72, 1.0, innerEdge);\n" +
+        // 贴边压暗（球上的 innerEdge）—— ★ 2026-10-23 五修：这一圈就是用户说的
+        // "外围一层棱角分明的薄薄一层黑"。面板默认**完全关掉**（uEdgeShade=0），
+        // 只有圆区留一点点，用来表达玻璃的厚度。
+        "  float innerEdge = smoothstep(0.0, -60.0 * uDpr, d);\n" +
+        "  refr *= mix(1.0, mix(0.72, 1.0, innerEdge), uEdgeShade);\n" +
         "\n" +
         // ── ★3 黑顶 ────────────────────────────────────────────────────────────
         // ★ 2026-10-23 二修：用户看到"一层锋利的黑色长方形"。原因不是形状，是这条曲线：
@@ -140,7 +147,8 @@ final class ZoneLayerShader {
         // ── ★4c 赤道线：黑顶结束的那一条亮线（球上 eqLine）─────────────────────
         "  float eq = exp(-pow((ny - uCap1) / 0.10, 2.0));\n" +
         "  float horiz = 1.0 - abs(lp.x) / max(bBest.x, 1.0) * 0.35;\n" +
-        "  glass += vec3(0.95, 0.97, 1.0) * eq * horiz * uEdgeBleed * (1.0 + 1.4 * actBest);\n" +
+        "  glass += vec3(0.95, 0.97, 1.0) * eq * horiz * uEdgeBleed * (1.0 + 1.4 * actBest)\n" +
+        "         * clamp(uTopDarken * 2.0, 0.0, 1.0);   // 没有黑顶就没有赤道线（否则是条横线）\n" +
         "\n" +
         // ── 边缘高光：贴边的窄亮带（左下暖、右上冷，和球同一个 kdir）──────────
         "  float qd  = -d;\n" +
@@ -158,11 +166,11 @@ final class ZoneLayerShader {
         // 选中：内侧整圈微光（"这个格子在回应手指"）
         "  float inner = clamp(1.0 + d / (26.0 * uDpr), 0.0, 1.0);\n" +
         "  glass += actBest * inner * (0.05 + 0.10 * uGlow);\n" +
-        // ★5 壳：贴边最外 1.5px 的细亮线（球的 shell）
+        // ★5 壳：球上那条贴边细线（**面板关掉**，它就是"黑边"的来源之一）
         "  float shell = smoothstep(2.2 * uDpr, 0.0, qd);\n" +
-        "  glass += vec3(0.10, 0.11, 0.13) * shell * 0.6;\n" +
+        "  glass += vec3(0.10, 0.11, 0.13) * shell * 0.6 * uEdgeShade;\n" +
         "\n" +
-        "  float sh = (d > 0.0) ? exp(-d / (26.0 * uDpr)) * 0.20 : 0.0;\n" +
+        "  float sh = (d > 0.0) ? exp(-d / (46.0 * uDpr)) * 0.20 * uShadow : 0.0;\n" +
         "  float aa = smoothstep(1.5, -1.5, d);\n" +
         "  float alpha = aa + sh * (1.0 - aa);\n" +
         "  gl_FragColor = vec4(glass * aa, alpha);\n" +

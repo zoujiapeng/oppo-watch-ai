@@ -4548,7 +4548,9 @@ public class FloatingBallService extends Service {
         renderer.zGlow = 1.0f;                       // 球顶那两团柔光（只给圆区，面板上会糊字）
         renderer.zFrost = 0.55f;                     // 圆区：透镜为主，只加一点雾
         renderer.zTopDarken = 0.80f;
-        renderer.zCapPow = 1.35f;                    // 黑顶从上往下连续衰减（没有台阶）
+        renderer.zCapPow = 1.35f;
+        renderer.zEdgeShade = 0.65f;
+        renderer.zShadow = 0.0f;         // 圆区也不要外阴影（悬浮感交给亮边/折射）                    // 黑顶从上往下连续衰减（没有台阶）
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -4996,6 +4998,8 @@ public class FloatingBallService extends Service {
         renderer.zRefract = Math.max(dp(14), Math.min(holdListRect[2], holdListRect[3]) * 0.34f);
         renderer.zTopDarken = 0.0f;
         renderer.zScrim = 0.46f;
+        renderer.zEdgeShade = 0.0f;      // 面板不要那圈"薄黑边"
+        renderer.zShadow = 0.0f;         // 外阴影也全部去掉（它就是"外围压暗"）
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5543,6 +5547,24 @@ public class FloatingBallService extends Service {
         menuViewParams.x = x;
         menuViewParams.y = y - Math.round(winY0());
         try { wm.updateViewLayout(menuView, menuViewParams); } catch (Throwable ignored) { }
+        // ★ 2026-10-23 六修：文字层**贴着玻璃窗口的真实位置**再对一次。
+        //   上面那行用的是"请求坐标 - inset"，而 inset 会随状态变（父容器顶边、面板是否被
+        //   clamp 到屏幕内、球是否被挪过）。实测出现过 90/186px 的错位 → 文字跑到玻璃外面。
+        //   这里等玻璃窗口布局完，直接拿它自己的屏幕位置反推文字窗口该放哪，一次对死。
+        glView.post(new Runnable() {
+            @Override public void run() {
+                if (menuView == null || !menuShown || glView == null || menuViewParams == null) return;
+                int[] loc = new int[2];
+                glView.getLocationOnScreen(loc);
+                int m = Math.round(dp(14));
+                int parentTop = loc[1] - params.y;              // 同一窗口、同一时刻 → 精确
+                menuViewParams.x = loc[0] + m;
+                menuViewParams.y = loc[1] + m - parentTop;
+                try { wm.updateViewLayout(menuView, menuViewParams); } catch (Throwable ignored) { }
+                Log.i("FloatingBall", "menu: 文字对齐玻璃 @(" + menuViewParams.x + ","
+                        + menuViewParams.y + ") 玻璃屏内 y=" + loc[1] + " inset=" + parentTop);
+            }
+        });
         menuView.setContent(title, subtitle, rows);
         menuView.setVisibility(View.VISIBLE);
         menuShown = true;
@@ -5577,9 +5599,11 @@ public class FloatingBallService extends Service {
         renderer.zRefract = Math.max(dp(16), Math.min(menuRect[2], menuRect[3]) * 0.34f);
         renderer.zTopDarken = 0.0f;
         renderer.zScrim = 0.46f;
+        renderer.zEdgeShade = 0.0f;      // 面板不要那圈"薄黑边"
+        renderer.zShadow = 0.0f;         // 外阴影也全部去掉（它就是"外围压暗"）
         renderer.zShape = s;
         renderer.zMeta = m;
-        renderer.sHlAmt = 1.5f;
+        renderer.sHlAmt = 0.9f;          // 面板的贴边高光收一点（太亮也会被看成"一圈边"）
     }
 
     void hideMenu(String why) {
