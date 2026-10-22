@@ -421,6 +421,30 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  col.g = texture2D(iBlur, suv).g;\n" +
         "  col.b = texture2D(iBlur, suv - disp).b;\n" +
         "  col = mix(col, col*vec3(0.94,0.96,1.0)+vec3(0.01,0.012,0.02), 0.22);\n" +
+        // ── ★ 水珠（uDropMode=1）：真球面光学 ─────────────────────────────────
+        // 不做任何"画上去的高光/蒙版"。把形状当成一个半球，逐像素算：
+        //   法线 N = (q, sqrt(1-q²))；折射位移 ∝ 斜率(1-z)（边缘弯得厉害、中心几乎不动）；
+        //   反射 R = 2(N·V)N − V，用**实时抓屏**当环境贴图采样；
+        //   菲涅尔 F = 0.03 + 0.97(1−z)⁵ —— 边缘几乎全反射、正面几乎全透。
+        // 所以反光和折射都跟着背后的桌面实时变，而不是一层写死的高光。
+        "  if (uDropMode > 0.5) {\n" +
+        "    vec2 q = c / uHalf;\n" +
+        "    float r2 = clamp(dot(q, q), 0.0, 0.999);\n" +
+        "    float z  = sqrt(1.0 - r2);\n" +
+        "    vec2 uv0 = screenUv(fc);\n" +
+        "    vec2 disp = q * (1.0 - z) * 1.0 * uRefraction / uScreen;\n" +
+        "    float ab = uAberration * 0.004 * (1.0 - z);\n" +
+        "    vec3 refr;\n" +
+        "    refr.r = texture2D(iBg, uv0 + disp * (1.0 + ab)).r;\n" +
+        "    refr.g = texture2D(iBg, uv0 + disp).g;\n" +
+        "    refr.b = texture2D(iBg, uv0 + disp * (1.0 - ab)).b;\n" +
+        "    vec2 rxy = 2.0 * z * q;\n" +                  // R.xy（V 朝屏幕里看）
+        "    vec2 reflOff = rxy * (uHalf / uScreen) * 0.18;\n" +
+        "    vec3 refl = texture2D(iBlur, uv0 + reflOff).rgb;\n" +
+        "    float F = 0.03 + 0.97 * pow(1.0 - z, 5.0);\n" +
+        "    col = mix(refr, refl, clamp(F, 0.0, 1.0));\n" +
+
+        "  }\n" +
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
@@ -493,33 +517,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    }\n" +
         "  }\n" +
         "  float innerEdge = smoothstep(0.,-18.*uScale,sd);\n" +
-        "  col *= mix(0.70,1.,innerEdge);\n" +
+        "  col *= mix(mix(0.70, 1.0, innerEdge), 1.0, uDropMode);\n" +
         "  float mid=(b0+b1)*0.5;\n" +
         "  float eqLine = smoothstep(b0,mid,ny)*smoothstep(b1,mid,ny);\n" +
         "  float horiz = 1.0 - abs(c.x)/uHalf.x*0.3;\n" +
-        "  col += vec3(0.95,0.97,1.0)*eqLine*horiz*uEdgeBleed;\n" +
+        "  col += vec3(0.95,0.97,1.0)*eqLine*horiz*uEdgeBleed*(1.0 - uDropMode);\n" +
         "  float bottomRim = smoothstep(-14.*uScale,-2.*uScale,sd) * smoothstep(0.0,-0.6,-ny);\n" +
-        "  col += vec3(0.85,0.88,0.95) * bottomRim * uEdgeBleed * 0.5;\n" +
+        "  col += vec3(0.85,0.88,0.95) * bottomRim * uEdgeBleed * 0.5 * (1.0 - uDropMode);\n" +
         "  col += wglow * uWaveAmp * (eqLine*horiz + bottomRim) * 0.9;\n" +
         "  float shell = smoothstep(3.0*uScale, 0.0, abs(sd + 2.5*uScale));\n" +
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
-        "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
-        // ── 水珠模式（四区那四个圆）────────────────────────────────────────────
-        // 真实水珠的两件事：①左上两个镜面高光点（光源的像）②贴边一圈"聚光"（球面把光收在边缘）。
-        // 只加光、不加暗，所以不会把玻璃压黑；uDropMode=0 时整段零开销（球/面板不受影响）。
-        "  if(uDropMode > 0.5){\n" +
-        "    vec2 q  = c / uHalf;                       // -1..1（c.y 向上）\n" +
-        "    vec2 h1 = q - vec2(-0.30, 0.46);\n" +
-        "    vec2 h2 = q - vec2(-0.12, 0.66);\n" +
-        "    float hi = exp(-dot(h1,h1) * 26.0) * 0.36 + exp(-dot(h2,h2) * 80.0) * 0.26;\n" +
-        "    col += vec3(0.96,0.98,1.0) * hi;\n" +
-        "    float rimGlow = smoothstep(4.5*uScale, 0.0, abs(sd + 2.0*uScale));\n" +
-        "    col += vec3(0.80,0.88,1.0) * rimGlow * 0.26;\n" +
-        // 水珠的"背光侧"：光从左上来，右下自然偏暗（球面上的明暗交界，不会是一条直边）
-        "    vec2 qn = normalize(q + 1e-5);\n" +
-        "    float side = clamp(0.55 - 0.55*dot(qn, normalize(vec2(-0.45, 0.89))), 0.0, 1.0);\n" +
-        "    col *= mix(1.0, 0.60, side * 0.90);\n" +
-        "  }\n" +
+        "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit * (1.0 - 0.5*uDropMode);\n" +
         "  float aa = smoothstep(1.5, -1.5, sd);\n" +
         "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
 
@@ -722,20 +730,22 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             // 折射：和球同一条公式，长度按形状短半轴换算（球是 refract 200 / band 170）
             // 水珠比球"更弯"：折射强度 ≈ 0.85R、带子 1.6R（整颗都在折射带里）→ 边缘把桌面掰得很明显
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"),
-                    panel ? zRefract * k : shortHalf * 0.85f);
+                    panel ? zRefract * k : shortHalf * 0.11f);   // 水珠：边缘位移 ≈ 0.19R
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"),
                     Math.max(1f, panel ? shortHalf * zBandRatio : shortHalf * 1.60f));
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"),
+                    panel ? zAb : 2.0f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), k);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), zDome);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), zAb);
             // 面板沿用聊天卡那条黑区（0.93 / -1 → -0.01）；
             // 四区是"水珠"：黑区只压最上面一小片，且淡很多（用户：太黑了）
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"),
-                    panel ? 0.93f : 0.55f);
+                    panel ? 0.93f : 0.20f);         // 水珠：只在最上面垫一点点（给白图标一点底）
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"),
                     panel ? -1.0f : -0.98f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"),
-                    panel ? -0.01f : 0.75f);
+                    panel ? -0.01f : 0.25f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"),
                     panel ? 0.11f : 0.22f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panel ? 1f : 0f);

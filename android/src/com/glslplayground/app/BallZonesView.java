@@ -67,11 +67,11 @@ final class BallZonesView extends View {
         stroke.setColor(0xF2FFFFFF);
         // 玻璃变清透之后（2026-10-23 改成球那套折射），白字/白线在亮桌面上会"糊"掉 ——
         // 统一加一层柔和投影，等于给它们各自垫了一圈玻璃边，不再依赖把整块玻璃压黑。
-        stroke.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
+        // stroke shadow off (test)
         fill.setStyle(Paint.Style.FILL);
         fill.setColor(0xFFFFFFFF);
         text.setColor(0xD9FFFFFF);
-        text.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
+        text.setShadowLayer(dp(1.6f), 0f, dp(0.6f), 0xC0000000);
         text.setTextSize(dp(12f));
         text.setTextAlign(Paint.Align.CENTER);
         setClickable(false);
@@ -232,7 +232,7 @@ final class BallZonesView extends View {
                 path.close();
                 break;
             }
-            case 1: {                           // 搜索会话：放大镜（与搜索胶囊同一个形状）
+            case 1: {                           // 搜索会话：放大镜
                 path.addCircle(10.5f, 10.5f, 6.2f, Path.Direction.CW);
                 path.moveTo(15.1f, 15.1f);
                 path.lineTo(20.5f, 20.5f);
@@ -256,10 +256,16 @@ final class BallZonesView extends View {
                 break;
             }
         }
-        if (on) {
-            // 选中态：线条更亮一点（玻璃那边的亮边由 shader 负责）
-            stroke.setColor(0xFFFFFFFF);
-        }
+        if (on) stroke.setColor(0xFFFFFFFF);
+        // 玻璃现在是**全透明**的（桌面直接透过来）：白线在亮背景上会消失。
+        // 先描一层略粗的深色底，再画白线 —— 等于给图标一条很轻的暗边，玻璃本身不动。
+        int c0 = stroke.getColor();
+        float w0 = stroke.getStrokeWidth();
+        stroke.setColor(0x3D000000);
+        stroke.setStrokeWidth(w0 + 2.4f);
+        cv.drawPath(path, stroke);
+        stroke.setColor(c0);
+        stroke.setStrokeWidth(w0);
         cv.drawPath(path, stroke);
         if (which == 3) {                       // 滑杆的三个旋钮
             cv.drawCircle(8f, 7f, 2.1f, fill);
