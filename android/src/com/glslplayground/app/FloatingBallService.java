@@ -4229,10 +4229,8 @@ public class FloatingBallService extends Service {
                 Log.i("FloatingBall", "voice: 转写" + (auto ? "（话音刚落）" : "（点击打断）")
                         + " = 「" + t + "」");
                 if (t.isEmpty()) {
-                    // 点击打断时没听出字：保持初始状态（用户要的是"变状态 2 时带着识别结果"，
-                    // 一个字都没有就没有可带的东西），只提示一句
-                    toast("没听清，再说一次？");
-                    armVoice("没听清，继续听");
+                    // 没听出字：只提示，不重新开麦（语音只在球刚激活时听一次）
+                    toast("没听清");
                     return;
                 }
                 if (auto) {
@@ -4429,13 +4427,22 @@ public class FloatingBallService extends Service {
         new Thread(() -> {
             try {
                 final List<String> dirs = api.recentDirs();
+                // 前 4 个目录的会话都先取回：右滑进去时列表已经热的，不会先闪一个"载入中/1 项"
+                final java.util.LinkedHashMap<String, List<DshApi.SessionRow>> cache =
+                        new java.util.LinkedHashMap<>();
+                for (int i = 0; i < Math.min(4, dirs.size()); i++) {
+                    try { cache.put(dirs.get(i), api.sessionsIn(dirs.get(i))); }
+                    catch (Throwable ignored) { }
+                }
                 final String firstDir = dirs.isEmpty() ? null : dirs.get(0);
                 final List<DshApi.SessionRow> rows =
-                        firstDir == null ? new ArrayList<>() : api.sessionsIn(firstDir);
+                        firstDir == null ? new ArrayList<>() : cache.get(firstDir);
                 main.post(() -> {
                     prefetchedDirs = dirs;
+                    prefetchCache.clear();
+                    prefetchCache.putAll(cache);
                     prefetchDirPath = firstDir;
-                    prefetchedSessions = rows;
+                    prefetchedSessions = rows == null ? new ArrayList<>() : rows;
                     Log.i("FloatingBall", "zones: 预取 " + dirs.size() + " 个目录 / "
                             + rows.size() + " 条会话");
                 });
@@ -4560,6 +4567,9 @@ public class FloatingBallService extends Service {
     private float holdEnterY = -1;
     private boolean holdFocusArmed = false;
     private long holdLevelAt = 0;
+    private int holdPointers = 1;
+    private float holdLevelX = 0;
+    private boolean holdPendingExpand = false;
     private int holdFocus = -1;
     private long holdFocusAt = 0;
     private String holdDir = null;
@@ -4569,6 +4579,8 @@ public class FloatingBallService extends Service {
     private List<String> prefetchedDirs = null;
     private String prefetchDirPath = null;
     private List<DshApi.SessionRow> prefetchedSessions = new ArrayList<>();
+    private final java.util.LinkedHashMap<String, List<DshApi.SessionRow>> prefetchCache =
+            new java.util.LinkedHashMap<>();
 
     private final Runnable holdZoneDwell = new Runnable() {
         @Override public void run() {
@@ -4582,30 +4594,7 @@ public class FloatingBallService extends Service {
         }
     };
 
-    private final Runnable holdItemDwell = new Runnable() {
-        @Override public void run() {
-            int i = holdFocus;
-            if (!zonesActive || i < 0 || i >= holdItems.size()) return;
-            if (android.os.SystemClock.uptimeMillis() - holdFocusAt < ITEM_DWELL_MS) return;
-            if (android.os.SystemClock.uptimeMillis() - holdLevelAt < 300) return;   // 刚换级不许立刻提交
-            HoldItem it = holdItems.get(i);
-            Log.i("FloatingBall", "zones: 悬停提交「" + it.label + "」kind=" + it.kind);
-            if (it.kind == 0) {                       // 目录：不能靠"停住"展开，必须往右滑
-                Log.i("FloatingBall", "zones: 目录要看往右滑（不是停住）");
-            } else if (it.kind == 1) {                // 会话 → 提交：进入这个对话
-                final String sid = it.data, title = it.label;
-                commitHold(() -> openConversation(sid, title));
-            } else if (it.kind == 2) {                // 在该目录新建会话
-                final String dir = it.data;
-                prefs().edit().putString("send_cwd", dir).apply();
-                targetSessionId = null;
-                targetSessionTitle = null;
-                commitHold(() -> enterSearchMode("工作目录：新建会话", "", true, BAR_SEND));
-            } else {                                  // 其它动作
-                commitHold(() -> openDshSettings("状态3 参数"));
-            }
-        }
-    };
+    /** 悬停不再触发任何提交：选中只发生在"二级里松手"。 */
 
     /** 提交：先收起状态 3（球与窗口都回初始几何），再执行动作。 */
     private void commitHold(Runnable action) {
@@ -4631,33 +4620,35 @@ public class FloatingBallService extends Service {
             }
             return;
         }
-        // 一级（目录）：直接取最近的一行 —— 用户是"选中目录再往右滑"，不该再要求晃一下。
-        // 二级（会话）：必须先有意识地移动过，否则换级瞬间手指停在哪行就会自动选中哪行（会一路钻到底）。
-        if (holdLevel >= 2 && !holdFocusArmed) {
-            if (holdEnterY > 0 && Math.abs(rawY - holdEnterY) < dp(12)) return;
-            holdFocusArmed = true;
-        }
         int i = nearestRow(rawY);
-        // 二级面板：手指从该目录行**往右**滑出面板右边 → 展开该目录下的会话（三级）
-        if (holdLevel == 1 && i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
-            float panelRight = holdListRect[0] + holdListRect[2];
-            if (rawX > panelRight - dp(6)) {
-                Log.i("FloatingBall", "zones: 右滑展开「" + holdItems.get(i).label + "」");
-                openHoldSessions(holdItems.get(i).data);
-                holdEnterY = rawY;
-                return;
+        // 一级（工作目录）：双指**往右滑一点点**就进入该目录选会话
+        // （用户：长按→左上显示工作目录，然后双指往右滑一点点进目录；不要求滑到屏幕边缘）
+        if (holdLevel == 1) {
+            float dx = rawX - holdLevelX;
+            if (dx > dp(22)) {
+                if (i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
+                    Log.i("FloatingBall", "zones: 右滑 " + Math.round(dx) + "px → 进入「"
+                            + holdItems.get(i).label + "」选会话");
+                    openHoldSessions(holdItems.get(i).data);
+                    return;
+                }
+                // 列表还在载入（只有"载入中"那一行）→ 记下来，等数据到了自动进
+                holdPendingExpand = true;
+                Log.i("FloatingBall", "zones: 右滑时列表未就绪，挂起展开");
             }
+        }
+        // 二级（会话）：往左移动 → 退回上一级（选工作目录）
+        if (holdLevel >= 2 && rawX < holdLevelX - dp(36)) {
+            Log.i("FloatingBall", "zones: 左移 → 回到工作目录");
+            closeCards();
+            return;
         }
         if (i != holdFocus) {
             holdFocus = i;
             holdFocusAt = android.os.SystemClock.uptimeMillis();
             if (zonesView != null) zonesView.setCardFocus(i);
             pushCardScene();
-            main.removeCallbacks(holdItemDwell);
-            if (i >= 0) {
-                vibrate(6);
-                main.postDelayed(holdItemDwell, ITEM_DWELL_MS + 20);
-            }
+            if (i >= 0) vibrate(6);
         }
         // 手指离开卡片区 → 自动隐藏，回到一级圆区
         if (i < 0 && farFromCards(rawY)) {
@@ -4707,7 +4698,15 @@ public class FloatingBallService extends Service {
             }
         }
         if (items.isEmpty()) items.add(new HoldItem("（没有最近目录）", "", 3, ""));
-        showCards("工作目录", items);
+        final boolean pending = holdPendingExpand && items.size() > 1
+                && lastHoldX > holdLevelX + dp(22);
+        showCards(1, "工作目录", items);
+        if (pending) {
+            holdPendingExpand = false;
+            Log.i("FloatingBall", "zones: 列表就绪 → 补做右滑展开「" + items.get(0).label + "」");
+            openHoldSessions(items.get(0).data);
+            return;
+        }
         if (dirs == null) {
             // 还没预取完：后台拿一次再刷
             final DshApi api = DshApi.get(this);
@@ -4729,17 +4728,19 @@ public class FloatingBallService extends Service {
     private void openHoldSessions(final String dir) {
         holdDir = dir;
         List<HoldItem> items = new ArrayList<>();
-        if (dir.equals(prefetchDirPath)) {
-            for (int i = 0; i < Math.min(3, prefetchedSessions.size()); i++) {
-                DshApi.SessionRow r = prefetchedSessions.get(i);
+        List<DshApi.SessionRow> cached = prefetchCache.get(dir);
+        if (cached == null && dir.equals(prefetchDirPath)) cached = prefetchedSessions;
+        if (cached != null) {
+            for (int i = 0; i < Math.min(3, cached.size()); i++) {
+                DshApi.SessionRow r = cached.get(i);
                 items.add(new HoldItem(r.title == null || "null".equals(r.title)
                                 ? "（未命名会话）" : r.title,
                         relTime(r.updatedAt), 1, r.id));
             }
         }
         items.add(new HoldItem("在此新建会话", leaf(dir), 2, dir));
-        showCards(leaf(dir), items);
-        if (!dir.equals(prefetchDirPath)) {
+        showCards(2, leaf(dir), items);
+        if (cached == null) {
             final DshApi api = DshApi.get(this);
             new Thread(() -> {
                 try {
@@ -4747,6 +4748,7 @@ public class FloatingBallService extends Service {
                     main.post(() -> {
                         prefetchDirPath = dir;
                         prefetchedSessions = rows;
+                        prefetchCache.put(dir, rows);
                         if (zonesActive && holdLevel == 2 && dir.equals(holdDir)) openHoldSessions(dir);
                     });
                 } catch (Throwable t) {
@@ -4757,9 +4759,12 @@ public class FloatingBallService extends Service {
     }
 
     /** 卡片上屏（形状 + 文字一起换）。 */
-    private void showCards(String title, List<HoldItem> items) {
-        holdLevel = holdTitle.equals(title) && holdLevel > 0 ? holdLevel : 1;
+    private void showCards(int level, String title, List<HoldItem> items) {
+        boolean sameLevel = (holdLevel == level) && title.equals(holdTitle);
+        holdLevel = level;
         holdLevelAt = android.os.SystemClock.uptimeMillis();
+        if (!sameLevel) holdLevelX = lastHoldX;    // 同一级的刷新不要重置"起始 X"，否则右滑距离会被吃掉
+        holdPointers = 1;
         holdTitle = title;
         holdItems.clear();
         holdItems.addAll(items);
@@ -4782,7 +4787,6 @@ public class FloatingBallService extends Service {
         holdItems.clear();
         holdFocus = -1;
         holdDir = null;
-        main.removeCallbacks(holdItemDwell);
         if (zonesView != null) zonesView.hideCards();
         pushZoneScene();
         Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到四区");
@@ -4875,9 +4879,24 @@ public class FloatingBallService extends Service {
     /** 松手：不管在哪一级，都回初始状态（"松手则恢复初始状态"）。 */
     void finishZones(boolean cancelled) {
         if (!zonesActive) return;
+        // 三级（会话）里松手 = 选中这条会话（进对话卡）；只停在工作目录层级松手 = 无效操作
+        if (!cancelled && holdLevel >= 2 && holdFocus < 0) holdFocus = nearestRow(lastHoldY);
+        if (!cancelled && holdLevel >= 2 && holdFocus >= 0 && holdFocus < holdItems.size()
+                && holdItems.get(holdFocus).kind == 1) {
+            final String sid = holdItems.get(holdFocus).data;
+            final String title = holdItems.get(holdFocus).label;
+            Log.i("FloatingBall", "zones: 松手选中会话「" + title + "」→ 进对话卡");
+            exitZones();
+            main.postDelayed(new Runnable() {
+                @Override public void run() { openConversation(sid, title); }
+            }, 60);
+            return;
+        }
+        if (!cancelled && holdLevel == 1) {
+            Log.i("FloatingBall", "zones: 只选到工作目录，视为无效操作");
+        }
         Log.i("FloatingBall", "zones: 松手 → 回初始状态（level=" + holdLevel + "）");
         exitZones();
-        armVoice("状态3 松手回到初始态");
     }
 
     private void openDshSettings(String why) {
@@ -5093,7 +5112,6 @@ public class FloatingBallService extends Service {
         convoSideBtn = null;
         convoSessionId = null;
         setSiriText("");
-        armVoice("对话关闭回到初始态");
     }
 
     // ── 状态 2 暂存：菜单是小窗，胶囊那层收不起来 → 开菜单时先收起胶囊，关掉再放回来 ──
@@ -5278,7 +5296,6 @@ public class FloatingBallService extends Service {
         exitGlassPanel();
         applyBallTouchability();
         restoreBarIfStashed();               // 是从状态 2 进来的就把胶囊放回去
-        armVoice("菜单关闭回到初始态");
     }
 
     private void removeMenuWindows() {
