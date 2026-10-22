@@ -1565,3 +1565,27 @@ vec2  duv = (qs - q) * uHalf * uPxToScreen / uScreen;  // 往外采样 → 圆�
 缩放的固有形态，不是实现 bug。想收就把 `zDropZoom` 调回 1.3~1.5。
 
 截图：`docs/glass-droplets-zoom.png`。
+
+
+### 十三修：四区只留"发光图标"（2026-10-23）
+
+用户：「四个缩小镜里不要出现文字，替换大一点细一点符合真实功能的白色图标，并且图标像发光一样要亮的刺眼那种」。
+
+- **去掉文字**：`BallZonesView.onDraw` 的四区分支不再 `drawText`，图标改到圆心（`cy[i]` 而不是 `cy - 0.22r`）。
+  卡片/菜单的文字在 `drawCards` / `BallGlassMenu` 里，不受影响。
+- **图标更大更细**：边长 `0.52r → 0.80r`，线宽改成按"最终像素"算（`core*k24`，`k24 = 24/s`，
+  否则 canvas 的缩放会把线宽一起放大），`core = 1.15px`。
+- **发光**：用 **15 层连续衰减的白色描边**模拟辉光：
+  ```java
+  for (float w = 1.0f; w <= 24f; w += 1.55f) {
+      int a = (int) (165 * pow(1 - (w-1)/23, 2.3));   // 内亮外淡
+      stroke.setColor((a << 24) | 0xFFFFFF);
+      stroke.setStrokeWidth((core + w) * k24);
+      cv.drawPath(path, stroke);
+  }
+  ```
+  不用 `BlurMaskFilter`：它在硬件加速画布上对 `Path` 经常被直接忽略。层数少于 ~10 会看到"年轮"。
+- 文件夹那条内横线删掉（加上它像表格，不像系统文件夹图标）。
+
+⚠️ 这份截图是 `show-glass` 打开时拍的（所以有水珠自采样的放射纹）；正常运行时玻璃不留在抓屏里，
+`files/ballshot` 拍到的画面里没有那些纹路。

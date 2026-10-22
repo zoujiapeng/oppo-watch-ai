@@ -137,15 +137,12 @@ final class BallZonesView extends View {
             return;
         }
         for (int i = 0; i < 4; i++) {
-            float a = (active == i) ? 1f : 0.72f;
+            float a = (active == i) ? 1f : 0.92f;
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
-            text.setColor(((int) (alpha * 0.82f) << 24) | 0x00FFFFFF);
             float rr = r * (active == i ? 1.06f : 1f);
-            // 图标略偏上、文字压在圈内下缘 —— 两样都必须落在玻璃圆里（用户：文字要被囊括起来）
-            drawIcon(cv, i, cx[i], cy[i] - r * 0.22f, active == i);
-            String label = LABELS[i];
-            cv.drawText(label, cx[i], cy[i] + r * 0.46f, text);
+            // 用户 2026-10-23：四个缩小镜里**不要文字**，只留一个大一点的发光图标（居中）
+            drawIcon(cv, i, cx[i], cy[i], active == i);
             if (active == i) {
                 ring.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
                 stroke.setStrokeWidth(dp(2.2f));
@@ -216,7 +213,7 @@ final class BallZonesView extends View {
 
     /** 图标：0 文件夹 / 1 放大镜 / 2 铅笔 / 3 滑杆。尺寸按 r 等比缩放。 */
     private void drawIcon(Canvas cv, int which, float x, float y, boolean on) {
-        float s = r * 0.52f;                    // 图标边长
+        float s = r * 0.80f;                    // 图标边长（比原来大一截）
         cv.save();
         cv.translate(x - s * 0.5f, y - s * 0.5f);
         cv.scale(s / 24f, s / 24f);             // 统一按 24×24 坐标下笔
@@ -233,9 +230,9 @@ final class BallZonesView extends View {
                 break;
             }
             case 1: {                           // 搜索会话：放大镜
-                path.addCircle(10.5f, 10.5f, 6.2f, Path.Direction.CW);
-                path.moveTo(15.1f, 15.1f);
-                path.lineTo(20.5f, 20.5f);
+                path.addCircle(10.5f, 10.5f, 6.4f, Path.Direction.CW);
+                path.moveTo(15.2f, 15.2f);
+                path.lineTo(20.8f, 20.8f);
                 break;
             }
             case 2: {                           // 输入：铅笔
@@ -256,28 +253,30 @@ final class BallZonesView extends View {
                 break;
             }
         }
-        if (on) stroke.setColor(0xFFFFFFFF);
-        // 玻璃现在是**全透明**的（桌面直接透过来）：白线在亮背景上会消失。
-        // 先描一层略粗的深色底，再画白线 —— 等于给图标一条很轻的暗边，玻璃本身不动。
-        int c0 = stroke.getColor();
-        float w0 = stroke.getStrokeWidth();
-        stroke.setColor(0x3D000000);
-        stroke.setStrokeWidth(w0 + 2.4f);
-        cv.drawPath(path, stroke);
-        stroke.setColor(c0);
-        stroke.setStrokeWidth(w0);
-        cv.drawPath(path, stroke);
-        if (which == 3) {                       // 滑杆的三个旋钮
-            cv.drawCircle(8f, 7f, 2.1f, fill);
-            cv.drawCircle(16f, 12f, 2.1f, fill);
-            cv.drawCircle(10.5f, 17f, 2.1f, fill);
-        }
-        if (which == 0) {                       // 文件夹口
-            path.reset();
-            path.moveTo(2.5f, 12.2f);
-            path.lineTo(21.5f, 12.2f);
+        // ── 发光：从外到内叠 4 层白描边（越外越淡、越粗），最后一层是"刺眼"的纯白细线 ──
+        // 不用 BlurMaskFilter（硬件层上不稳），用多层描边模拟辉光，任何 ROM 都一致。
+        float core = dp(1.15f);                       // 线宽（px）
+        float k24  = 24f / s;                         // px → 24 坐标系的换算
+        // 15 层连续衰减的描边 = 平滑的辉光（层数少了会看到一圈圈"年轮"）。
+        // 用多层描边而不是 BlurMaskFilter：后者在硬件加速画布上对 Path 经常被忽略。
+        for (float w = 1.0f; w <= 24.0f; w += 1.55f) {
+            float f = (w - 1.0f) / 23.0f;
+            int a = (int) (165.0 * Math.pow(1.0f - f, 2.3));
+            if (a <= 2) continue;
+            stroke.setColor((a << 24) | 0x00FFFFFF);
+            stroke.setStrokeWidth((core + w) * k24);
             cv.drawPath(path, stroke);
         }
+        stroke.setColor(0xFFFFFFFF);                  // 芯：纯白
+        stroke.setStrokeWidth(core * k24);
+        cv.drawPath(path, stroke);
+        if (which == 3) {                             // 滑杆的三个旋钮（也用纯白，跟芯一致）
+            fill.setColor(0xFFFFFFFF);
+            cv.drawCircle(8f, 7f, 1.9f, fill);
+            cv.drawCircle(16f, 12f, 1.9f, fill);
+            cv.drawCircle(10.5f, 17f, 1.9f, fill);
+        }
+        // 文件夹口那条横线去掉：加它看着像"表格"，干净的文件夹轮廓更像系统图标
         cv.restore();
     }
 }
