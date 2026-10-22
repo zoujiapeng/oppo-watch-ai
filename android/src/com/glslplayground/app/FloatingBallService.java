@@ -3579,8 +3579,8 @@ public class FloatingBallService extends Service {
         // 上下留白（黑区/球高的余量）：字号大就多留一点
         // 文字四周留白：底部多留一截，保证最后一行完整落在玻璃里（用户：宁可玻璃拉长也别露字）
         float padY = Math.max(dp(18), siriTextPx * mdFontRatio() * 0.85f);
-        // 方形态高度上限：屏高 55% → 72%，长文本优先"玻璃变高"而不是"文字露出去"
-        float maxBallH = screenH * 0.72f;
+        // 方形态高度上限：**屏高 50%**（用户 2026-10-23 定），再长的文字在方形内滚动
+        float maxBallH = screenH * 0.50f;
 
         float maxBallW = siriMaxBallW();
         // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
