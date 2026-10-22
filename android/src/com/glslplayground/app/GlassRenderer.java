@@ -282,6 +282,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec3 uPanelAccent;\n" +
 
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
+        "uniform float uDropMode;   // 1 = 水珠模式（四区那四个圆）：加高光点 + 贴边聚光\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
         "  float outside = length(max(cc,0.0)) - r;\n" +
@@ -503,6 +504,22 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float shell = smoothstep(3.0*uScale, 0.0, abs(sd + 2.5*uScale));\n" +
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
         "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit;\n" +
+        // ── 水珠模式（四区那四个圆）────────────────────────────────────────────
+        // 真实水珠的两件事：①左上两个镜面高光点（光源的像）②贴边一圈"聚光"（球面把光收在边缘）。
+        // 只加光、不加暗，所以不会把玻璃压黑；uDropMode=0 时整段零开销（球/面板不受影响）。
+        "  if(uDropMode > 0.5){\n" +
+        "    vec2 q  = c / uHalf;                       // -1..1（c.y 向上）\n" +
+        "    vec2 h1 = q - vec2(-0.30, 0.46);\n" +
+        "    vec2 h2 = q - vec2(-0.12, 0.66);\n" +
+        "    float hi = exp(-dot(h1,h1) * 26.0) * 0.36 + exp(-dot(h2,h2) * 80.0) * 0.26;\n" +
+        "    col += vec3(0.96,0.98,1.0) * hi;\n" +
+        "    float rimGlow = smoothstep(4.5*uScale, 0.0, abs(sd + 2.0*uScale));\n" +
+        "    col += vec3(0.80,0.88,1.0) * rimGlow * 0.26;\n" +
+        // 水珠的"背光侧"：光从左上来，右下自然偏暗（球面上的明暗交界，不会是一条直边）
+        "    vec2 qn = normalize(q + 1e-5);\n" +
+        "    float side = clamp(0.55 - 0.55*dot(qn, normalize(vec2(-0.45, 0.89))), 0.0, 1.0);\n" +
+        "    col *= mix(1.0, 0.60, side * 0.90);\n" +
+        "  }\n" +
         "  float aa = smoothstep(1.5, -1.5, sd);\n" +
         "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
 
@@ -703,19 +720,26 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx, hy);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr);
             // 折射：和球同一条公式，长度按形状短半轴换算（球是 refract 200 / band 170）
+            // 水珠比球"更弯"：折射强度 ≈ 0.85R、带子 1.6R（整颗都在折射带里）→ 边缘把桌面掰得很明显
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"),
-                    zRefract * k * (panel ? 1f : 1f));
+                    panel ? zRefract * k : shortHalf * 0.85f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"),
-                    Math.max(1f, shortHalf * (panel ? zBandRatio : 1.05f)));
+                    Math.max(1f, panel ? shortHalf * zBandRatio : shortHalf * 1.60f));
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), k);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), zDome);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), zAb);
+            // 面板沿用聊天卡那条黑区（0.93 / -1 → -0.01）；
+            // 四区是"水珠"：黑区只压最上面一小片，且淡很多（用户：太黑了）
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"),
-                    panel ? 0.93f : 0.93f);
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"), -1.0f);
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), -0.01f);
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), 0.11f);
+                    panel ? 0.93f : 0.55f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"),
+                    panel ? -1.0f : -0.98f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"),
+                    panel ? -0.01f : 0.75f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"),
+                    panel ? 0.11f : 0.22f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panel ? 1f : 0f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), panel ? 0f : 1f);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         }
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -941,6 +965,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panelMode);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), 0f);
         GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uPanelAccent"),
                 panelAccentR, panelAccentG, panelAccentB);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
