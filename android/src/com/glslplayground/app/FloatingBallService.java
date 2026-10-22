@@ -5977,6 +5977,15 @@ public class FloatingBallService extends Service {
             @Override public void run() {
                 s.pendingAttach = file;
                 s.pendingAttachName = name;
+                if (s.convoOpen) {
+                    // 对话卡里选的附件：就留在对话卡上，不要切回状态 2
+                    if (s.convoBar != null) {
+                        s.convoBar.setAttachmentName(name);
+                        s.convoBar.setHint("已附加 " + name + "，发送时一起发出");
+                    }
+                    Log.i("FloatingBall", "attach: 对话卡挂上「" + name + "」");
+                    return;
+                }
                 if (s.searchActive && s.searchBar != null) {
                     s.searchBar.setAttachmentName(name);
                     s.searchBar.focusInput();

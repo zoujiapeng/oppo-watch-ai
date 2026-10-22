@@ -219,7 +219,7 @@ public class BallSearchBar extends LinearLayout {
         }
         String n = name;
         if (n.length() > 12) n = "…" + n.substring(n.length() - 11);
-        attachChip.setText(n);
+        attachChip.setText("📎 " + n);        // 一眼看出这是一枚附件
         attachChip.setVisibility(VISIBLE);
     }
 
