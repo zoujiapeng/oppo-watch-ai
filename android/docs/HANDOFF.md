@@ -1460,3 +1460,23 @@ printf '540,1050' > $D/zone-move && sleep 2.5         # 停在下边缘 → 自�
 （圆形不会被读成方块）。
 
 截图：`docs/glass-real-menu.png`（切换会话面板）、`docs/glass-real-zones.png`（四区）。
+
+
+### 九修：区域层**直接复用球的着色器**（2026-10-23，最终形态）
+
+用户看完成片后一句话定调：
+
+> 「太丑了，不逼真，你直接复用聊天界面那个方形不就行了吗……还有菜单的球你相当于把初始状态的胶囊
+> 弄成圆形同时弄四个不就成菜单的样子了吗」
+
+于是 `ZoneLayerShader`（我自己搓的第二套材质）**整条链路停用**，改用
+`GlassRenderer.drawZoneLayerBall()`：拿球的合成着色器 `FS_COMP` 把每个形状画一遍。
+
+- 形状来源不变（`zShape/zMeta`，5 个槽位）：`m[i*4+1] >= 0.5` → 面板模式（`uPanelMode=1`，
+  就是聊天卡那张方形）；否则 → 球模式（`uPanelMode=0`，初始那颗胶囊的材质）。
+- 每个形状单独 `glDrawArrays`，开预乘 alpha 混合 `GL_ONE / GL_ONE_MINUS_SRC_ALPHA` 依次叠。
+- 折射/黑区/赤道线/壳光/边缘色散全部是球那一份代码 —— 不再有两份材质对不齐的问题。
+- **用户拍到的那条"对角线"**是旧 `ZoneLayerShader` 里 SDF 梯度在四角收敛出的棱（弯月面 +
+  圆角矩形梯度），换成 `FS_COMP` 后这条线在数学上就不存在了。
+
+截图：`docs/glass-ballshader-menu.png`（切换会话）、`docs/glass-ballshader-zones.png`（四区）。

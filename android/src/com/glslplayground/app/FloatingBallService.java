@@ -5164,7 +5164,7 @@ public class FloatingBallService extends Service {
         s[1] = holdListRect[1] + holdListRect[3] * 0.5f;
         s[2] = holdListRect[2] * 0.5f;
         s[3] = holdListRect[3] * 0.5f;
-        m[0] = 0f; m[1] = 0.45f; m[2] = 0.14f; m[3] = 1f;   // 圆角 ≈ 20dp
+        m[0] = 0f; m[1] = 0.60f; m[2] = 0.14f; m[3] = 1f;   // 面板模式，圆角 ≈ 20dp
         for (int i = 1; i < 5; i++) {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
@@ -5766,7 +5766,7 @@ public class FloatingBallService extends Service {
         s[1] = menuRect[1] + menuRect[3] * 0.5f;
         s[2] = menuRect[2] * 0.5f;
         s[3] = menuRect[3] * 0.5f;
-        m[0] = 0f; m[1] = 0.30f; m[2] = 0.22f;   // 面板圆角 = 0.22 × 半高（≈22dp），不是椭圆
+        m[0] = 0f; m[1] = 0.60f; m[2] = 0.22f;   // m[1]>=0.5 → 面板模式（和聊天卡同一支着色器）
         m[3] = 1f;
         for (int i = 1; i < 5; i++) {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;

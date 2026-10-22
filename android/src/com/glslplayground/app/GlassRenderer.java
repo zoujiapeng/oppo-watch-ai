@@ -641,6 +641,86 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
     }
 
+    /**
+     * 区域层 = **同一颗球**画 N 遍。
+     *
+     * 为什么这么做：用户明确要求「直接复用聊天界面那个方形」「把初始状态的胶囊弄成圆形、同时弄四个」。
+     * 于是这里不再有第二套材质 —— 用的就是 {@link #FS_COMP}：同样的抓屏、同样的折射/色散/
+     * 黑区/赤道线/壳光，只是每个形状换一组 uCenter/uHalf/uCorner/uPanelMode，
+     * 开 GL_BLEND（预乘 alpha：ONE / ONE_MINUS_SRC_ALPHA）把 5 个形状依次叠上去。
+     */
+    private void drawZoneLayerBall(int bgTex) {
+        if (compProg == 0) return;
+        float k = (winPixelW > 0 && winW > 0) ? (float) winW / (float) winPixelW : 1f;
+        float invK = 1f / Math.max(k, 1e-3f);
+
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        useProgram(compProg);
+        bindFullscreen(compProg);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, winW, winH);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurSrcTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(compProg, "iBg"), 0);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(compProg, "iBlur"), 1);
+
+        // ── 全局（和球那一趟完全一致；波/圆点全关）──
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "iRes"), winW, winH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uScreen"), screenW, screenH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uWinPos"), winX, winY);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPxToScreen"), invK);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), 1f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"),
+                (System.currentTimeMillis() - t0) / 1000f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), 90f * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), 1f);
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uPanelAccent"), 1f, 1f, 1f);
+
+        float[] s = zShape;
+        float[] m = zMeta;
+        for (int i = 0; i < 5; i++) {
+            if (m[i * 4 + 3] < 0.5f) continue;                     // enabled
+            float hx = Math.max(1f, s[i * 4 + 2] * k);
+            float hy = Math.max(1f, s[i * 4 + 3] * k);
+            float cx = (s[i * 4] - winX) * k;
+            float cy = (s[i * 4 + 1] - winY) * k;
+            float cr = Math.max(0f, Math.min(1f, m[i * 4 + 2])) * Math.min(hx, hy);
+            float shortHalf = Math.min(hx, hy);
+            boolean panel = m[i * 4 + 1] >= 0.5f;                  // dark>=0.5 视作"面板"
+
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uCenter"), cx, cy);
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx, hy);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr);
+            // 折射：和球同一条公式，长度按形状短半轴换算（球是 refract 200 / band 170）
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"),
+                    zRefract * k * (panel ? 1f : 1f));
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"),
+                    Math.max(1f, shortHalf * (panel ? zBandRatio : 1.05f)));
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), k);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), zDome);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), zAb);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"),
+                    panel ? 0.93f : 0.93f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack0"), -1.0f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlack1"), -0.01f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), 0.11f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panel ? 1f : 0f);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
+        }
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
     @Override public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -806,7 +886,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
         // ── 状态 3 / 玻璃菜单层（同一套材质，多个形状）────────────────────────
         if (zoneMode) {
-            drawZoneLayer(bgTex);
+            // ★ 2026-10-23：直接用**球 / 聊天卡片那颗 shader（FS_COMP）**画菜单与四区，
+            //   每个形状单独一趟、预乘 alpha 混合叠上去（用户：「直接复用聊天界面那个方形」）。
+            drawZoneLayerBall(bgTex);
             return;
         }
 
