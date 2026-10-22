@@ -1286,7 +1286,7 @@ printf '' > $D/ballshot && su -c "cp /data/user/0/com.glslplayground.app/files/b
 
 | 位置 | 改动 |
 |---|---|
-| `ZoneLayerShader.java` | 折射换成**球那条曲线**：`amp = circleMap(1 + sd/band) * refract`（边缘最强、往里按 band 衰减），色散按 `lp.x*lp.y/(hx*hy)` 加权；黑顶 `uCap0→uCap1` 渐隐；球顶两团柔光；底缘亮弧 + 赤道线 + 壳边；`uFrost` 把背景换成磨砂（面板 0.82 / 圆区 0.55） |
+| `ZoneLayerShader.java` | 折射换成**球那条曲线**：`amp = circleMap(1 + sd/band) * refract`（边缘最强、往里按 band 衰减），色散按 `lp.x*lp.y/(hx*hy)` 加权；黑顶 `cap = pow(1-top, uCapPow)`（**连续衰减**，二修掉了"锋利的黑色长方形"）+ 贴边 26dp 内变薄；球顶两团柔光；底缘亮弧 + 赤道线 + 壳边；`uFrost` 把背景换成磨砂（面板 0.82 / 圆区 0.55） |
 | `GlassRenderer.java` | 新增 `zBandRatio / zDome / zAb / zTopDarken / zCap0 / zCap1 / zEdgeBleed / zScrim / zGlow / zFrost / zoneBlur`；`buildBlur()` 里 `zoneMode ? zoneBlur : blur` —— **面板的磨砂力度独立于球的 `float_params.blur`**，退出即恢复 |
 | `FloatingBallService.zGlassMaterial()` | 统一按**形状短半轴**换算 `band / refract`，圆区、长按卡片、菜单三处只改黑顶与磨砂 |
 | `winY0()` | 改成**缓存**（只有合理测量才写缓存，否则用上次真值，最后兜底问 `status_bar_height`）；`zonesParams.y` 也补上 `- winY0()`（之前整层图标比玻璃低一个状态栏） |
@@ -1307,3 +1307,54 @@ su -c 'dumpsys window windows' | grep -A2 glslplayground | grep 'frame=\['
 实测对位（2026-10-23，菜单）：文字窗口 `205,857 670x627`；玻璃窗 `166,818 748x705`，
 面板 inset 14dp=38.5 → 面板 `204.5,856.5 669x627` —— **重合**（修之前差 90px）。
 状态 3：`zones` 覆盖层与 GL 窗同在 `144,180 793x579`。
+
+
+### 二修：那条「锋利的黑色长方形」（2026-10-23）
+
+第一次改完，用户说「依然有一层锋利的黑色长方形」。用 `files/show-glass`（新调试口子：
+**不给玻璃打 SKIP_SCREENSHOT**，root 截屏就能拍到用户真正看到的合成画面）一拍就看清了：
+黑块不是窗口底色、不是阴影、也不是文字层，而是**黑顶那条曲线**：
+
+```glsl
+// 旧的：cap0=-1 → cap1=0.78 的 smoothstep
+cap = 1.0 - smoothstep(-1.0, 0.78, ny);   // 顶部 15% 就烧掉 90% 的暗度
+```
+
+smoothstep 两头平、中间陡，铺在整块面板上 = 顶上一条**边是直的**（连圆角都被盖住）、
+下沿有明显台阶的黑色带。现在的写法：
+
+```glsl
+float topN = clamp((ny + 1.0) * 0.5, 0.0, 1.0);
+float cap  = pow(1.0 - topN, uCapPow);          // 从上往下连续衰减，没有台阶
+cap *= smoothstep(0.0, 26.0 * uDpr, -d);        // 贴边变薄 → 圆角跟着形状收
+glass = mix(refr, vec3(0.010,0.012,0.020), cap * uTopDarken);
+```
+
+参数：面板 `uTopDarken=0.88 / uCapPow=1.55 / 磨砂 0.82 / 烟熏 0.30`，
+圆区 `0.80 / 1.35 / 0.55 / 0.20`。
+
+合成截图（`files/show-glass` 打开时拍的，就是用户眼睛看到的）：
+`docs/glass-menu-composite.png`、`docs/glass-zones-composite.png`。
+拍完**必须** `touch files/hide-glass` 或重启，否则抓屏里含着玻璃自己 → 折射自采样。
+
+
+### 三修：对话卡上的同一个黑方块（`GlassRenderer.FS_COMP` 的 `uPanelMode`）
+
+对话卡（Siri 方形态 / 审批提问面板）走的是另一条链路，黑区在 `FS_COMP` 里：
+
+```glsl
+// 旧的：rise<0.45 时 pow(rise,2.6)≈0.1 → 混出来还是 0.91 黑 → 整个上半段都是 1.0
+tBlackK = mix(1.0, 0.12, pow(rise, 2.6));
+```
+
+结果就是**黑块铺满上半段、下沿一条直线、四个直角还盖住了圆角**（用户说的"锋利的黑色长方形"）。
+现在：
+
+```glsl
+float top01 = clamp((1.0 + ny) * 0.5, 0.0, 1.0);        // 0=顶 1=底
+tBlackK = mix(0.92, 0.10, pow(top01, 1.6));             // 连续掉，没有平台
+tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);         // 贴边变薄 → 圆角跟着形状收
+```
+
+对比图：`docs/glass-convo-before.png` / `docs/glass-convo-after.png`（都是 `files/show-glass`
+打开时拍的合成画面，就是用户眼睛看到的那一帧）。

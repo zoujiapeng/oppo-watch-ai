@@ -80,6 +80,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float zGlow = 0.5f;
     /** 磨砂占比：0 = 纯透镜（和球一样清晰）、1 = 全糊（毛玻璃）。面板给 0.8，圆区 0.55。 */
     public volatile float zFrost = 0.8f;
+    /** 黑顶衰减指数：越大越"只在最顶上黑"（面板 1.6 / 圆区 1.4）。 */
+    public volatile float zCapPow = 1.6f;
     public volatile float zHeight = 18f;        // 保留字段（旧参数，已不参与绘制）
     public volatile float zDensity = 2.75f;
     /** 玻璃面板的磨砂力度（只作用于 zoneMode；球仍然用 {@link #blur}）。 */
@@ -428,9 +430,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float rise = clamp((1.0 - ny) / 1.5, 0.0, 1.0);\n" +      // 0=球顶 1=黑区底
         "    blackCol = vec3(0.0);\n" +                               // 纯黑，不带任何颜色
         "    panelFade = 1.0;\n" +
-        // 顶上**纯黑**（1.0），往下加速变透：pow(rise, 2.6) 让前段几乎不变、
-        // 后半段掉得很快（不是平缓线性），到底只剩 0.12 —— 底下几乎是玻璃本身。
-        "    tBlackK = mix(1.0, 0.12, pow(rise, 2.6));\n" +
+        // ★ 2026-10-23 二修（用户：「依然有一层锋利的黑色长方形」）：
+        //   旧写法 mix(1.0, 0.12, pow(rise,2.6)) 在**整块上半段**都贴着 1.0（rise<0.45 时
+        //   pow≈0.1，混出来还是 0.91 黑），于是黑块是一整片、下沿是直的、还盖住了圆角。
+        //   现在从顶到底**连续**掉：0.92 → 0.10（1.6 次幂），再乘 smoothstep(0,18dp,-sd)
+        //   让贴边那一圈变薄 —— 圆角自然跟着玻璃形状收，不再有"方框"。
+        "    float top01 = clamp((1.0 + ny) * 0.5, 0.0, 1.0);\n" +   // 0=球顶 1=球底
+        "    tBlackK = mix(0.92, 0.10, pow(top01, 1.6));\n" +
+        "    tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);\n" +
         "  }\n" +
         "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
@@ -592,6 +599,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uTopDarken"), zTopDarken);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap0"), zCap0);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap1"), zCap1);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCapPow"), zCapPow);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uEdgeBleed"), zEdgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uScrim"), zScrim);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uGlow"), zGlow);

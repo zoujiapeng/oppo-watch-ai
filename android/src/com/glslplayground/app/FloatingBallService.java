@@ -4077,7 +4077,15 @@ public class FloatingBallService extends Service {
 
     /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
     /** 给悬浮窗的 Surface 打上 SKIP_SCREENSHOT 标记：系统截图/录屏（含 root screencap）不再包含水晶球， */
+    /**
+     * 调试口子：`files/show-glass` 存在时**不给玻璃打 SKIP_SCREENSHOT**，
+     * root 截屏就能拍到"用户真正看到的合成画面"（含窗口底色/阴影/文字叠放）。
+     * `files/hide-glass` 关掉。**生产必须关**（开着的话抓屏里含着球自己 → 折射会自采样）。
+     */
+    private volatile boolean debugShowGlass = false;
+
     private boolean applySkipScreenshot() {
+        if (debugShowGlass) return false;
         if (Build.VERSION.SDK_INT < 29 || glView == null) return false;
         return skipScreenshotOf(glView.getSurfaceControl(), "glass");
     }
@@ -4534,9 +4542,8 @@ public class FloatingBallService extends Service {
         renderer.zAb = 0.34f;
         renderer.zGlow = 1.0f;                       // 球顶那两团柔光（只给圆区，面板上会糊字）
         renderer.zFrost = 0.55f;                     // 圆区：透镜为主，只加一点雾
-        renderer.zTopDarken = 0.86f;
-        renderer.zCap0 = -1.0f;
-        renderer.zCap1 = 0.18f;
+        renderer.zTopDarken = 0.80f;
+        renderer.zCapPow = 1.35f;                    // 黑顶从上往下连续衰减（没有台阶）
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -4982,10 +4989,9 @@ public class FloatingBallService extends Service {
         renderer.zGlow = 0f;
         renderer.zFrost = 0.82f;
         renderer.zRefract = Math.max(dp(14), Math.min(holdListRect[2], holdListRect[3]) * 0.34f);
-        renderer.zTopDarken = 0.92f;
-        renderer.zScrim = 0.26f;
-        renderer.zCap0 = -1.0f;
-        renderer.zCap1 = 0.72f;
+        renderer.zTopDarken = 0.88f;
+        renderer.zCapPow = 1.55f;
+        renderer.zScrim = 0.30f;
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5564,10 +5570,9 @@ public class FloatingBallService extends Service {
         renderer.zGlow = 0f;
         renderer.zFrost = 0.82f;
         renderer.zRefract = Math.max(dp(16), Math.min(menuRect[2], menuRect[3]) * 0.34f);
-        renderer.zTopDarken = 0.93f;
-        renderer.zScrim = 0.26f;
-        renderer.zCap0 = -1.0f;
-        renderer.zCap1 = 0.78f;
+        renderer.zTopDarken = 0.88f;
+        renderer.zCapPow = 1.55f;
+        renderer.zScrim = 0.30f;
         renderer.zShape = s;
         renderer.zMeta = m;
         renderer.sHlAmt = 1.5f;
@@ -6696,6 +6701,18 @@ public class FloatingBallService extends Service {
         if (now < nextGestureCheck) return;
         nextGestureCheck = now + 120;
         File dir = gateDir();
+        File fShowGlass = new File(dir, "show-glass");
+        if (fShowGlass.exists()) {
+            fShowGlass.delete();
+            debugShowGlass = true;
+            Log.i("FloatingBall", "debug: 玻璃留在抓屏里（重新进一次状态才会生效）");
+        }
+        File fHideGlass = new File(dir, "hide-glass");
+        if (fHideGlass.exists()) {
+            fHideGlass.delete();
+            debugShowGlass = false;
+            Log.i("FloatingBall", "debug: 玻璃重新排除出抓屏");
+        }
         File fOpen = new File(dir, "zone-open");
         if (fOpen.exists()) {
             fOpen.delete();

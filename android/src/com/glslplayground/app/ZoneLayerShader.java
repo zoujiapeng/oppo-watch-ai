@@ -36,6 +36,7 @@ final class ZoneLayerShader {
         "uniform float uRefract, uBandRatio, uDome, uAb, uHlAmt, uCont, uValid, uDpr;\n" +
         // 黑顶：ny 从 -1(顶) 到 +1(底)，cap0 处最黑、cap1 处完全透明
         "uniform float uTopDarken, uCap0, uCap1, uEdgeBleed, uScrim, uGlow, uFrost;\n" +
+        "uniform float uCapPow;   // 黑顶衰减指数（越大越只在最顶上黑）\n" +
         "uniform vec4  uS0, uS1, uS2, uS3, uS4;   // cx,cy,halfX,halfY\n" +
         "uniform vec4  uM0, uM1, uM2, uM3, uM4;   // act, dark, cornerRadius, enabled\n" +
         "\n" +
@@ -111,10 +112,18 @@ final class ZoneLayerShader {
         "  float innerEdge = smoothstep(0.0, -18.0 * uDpr, d);\n" +
         "  refr *= mix(0.72, 1.0, innerEdge);\n" +
         "\n" +
-        // ── ★3 黑顶：ny -1(顶) → +1(底)，cap0 最黑，cap1 完全透 ───────────────
+        // ── ★3 黑顶 ────────────────────────────────────────────────────────────
+        // ★ 2026-10-23 二修：用户看到"一层锋利的黑色长方形"。原因不是形状，是这条曲线：
+        //   smoothstep(cap0=-1, cap1=0.78) 在顶部 15% 里就烧掉了 90% 的暗度 ——
+        //   于是面板顶上出现一条**边是直的**（还盖住了圆角）、下沿有明显台阶的黑色带。
+        //   现在改成：cap = pow(1 - top, 1.7)，从上往下**连续**衰减；再乘
+        //   smoothstep(0, 26dp, -d) 让贴边的那一圈变薄（玻璃边缘本来就薄，不该压黑），
+        //   圆角处自然跟着形状收，不再有"长方形"的直边。
         "  float ny = clamp(lp.y / max(bBest.y, 1.0), -1.0, 1.0);\n" +
-        "  float cap = 1.0 - smoothstep(uCap0, uCap1, ny);\n" +
-        "  cap = cap * cap * (3.0 - 2.0 * cap);\n" +
+        "  float topN = clamp((ny + 1.0) * 0.5, 0.0, 1.0);\n" +
+        "  float cap = pow(1.0 - topN, uCapPow);\n" +
+        "  cap *= smoothstep(0.0, 26.0 * uDpr, -d);\n" +
+
         "  vec3 glass = mix(refr, vec3(0.010, 0.012, 0.020), cap * uTopDarken);\n" +
         // 面板/圆区通用的一点烟熏：保证白字永远有底（亮桌面上也不会"字浮在空气里"）
         "  glass = mix(glass, glass * 0.18 + vec3(0.006), clamp(uScrim + darkBest * 0.30, 0.0, 1.0));\n" +
