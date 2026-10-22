@@ -3577,9 +3577,10 @@ public class FloatingBallService extends Service {
         float th = Math.max(dp(20), mdContentH > 0 ? mdContentH : dp(40));
         float tw = mdLayoutW > 0 ? mdLayoutW : siriTextMaxW();
         // 上下留白（黑区/球高的余量）：字号大就多留一点
-        float padY = Math.max(dp(12), siriTextPx * mdFontRatio() * 0.5f);
-        // 方形态高度上限 = 屏高 55%（用户要求）
-        float maxBallH = siriMaxBallH();
+        // 文字四周留白：底部多留一截，保证最后一行完整落在玻璃里（用户：宁可玻璃拉长也别露字）
+        float padY = Math.max(dp(18), siriTextPx * mdFontRatio() * 0.85f);
+        // 方形态高度上限：屏高 55% → 72%，长文本优先"玻璃变高"而不是"文字露出去"
+        float maxBallH = screenH * 0.72f;
 
         float maxBallW = siriMaxBallW();
         // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
@@ -5096,8 +5097,9 @@ public class FloatingBallService extends Service {
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (!convoOpen || !sid.equals(convoSessionId)) return;
+                        convoLastUser = lu == null ? "" : lu.trim();
                         StringBuilder sb = new StringBuilder();
-                        if (lu != null && !lu.trim().isEmpty()) sb.append("你：").append(lu.trim()).append("\n\n");
+                        if (!convoLastUser.isEmpty()) sb.append("你：").append(convoLastUser).append("\n\n");
                         if (tt != null && !tt.trim().isEmpty()) sb.append(tt);
                         else sb.append("（这个对话还没有回复）");
                         setSiriText(sb.toString());
@@ -5129,10 +5131,7 @@ public class FloatingBallService extends Service {
                         convoBar.setHint("已发出 · 等待回复…");
                     }
                     Log.i("FloatingBall", "convo: 发送「" + t + "」");
-                    // 先把"我发了什么"显示出来：球里先显示这句，回答到了再被回答逐字替换
-                    convoSentText = t;
-                    setSiriText("你：" + t + "\n\n· 已发出，等待回复…");
-                    sendTextToSession(convoSessionId, t, null, null);
+                    convoSend(convoSessionId, t);
                 }
                 @Override public void onLongPressAdd() { pickAttachment(); }
                 @Override public void onTwoFingerHold() { openSettingsMenu(); }
@@ -5194,6 +5193,55 @@ public class FloatingBallService extends Service {
         if (Math.abs(convoBarParams.y - (y - Math.round(winY0()))) < 2) return;
         convoBarParams.y = y - Math.round(winY0());
         try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+    }
+
+    /**
+     * 对话卡里发一条：自己发 + 轮询回答，球内始终显示「你：<这句> + 最新回复」。
+     *
+     * 为什么不用 SiriAssistant.askIn：它会把球内文字整体替换成助手回复，
+     * 于是"我刚发了什么"立刻消失（用户报的就是这个）。这里改成自己维护一段合成文本。
+     */
+    private void convoSend(final String sid, final String text) {
+        convoLastUser = text;
+        setSiriText(convoLastUserBlock() + "\n\n· 已发出，等待回复…");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    api.prompt(sid, text, null);
+                } catch (Throwable t) {
+                    final String m = message(t);
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            setSiriText(convoLastUserBlock() + "\n\n· 发送失败：" + m);
+                            if (convoBar != null) convoBar.setHint("发送失败：" + m);
+                        }
+                    });
+                    return;
+                }
+                String last = "";
+                for (int i = 0; i < 60; i++) {          // 最长等 ~72s
+                    try { Thread.sleep(1200); } catch (InterruptedException e) { return; }
+                    if (!convoOpen || !sid.equals(convoSessionId)) return;
+                    String ans = "";
+                    try { ans = api.lastAnswer(sid); } catch (Throwable ignored) { }
+                    if (ans != null && !ans.trim().isEmpty() && !ans.equals(last)) {
+                        last = ans;
+                        final String shown = convoLastUserBlock() + "\n\n" + ans;
+                        main.post(new Runnable() {
+                            @Override public void run() { setSiriText(shown); }
+                        });
+                    }
+                }
+            }
+        }, "convo-send").start();
+    }
+
+    private String convoLastUser = "";
+
+    private String convoLastUserBlock() {
+        return convoLastUser == null || convoLastUser.trim().isEmpty()
+                ? "" : "你：" + convoLastUser.trim();
     }
 
     private void showConvoIme() {
@@ -6548,6 +6596,12 @@ public class FloatingBallService extends Service {
             fTap.delete();
             if (voice != null && voice.listening()) voice.tapStop();
             else Log.i("FloatingBall", "voice-tap：现在没在听");
+        }
+        File fConvo = new File(dir, "convo-send");
+        if (fConvo.exists()) {
+            String t = readSmallString(fConvo, 500).trim();
+            fConvo.delete();
+            if (convoSessionId != null && !t.isEmpty()) convoSend(convoSessionId, t);
         }
         File fDirs = new File(dir, "menu-dirs");
         if (fDirs.exists()) {
