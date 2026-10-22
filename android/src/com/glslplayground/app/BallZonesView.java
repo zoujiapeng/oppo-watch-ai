@@ -44,6 +44,15 @@ final class BallZonesView extends View {
     private String[] cardSubs = new String[0];
     private float[] cardRects = new float[0];      // 本 View 坐标：x,y,w,h
     private int cardFocus = -1;
+    /** 滚动提示：bit0 = 上面还有、bit1 = 下面还有（列表可滚动时画一个小箭头）。 */
+    private int cardScroll = 0;
+
+    void setCardScroll(int mode) {
+        if (cardScroll == mode) return;
+        cardScroll = mode;
+        invalidate();
+    }
+
     private float[] cardTitleRect = new float[0];
     private float[] cardListRect = new float[0];
     private final Paint rowHi = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -158,7 +167,17 @@ final class BallZonesView extends View {
         if (cardTitleRect.length >= 4) {
             float tx = cardTitleRect[0] + dp(10f);
             float ty = cardTitleRect[1] + cardTitleRect[3] * 0.66f;
-            cv.drawText(fit(cardTitle, text, cardTitleRect[2] - dp(20f)), tx, ty, text);
+            cv.drawText(fit(cardTitle, text, cardTitleRect[2] - dp(34f)), tx, ty, text);
+            if (cardScroll != 0) {
+                // 右上一个很小的箭头：▲ 还能往上翻、▼ 下面还有（面板大小不变，只是可滚动）
+                Paint.Align old = text.getTextAlign();
+                text.setTextAlign(Paint.Align.RIGHT);
+                text.setTextSize(dp(11f));
+                text.setColor(0x99FFFFFF);
+                String arrow = (cardScroll == 1) ? "↑" : (cardScroll == 3) ? "↑↓" : "↓";
+                cv.drawText(arrow, cardTitleRect[0] + cardTitleRect[2] - dp(10f), ty, text);
+                text.setTextAlign(old);
+            }
         }
         // 焦点行的高亮：面板内部的一条胶囊底（不是另一块玻璃）
         if (cardFocus >= 0 && cardFocus * 4 + 3 < cardRects.length) {

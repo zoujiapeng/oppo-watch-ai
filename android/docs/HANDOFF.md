@@ -1405,3 +1405,35 @@ tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);         // 贴边变薄 → 圆�
 现在 `showMenu()` 里在玻璃窗口布局完之后 `glView.post(...)`：
 拿玻璃**自己的屏幕位置**反推文字窗口该在哪（`parentTop = loc[1] - params.y`，同一窗口同一时刻，精确），
 一次对死。实测：文字 205,857 / 面板 204.5,856.5 —— 重合。
+
+
+### 七修：卡片列表可滚动（面板尺寸不变）
+
+用户：「工作目录只能显示四个……相当于弄成文字显示区不变但是可滚动不就行了吗」。
+
+两个原因：
+1. `openHoldDirs()` 里写死 `Math.min(4, dirs.size())`，`openHoldSessions()` 写死 `Math.min(3, ...)`
+   —— 列表本身就只喂了 4 条/3 条给卡片，跟面板高度无关。现在给到 10 条。
+2. 卡片画在球窗里（~210dp 高），5 行 × 34dp + 标题就溢出 → 被窗口裁掉。
+
+现在的做法（**面板尺寸一行没改**，只让内容滚）：
+
+| 变量 | 作用 |
+|---|---|
+| `holdItems` | **全部**条目（最多 10 条） |
+| `holdVisible` | 当前窗口能放几行（由窗口高算出，本机 = 4 行） |
+| `holdFirst` | 列表滚动到第几条（滚动窗口的起点） |
+
+- `labels()/subs()/localRects()` 只取 `[holdFirst, holdFirst+holdVisible)` 这一段；
+- `nearestRow()/cardAt()` 返回**绝对下标**（`holdFirst + 行号`）；
+- 手指停在面板上/下**边缘**（下 22% / 上 15%）→ `holdEdgeScrollTick` 每 380ms 滚一格，
+  到底/到顶自动停；滚动期间不抢焦点，避免"滚一格焦点跳一行"；
+- 标题右上角画 `↑`/`↓`/`↑↓` 提示还有内容（`BallZonesView.setCardScroll`）；
+- 从会话退回来（左滑）时 `holdDirsFirst` 记住工作目录那一页，**回到原来滚到的位置**。
+
+调试口子 `zone-move` 现在也吃 `x,y`（直接喂手指坐标），脚本里能验证滚动：
+```bash
+touch $D/zone-open; printf 'tl' > $D/zone-move        # 出卡片
+printf '540,1050' > $D/zone-move && sleep 2.5         # 停在下边缘 → 自动下滚
+```
+截图：`docs/glass-card-scroll-top.png`（↓ 还有）、`docs/glass-card-scroll-bottom.png`（↑ 已滚）。

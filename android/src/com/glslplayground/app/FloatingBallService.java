@@ -3885,7 +3885,9 @@ public class FloatingBallService extends Service {
         if (!siriEnabled || wm == null || glView == null) return;
         // 菜单面板 / 状态 3 期间，窗口归那块玻璃用：球的几何更新一律不许改窗口大小
         // （之前 audit 已挡了，但 siriTick 每帧还会经 measureSiriTargets 调到这里，窗口被打回球尺寸）
-        if (menuShown || (glassFullscreen && searchActive)) return;
+        // ★ zonesActive 也要挡：状态 3 期间窗口归卡片用（卡片比球窗高时我们主动撑高窗口），
+        //   不挡的话 siriTick → measureSiriTargets → 这里每帧把窗口打回球尺寸 → 卡片又被裁成 4 行。
+        if (menuShown || zonesActive || (glassFullscreen && searchActive)) return;
         float m = dp(24);
         int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
@@ -4451,6 +4453,7 @@ public class FloatingBallService extends Service {
         holdZoneHover = -1;
         holdFocus = -1;
         swipeAnchorX = 0;
+        holdWinH0 = 0;                       // 每次进状态 3 重新记一次基准高度
         holdItems.clear();
         holdDir = null;
         prefetchZonesData();
@@ -4483,6 +4486,8 @@ public class FloatingBallService extends Service {
         zoneCx[ZONE_TR] = cx + off; zoneCy[ZONE_TR] = cy - off;
         zoneCx[ZONE_BL] = cx - off; zoneCy[ZONE_BL] = cy + off;
         zoneCx[ZONE_BR] = cx + off; zoneCy[ZONE_BR] = cy + off;
+        holdCenterX = cx; holdCenterY = cy;
+        if (holdWinH0 <= 0) holdWinH0 = winH;
         zoneLocalX = new float[]{zoneCx[0] - loc[0], zoneCx[1] - loc[0],
                 zoneCx[2] - loc[0], zoneCx[3] - loc[0]};
         zoneLocalY = new float[]{zoneCy[0] - loc[1], zoneCy[1] - loc[1],
@@ -4490,6 +4495,10 @@ public class FloatingBallService extends Service {
     }
 
     private float[] zoneLocalX, zoneLocalY;
+    /** 进状态 3 时的球心（屏幕像素）——卡片以它为中心排版，窗口长高也不会跑。 */
+    private float holdCenterX = -1f, holdCenterY = -1f;
+    /** 进状态 3 时的球窗高度：卡片用完要还回去（用户要求"保持当前大小"）。 */
+    private int holdWinH0 = 0;
 
     /** 按住的那一刻就把"工作目录 + 最近目录下的会话"取回来，卡片一出现就是热的。 */
     private void prefetchZonesData() {
@@ -4665,7 +4674,14 @@ public class FloatingBallService extends Service {
     private int holdLevel = 0;                  // 0=四区 1=二级卡片 2=三级卡片
     private String holdTitle = "";
     private final List<HoldItem> holdItems = new ArrayList<>();
-    private final float[] holdRects = new float[20];
+    private final float[] holdRects = new float[40];   // 10 行位（面板只显示 holdVisible 行）
+    /** 卡片列表的滚动窗口：holdFirst = 当前显示的第一项，holdVisible = 一次能显示几行。 */
+    private int holdFirst = 0, holdVisible = 5;
+    /** 手指停在卡片的上/下边缘 → 列表自动滚动（+1 下滚 / -1 上滚 / 0 停）。 */
+    /** 一级（工作目录）滚到哪了 —— 从会话退回来还停在原来那一页（用户要求）。 */
+    private int holdDirsFirst = 0;
+    private int holdEdgeDir = 0;
+    private boolean holdEdgeRunning = false;
     private float[] holdTitleRect = null;
     private float[] holdTitleLocal = null;
     private float[] holdListRect = null;
@@ -4728,6 +4744,18 @@ public class FloatingBallService extends Service {
             }
             return;
         }
+        // 手指停在面板上/下边缘 → 自动滚动；滚动期间不抢焦点（否则滚动一格焦点就跳一行）
+        if (holdListRect != null && holdVisible < holdItems.size()) {
+            float top = holdListRect[1] + dp(26);                  // 跳过标题
+            float bottom = holdListRect[1] + holdListRect[3] - dp(4);
+            float edge = Math.min(dp(46), (bottom - top) * 0.22f);
+            if (rawY > bottom - edge) setHoldEdgeDir(+1);
+            else if (rawY < top + edge * 0.7f) setHoldEdgeDir(-1);
+            else setHoldEdgeDir(0);
+        } else {
+            setHoldEdgeDir(0);
+        }
+        if (holdEdgeDir != 0) return;
         int i = nearestRow(rawY);
         // 一级（工作目录）：双指**往右滑一点点**就进入该目录选会话
         // （用户：长按→左上显示工作目录，然后双指往右滑一点点进目录；不要求滑到屏幕边缘）
@@ -4755,8 +4783,8 @@ public class FloatingBallService extends Service {
         if (i != holdFocus) {
             holdFocus = i;
             holdFocusAt = android.os.SystemClock.uptimeMillis();
-            if (zonesView != null) zonesView.setCardFocus(i);
-            pushCardScene();
+            holdScrollToFocus();                 // 先滚（可能重排过一次）
+            refreshCards();
             if (i >= 0) vibrate(6);
         }
         // 手指离开卡片区 → 自动隐藏，回到一级圆区
@@ -4767,9 +4795,80 @@ public class FloatingBallService extends Service {
 
     private boolean farFromCards(float rawY) {
         if (holdItems.isEmpty()) return true;
-        float top = holdRects[1], bottom = holdRects[(holdItems.size() - 1) * 4 + 1]
-                + holdRects[(holdItems.size() - 1) * 4 + 3];
+        int last = Math.max(0, visCount() - 1);
+        float top = holdRects[1], bottom = holdRects[last * 4 + 1] + holdRects[last * 4 + 3];
         return rawY < top - dp(36) || rawY > bottom + dp(36);
+    }
+
+    /** 按当前 holdFirst/holdFocus 重排并推给文字层（滚动时用）。 */
+    private void refreshCards() {
+        computeCardRects();
+        if (zonesView != null) {
+            zonesView.showCards(holdTitle, labels(), subs(), localRects(), holdTitleLocal,
+                    holdListLocal, holdFocus < 0 ? -1 : holdFocus - holdFirst);
+            zonesView.setCardScroll(cardScrollMode());
+        }
+        pushCardScene();
+    }
+
+    /** 0=不滚 / 1=上面还有 / 2=下面还有 / 3=两边都有。 */
+    private int cardScrollMode() {
+        int m = 0;
+        if (holdFirst > 0) m |= 1;
+        if (holdFirst + visCount() < holdItems.size()) m |= 2;
+        return m;
+    }
+
+    /**
+     * 焦点滚出可视窗口 → 列表跟着滚一行（用户 2026-10-23：「文字显示区不变但可滚动」）。
+     * 保持原来的手势逻辑：手指上下移 = 选行；行到边界时**列表**滚，而不是手指必须滑到屏幕边上。
+     */
+    private void holdScrollToFocus() {
+        if (holdFocus < 0 || holdItems.isEmpty()) return;
+        int maxFirst = Math.max(0, holdItems.size() - holdVisible);
+        int want = holdFirst;
+        if (holdFocus < holdFirst) want = holdFocus;
+        else if (holdFocus >= holdFirst + holdVisible) want = holdFocus - holdVisible + 1;
+        want = Math.max(0, Math.min(maxFirst, want));
+        if (want == holdFirst) return;
+        holdFirst = want;
+        Log.i("FloatingBall", "zones: 列表滚动 holdFirst=" + holdFirst + " focus=" + holdFocus);
+        refreshCards();
+    }
+
+    /**
+     * 手指停在卡片上/下边缘时自动滚动列表（用户 2026-10-23：「文字显示区不变但可滚动」）。
+     * 按 380ms 一格滚，滚到底/顶自动停；手指一离开边缘立刻停。
+     */
+    private final Runnable holdEdgeScrollTick = new Runnable() {
+        @Override public void run() {
+            if (!zonesActive || holdLevel == 0 || holdItems.isEmpty() || holdEdgeDir == 0) {
+                holdEdgeRunning = false;
+                return;
+            }
+            int maxFirst = Math.max(0, holdItems.size() - holdVisible);
+            int want = Math.max(0, Math.min(maxFirst, holdFirst + holdEdgeDir));
+            if (want != holdFirst) {
+                holdFirst = want;
+                refreshCards();
+                vibrate(4);
+            }
+            if ((holdEdgeDir > 0 && holdFirst >= maxFirst) || (holdEdgeDir < 0 && holdFirst <= 0)) {
+                holdEdgeRunning = false;
+                return;
+            }
+            main.postDelayed(this, 380);
+        }
+    };
+
+    private void setHoldEdgeDir(int dir) {
+        if (dir == holdEdgeDir && (holdEdgeRunning || dir == 0)) return;
+        holdEdgeDir = dir;
+        if (dir == 0) { holdEdgeRunning = false; return; }
+        if (!holdEdgeRunning) {
+            holdEdgeRunning = true;
+            main.postDelayed(holdEdgeScrollTick, 260);
+        }
     }
 
     /** 离手指纵向最近的条目（面板内才有效）。 */
@@ -4778,20 +4877,20 @@ public class FloatingBallService extends Service {
         if (rawY < holdListRect[1] - dp(24) || rawY > holdListRect[1] + holdListRect[3] + dp(24)) return -1;
         int best = -1;
         float bestD = Float.MAX_VALUE;
-        for (int i = 0; i < holdItems.size(); i++) {
+        for (int i = 0; i < visCount(); i++) {
             float cy = holdRects[i * 4 + 1] + holdRects[i * 4 + 3] * 0.5f;
             float d = Math.abs(rawY - cy);
             if (d < bestD) { bestD = d; best = i; }
         }
-        return best;
+        return best < 0 ? -1 : holdFirst + best;       // ← 换算成 holdItems 里的绝对下标
     }
 
     private int cardAt(float rawX, float rawY) {
-        for (int i = 0; i < holdItems.size(); i++) {
+        for (int i = 0; i < visCount(); i++) {
             float x = holdRects[i * 4], y = holdRects[i * 4 + 1];
             float w = holdRects[i * 4 + 2], h = holdRects[i * 4 + 3];
             if (rawX >= x - dp(10) && rawX <= x + w + dp(10)
-                    && rawY >= y - dp(6) && rawY <= y + h + dp(6)) return i;
+                    && rawY >= y - dp(6) && rawY <= y + h + dp(6)) return holdFirst + i;
         }
         return -1;
     }
@@ -4801,7 +4900,11 @@ public class FloatingBallService extends Service {
         List<HoldItem> items = new ArrayList<>();
         List<String> dirs = prefetchedDirs;
         if (dirs != null) {
-            for (int i = 0; i < Math.min(4, dirs.size()); i++) {
+            // ★ 2026-10-23：原来这里写死 4 个（用户：「工作目录只能显示四个」）。
+            //   现在按窗口能撑到的高度给到 10 个 —— 卡片会自动长高（ensureHoldWindow），
+            //   行高/宽度/手势逻辑都没变。
+            int maxDirs = Math.min(10, dirs.size());
+            for (int i = 0; i < maxDirs; i++) {
                 String d = dirs.get(i);
                 items.add(new HoldItem(leaf(d), d, 0, d));
             }
@@ -4810,6 +4913,12 @@ public class FloatingBallService extends Service {
         final boolean pending = holdPendingExpand && items.size() > 1
                 && lastHoldX > holdLevelX + dp(22);
         showCards(1, "工作目录", items);
+        if (holdDirsFirst > 0 && holdItems.size() > holdVisible) {
+            holdFirst = Math.max(0, Math.min(holdItems.size() - holdVisible, holdDirsFirst));
+            refreshCards();
+            Log.i("FloatingBall", "zones: 回到工作目录，恢复滚动位置 " + holdFirst);
+        }
+        holdDirsFirst = 0;
         if (pending) {
             holdPendingExpand = false;
             Log.i("FloatingBall", "zones: 列表就绪 → 补做右滑展开「" + items.get(0).label + "」");
@@ -4835,12 +4944,14 @@ public class FloatingBallService extends Service {
 
     /** 三级：某个目录下的会话。 */
     private void openHoldSessions(final String dir) {
+        if (holdLevel == 1) holdDirsFirst = holdFirst;   // 记住工作目录列表滚到哪了
         holdDir = dir;
         List<HoldItem> items = new ArrayList<>();
         List<DshApi.SessionRow> cached = prefetchCache.get(dir);
         if (cached == null && dir.equals(prefetchDirPath)) cached = prefetchedSessions;
         if (cached != null) {
-            for (int i = 0; i < Math.min(3, cached.size()); i++) {
+            // 会话同理：原来 3 条，现在最多 9 条（+「在此新建会话」= 10 行，正好是面板上限）
+            for (int i = 0; i < Math.min(9, cached.size()); i++) {
                 DshApi.SessionRow r = cached.get(i);
                 items.add(new HoldItem(r.title == null || "null".equals(r.title)
                                 ? "（未命名会话）" : r.title,
@@ -4876,20 +4987,14 @@ public class FloatingBallService extends Service {
         holdPointers = 1;
         holdTitle = title;
         holdItems.clear();
-        // 玻璃只有 5 个行位（holdRects / zone 着色器的 5 个形状）：菜单一多就会画到窗口外面
-        // （用户看到的「文字超出界面」）。多出来的截掉，最后一行换成"还有 N 个…"。
-        int maxRows = holdRects.length / 4;
-        if (items.size() > maxRows) {
-            for (int i = 0; i < maxRows - 1; i++) holdItems.add(items.get(i));
-            holdItems.add(new HoldItem("还有 " + (items.size() - (maxRows - 1)) + " 个…", "", -1, null));
-        } else {
-            holdItems.addAll(items);
-        }
+        holdItems.addAll(items);          // 全部收进来，面板只显示 holdVisible 行，靠 holdFirst 滚动
+        holdFirst = 0;
         holdFocus = -1;
         computeCardRects();
         if (zonesView != null) {
             zonesView.showCards(title, labels(), subs(), localRects(), holdTitleLocal,
                     holdListLocal, -1);
+            zonesView.setCardScroll(cardScrollMode());
         }
         pushCardScene();
         Log.i("FloatingBall", "zones: 卡片「" + title + "」" + items.size() + " 项");
@@ -4900,24 +5005,33 @@ public class FloatingBallService extends Service {
 
     private void closeCards() {
         if (holdLevel == 0) return;
+        setHoldEdgeDir(0);
         holdLevel = 0;
         holdItems.clear();
         holdFocus = -1;
         holdDir = null;
-        if (zonesView != null) zonesView.hideCards();
+        if (zonesView != null) { zonesView.hideCards(); zonesView.setCardScroll(0); }
+        restoreHoldWindow();
         pushZoneScene();
         Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到四区");
     }
 
+    /** 当前**可见**的那一段（滚动窗口 [holdFirst, holdFirst+holdVisible)）。 */
+    private int visCount() {
+        return Math.max(0, Math.min(holdVisible, holdItems.size() - holdFirst));
+    }
+
     private String[] labels() {
-        String[] a = new String[holdItems.size()];
-        for (int i = 0; i < a.length; i++) a[i] = holdItems.get(i).label;
+        int c = visCount();
+        String[] a = new String[c];
+        for (int i = 0; i < c; i++) a[i] = holdItems.get(holdFirst + i).label;
         return a;
     }
 
     private String[] subs() {
-        String[] a = new String[holdItems.size()];
-        for (int i = 0; i < a.length; i++) a[i] = holdItems.get(i).sub;
+        int c = visCount();
+        String[] a = new String[c];
+        for (int i = 0; i < c; i++) a[i] = holdItems.get(holdFirst + i).sub;
         return a;
     }
 
@@ -4932,19 +5046,23 @@ public class FloatingBallService extends Service {
         float bw = Math.min(dp(260), winW - dp(36));
         float th = dp(26);                 // 标题行
         float pad = dp(6);
-        // 行高自适应：**整块面板必须落在 GL 窗口里**（窗口 = 球窗，画到窗外就被裁掉，
-        // 这就是"最后一行被切一半"的根因）；窗口再矮也不会溢出屏幕。
+        float rh = dp(34);                 // 行高固定 = 原来那个大小（用户：保持当前大小）
+        // ★ 面板**尺寸不变**，改成"列表在面板里滚动"（用户 2026-10-23：
+        //   「相当于弄成文字显示区不变但是可滚动不就行了吗」）。
+        //   先算这个窗口最多能放几行，多出来的靠 holdFirst 滚上来。
         float avail = Math.max(dp(80), winH - dp(20));
-        float rh = Math.max(dp(26), Math.min(dp(36), (avail - th - pad) / n));
-        float total = th + n * rh + pad;
-        float cx = loc[0] + winW * 0.5f;
-        float cy = loc[1] + winH * 0.5f;
+        holdVisible = Math.max(1, Math.min(n, (int) ((avail - th - pad) / rh)));
+        int shown = Math.min(n, holdVisible);
+        float total = th + shown * rh + pad;
+        float cx = holdCenterX > 0 ? holdCenterX : loc[0] + winW * 0.5f;
+        float cy = holdCenterY > 0 ? holdCenterY : loc[1] + winH * 0.5f;
         float left = cx - bw * 0.5f;
-        float top = cy - total * 0.5f;
+        float top = Math.max(Math.round(winY0()) + dp(8),
+                Math.min(screenH - total - dp(16), cy - total * 0.5f));
         holdListRect = new float[]{left, top, bw, total};
         holdTitleRect = new float[]{left, top + pad * 0.5f, bw, th};
-        for (int i = 0; i < 5; i++) {
-            if (i < n) {
+        for (int i = 0; i < 10; i++) {
+            if (i < shown) {
                 holdRects[i * 4] = left + pad;
                 holdRects[i * 4 + 1] = top + th + i * rh;
                 holdRects[i * 4 + 2] = bw - 2 * pad;
@@ -4959,7 +5077,7 @@ public class FloatingBallService extends Service {
     private float[] localRects() {
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
-        float[] out = new float[holdItems.size() * 4];
+        float[] out = new float[visCount() * 4];
         if (holdTitleRect != null) {
             holdTitleLocal = new float[]{holdTitleRect[0] - loc[0], holdTitleRect[1] - loc[1],
                     holdTitleRect[2], holdTitleRect[3]};
@@ -4968,13 +5086,70 @@ public class FloatingBallService extends Service {
             holdListLocal = new float[]{holdListRect[0] - loc[0], holdListRect[1] - loc[1],
                     holdListRect[2], holdListRect[3]};
         }
-        for (int i = 0; i < holdItems.size(); i++) {
+        for (int i = 0; i < visCount(); i++) {
             out[i * 4] = holdRects[i * 4] - loc[0];
             out[i * 4 + 1] = holdRects[i * 4 + 1] - loc[1];
             out[i * 4 + 2] = holdRects[i * 4 + 2];
             out[i * 4 + 3] = holdRects[i * 4 + 3];
         }
         return out;
+    }
+
+    /**
+     * 卡片面板比球窗高时，把**玻璃窗往下长**（而不是把行数砍到 4）。
+     *
+     * 为什么以前只有 4 行：卡片是画在球窗里的，球窗高 ~210dp，5 行 × 34dp + 标题就溢出了，
+     * 溢出的部分直接被窗口裁掉 —— 用户看到的就是"工作目录只能显示四个"。
+     * 现在按面板实际高度把窗口撑到够（最多屏高 72%），必要时整体上移让它不出屏；
+     * 关掉卡片（或退出状态 3）时 {@link #restoreHoldWindow()} 还回原来的大小。
+     */
+    private void ensureHoldWindow(float panelTop, float total) {
+        if (wm == null || glView == null || params == null) return;
+        int inset = Math.round(winY0());
+        int m = Math.round(dp(12));
+        int wantTop = Math.round(panelTop) - m;
+        int wantBot = Math.round(panelTop + total) + m;
+        int curTop = params.y + inset;
+        int curBot = curTop + winH;
+        int newTop = Math.min(curTop, Math.max(inset, wantTop));
+        int newBot = Math.max(curBot, Math.min(screenH - Math.round(dp(6)), wantBot));
+        newBot = Math.min(newBot, newTop + Math.round(screenH * 0.72f));
+        int newH = Math.max(winH, newBot - newTop);
+        if (newH <= winH && newTop == curTop) return;
+        if (holdWinH0 <= 0) holdWinH0 = winH;
+        params.y = newTop - inset;
+        params.height = newH;
+        winH = newH;
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        // 文字/图标那层也跟着长，否则卡片文字会被覆盖层自己裁掉
+        if (zonesView != null && zonesParams != null) {
+            zonesParams.y = newTop - inset;
+            zonesParams.height = newH;
+            try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            for (int i = 0; i < 4; i++) {
+                zoneLocalX[i] = zoneCx[i] - loc[0];
+                zoneLocalY[i] = zoneCy[i] - loc[1];
+            }
+            zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+        }
+        Log.i("FloatingBall", "zones: 卡片窗口长高 " + winH + "px（顶 y=" + newTop + "）");
+    }
+
+    /** 卡片关掉 → 球窗恢复进状态 3 时的高度。 */
+    private void restoreHoldWindow() {
+        if (holdWinH0 <= 0 || wm == null || glView == null || params == null) return;
+        if (winH == holdWinH0) return;
+        int h = holdWinH0;
+        winH = h;
+        params.height = h;
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        if (zonesView != null && zonesParams != null) {
+            zonesParams.height = h;
+            try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
+        }
+        Log.i("FloatingBall", "zones: 卡片关闭，球窗恢复 " + h + "px");
     }
 
     /** 列表的玻璃形状：**一个**圆角矩形（标题和所有行都在里面）。 */
@@ -6762,8 +6937,19 @@ public class FloatingBallService extends Service {
             fMove.delete();
             int z = t.equals("tl") ? ZONE_TL : t.equals("tr") ? ZONE_TR
                     : t.equals("bl") ? ZONE_BL : t.equals("br") ? ZONE_BR : -1;
-            if (z >= 0) updateHoldTouch(zoneCx[z], zoneCy[z]);
-            else Log.i("FloatingBall", "zones: zone-move 内容不认识：" + t);
+            if (z >= 0) {
+                updateHoldTouch(zoneCx[z], zoneCy[z]);
+            } else if (t.contains(",")) {
+                // `x,y` = 直接把手指坐标喂给状态机（验证卡片滚动/选行用）
+                try {
+                    String[] xy = t.split(",");
+                    updateHoldTouch(Float.parseFloat(xy[0].trim()), Float.parseFloat(xy[1].trim()));
+                } catch (Throwable e) {
+                    Log.i("FloatingBall", "zones: zone-move 坐标解析失败：" + t);
+                }
+            } else {
+                Log.i("FloatingBall", "zones: zone-move 内容不认识：" + t);
+            }
         }
         File fUp = new File(dir, "zone-release");
         if (fUp.exists()) {
