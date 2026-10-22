@@ -388,9 +388,23 @@ public class BallSearchBar extends LinearLayout {
         // 演示页 @keyframes blink：1.12s 里前 60% 亮、后 40% 灭（step-end）
         boolean on = t < caretSolidUntil || (t % 1120L) < 672L;
         if (!on) return;
-        String upto = cs.subSequence(0, Math.min(sel, cs.length())).toString();
-        float x = input.getLeft() + input.getPaddingLeft() - input.getScrollX()
-                + input.getPaint().measureText(upto);
+        // 用 TextView 自己的 Layout 算光标 X：换行/滚动/中文宽度都准（原来用 measureText 会偏）
+        float x;
+        try {
+            android.text.Layout lay = input.getLayout();
+            if (lay != null) {
+                x = input.getLeft() + input.getTotalPaddingLeft() + lay.getPrimaryHorizontal(sel)
+                        - input.getScrollX();
+            } else {
+                String upto = cs.subSequence(0, Math.min(sel, cs.length())).toString();
+                x = input.getLeft() + input.getPaddingLeft() - input.getScrollX()
+                        + input.getPaint().measureText(upto);
+            }
+        } catch (Throwable ignored) {
+            String upto = cs.subSequence(0, Math.min(sel, cs.length())).toString();
+            x = input.getLeft() + input.getPaddingLeft() - input.getScrollX()
+                    + input.getPaint().measureText(upto);
+        }
         float w = dp(2), h = dp(19);                  // 窄屏档 caret 高 19px
         float cy = getHeight() * 0.5f;
         x = Math.max(dp(2), Math.min(x, input.getRight() - dp(12)));

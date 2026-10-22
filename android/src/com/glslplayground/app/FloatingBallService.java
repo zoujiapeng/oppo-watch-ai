@@ -5219,13 +5219,27 @@ public class FloatingBallService extends Service {
      * 于是"我刚发了什么"立刻消失（用户报的就是这个）。这里改成自己维护一段合成文本。
      */
     private void convoSend(final String sid, final String text) {
+        final File attach = pendingAttach;
+        final String attachName = pendingAttachName;
         convoLastUser = text;
-        setSiriText(convoLastUserBlock() + "\n\n· 已发出，等待回复…");
+        String echo = convoLastUserBlock();
+        if (attach != null) echo += "\n［附件］" + (attachName == null ? attach.getName() : attachName);
+        setSiriText(echo + "\n\n· 已发出，等待回复…");
         final DshApi api = DshApi.get(this);
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    api.prompt(sid, text, null);
+                    List<String> receipts = new ArrayList<>();
+                    if (attach != null && attach.exists()) {
+                        String rid = api.upload(sid,
+                                attachName == null ? attach.getName() : attachName, readAll(attach));
+                        receipts.add(rid);
+                        Log.i("FloatingBall", "convo: 附件已上传 receipt=" + rid);
+                        main.post(new Runnable() {
+                            @Override public void run() { clearAttachment(); }
+                        });
+                    }
+                    api.prompt(sid, text, receipts);
                 } catch (Throwable t) {
                     final String m = message(t);
                     main.post(new Runnable() {
@@ -5972,6 +5986,7 @@ public class FloatingBallService extends Service {
                 pendingAttach = file;
                 pendingAttachName = name;
                 if (searchBar != null) searchBar.setAttachmentName(name);
+                if (convoBar != null) convoBar.setAttachmentName(name);
                 Log.i("FloatingBall", "attach: 选中 " + name + " (" + file.length() + " 字节)");
             }
         });
@@ -6613,6 +6628,21 @@ public class FloatingBallService extends Service {
             fTap.delete();
             if (voice != null && voice.listening()) voice.tapStop();
             else Log.i("FloatingBall", "voice-tap：现在没在听");
+        }
+        File fAttach = new File(dir, "convo-attach");
+        if (fAttach.exists()) {
+            String pth = readSmallString(fAttach, 500).trim();
+            fAttach.delete();
+            File f = new File(pth);
+            if (f.exists()) {
+                pendingAttach = f;
+                pendingAttachName = f.getName();
+                if (searchBar != null) searchBar.setAttachmentName(pendingAttachName);
+                if (convoBar != null) convoBar.setAttachmentName(pendingAttachName);
+                Log.i("FloatingBall", "attach: 文件钩子挂上 " + pth + " (" + f.length() + "B)");
+            } else {
+                Log.w("FloatingBall", "attach: 文件不存在 " + pth);
+            }
         }
         File fConvo = new File(dir, "convo-send");
         if (fConvo.exists()) {
