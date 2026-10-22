@@ -13,12 +13,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 语音助手：录音交给本机 DSH 的语音插件转写；网络只用于 127.0.0.1 的 DSH HTTP API -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 网络只用于 127.0.0.1 的 DSH HTTP API -->
     <!-- 调试覆盖层开关：写 pointer_location / show_touches（开发者选项里那两个） -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 初始状态的"语音转文字"：16 kHz PCM16 采集，交给本机 DSH 的 speech/transcribe -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:label="@string/app_name"
@@ -41,6 +42,20 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!-- 设置 = DSH 自己的设置界面（WebView 指向本机 DSH 前端） -->
+        <activity
+            android:name=".DshSettingsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- 「添附件」的系统文件选择器壳子：透明、不驻留、不进最近任务 -->
+        <activity
+            android:name=".BallAttachPickerActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".FloatingBallService"

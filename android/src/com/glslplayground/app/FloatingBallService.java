@@ -38,6 +38,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -79,7 +81,7 @@ public class FloatingBallService extends Service {
     // 背景：DSH 的 mobile 工具注入触摸走的是 `/system/bin/input`（shell uid 的 INJECT_EVENTS），
     // 事件一样要过 InputDispatcher 的 **窗口命中测试**。球的悬浮窗常驻屏幕中间，注入的
     // ACTION_DOWN 落在球上就会被球吃掉 —— 底下 App 连 down 都收不到（滑动半途而废），
-    // 更糟的是球会把这串手势当成用户在操作（双击开听、按住挪球）。
+    // 更糟的是球会把这串手势当成用户在操作（按住挪球）。
     //
     // 系统层面**分不出**「注入」和「真手指」，所以只能由 DSH 侧在动手之前先打个招呼：
     //   · DSH 侧（dsh-preset-mobile-use）要发 click/swipe/key 时，先把一个 nonce 写进 ACT 文件；
@@ -261,6 +263,7 @@ public class FloatingBallService extends Service {
             pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
             pumpSearchRequest();          // 外部（调试脚本）开关搜索胶囊 / 喂一句要发的话
+            pumpGestureRequest();         // 外部（调试脚本）驱动三态手势机的每一步
             // requestRender 交给 ball-render-driver 线程（见上），这里只推进各种包络
             main.removeCallbacks(this);
             main.postDelayed(this, Math.max(1, 1000 / targetFps));
@@ -279,13 +282,13 @@ public class FloatingBallService extends Service {
     // ── 状态回放的调试口子：`touch /data/local/tmp/ballstate-THINKING` 让球进入该状态 ──
     // 为什么要它：状态抖动（THINKING↔IDLE 反复）只在一个回合里出现，靠真人对话很难复现，
     // 也不方便断言"IDLE 有没有被压后"。有了这个口子就能脚本化喂一串状态，然后看日志/截图。
-    // 改动动画状态机时用它回归，别删。状态取值：IDLE / THINKING / ANSWERING / LISTENING / OFF。
+    // 改动动画状态机时用它回归，别删。状态取值：IDLE / THINKING / ANSWERING / OFF。
     private long nextStateCheck = 0;
     // 目录必须是**球自己能写**的地方：/data/local/tmp 是 shell_data_file 标签，
     // untrusted_app 只能读不能删（踩过：触发文件删不掉 → 每 120ms 被反复消费）。
     private static final String STATE_REQ_PREFIX = "/sdcard/Android/data/com.glslplayground.app/files/state-";
     private static final String[] STATE_NAMES =
-            {"IDLE", "THINKING", "ANSWERING", "LISTENING", "TRANSCRIBING", "OFF"};
+            {"IDLE", "THINKING", "ANSWERING", "OFF"};
     // 另外两个只给「方形态出波」这条链路用的调试口子（一次性文件，用完即删）：
     //   state-TURNEND   → 等价于收到 turn/end（球里有字时会在球底出一道进了玻璃的波）
     //   state-TURNSTART → 等价于新一轮开始（把闸门关回去）
@@ -295,7 +298,7 @@ public class FloatingBallService extends Service {
     private static final String MD_PREVIEW_FALLBACK =
             "# 排版预览\n\n球内正文 = 「Siri 字号」×「球内回复字号比例」。\n\n"
             + "| 方案 | 成本 | 说明 |\n|---|---|---|\n"
-            + "| 本地规则清洗 | 0 | 零依赖 |\n| 模型改写 | 1 次请求 | 需要 dsh-llm |\n\n"
+            + "| 离线预览 | 0 | 零依赖 |\n| 会话镜像 | 1 条会话 | 跟当前 DSH 会话 |\n\n"
             + "1. 第一步：拖字号滑块\n2. 第二步：看球里的变化\n   - 嵌套一层\n\n"
             + "> 引用：黑区下沿按文字实际高度算。\n\n"
             + "```bash\necho 0.25 > files/md-ratio\n```\n\n"
@@ -370,8 +373,8 @@ public class FloatingBallService extends Service {
         try { captureBallPngNow(); } catch (Throwable t) { Log.w("FloatingBall", "shot request failed: " + t); }
     }
 
-    // ── 语音助手（安卓前端 ↔ DSH）：球体作为状态显示器 ──────────────────
-    // 采集音量 → Siri 波振幅；助手状态 → 光效形态（聆听=声波，思考=流体圆点）
+    // ── DSH 文本助手（安卓前端 ↔ DSH）：球体作为状态显示器 ──────────────
+    // 助手状态 → 光效形态（思考=流体圆点，回答=文字）
 
     /** 短振动（双指长按唤起 / 长按取消 都用它，别各自 new 一个 Vibrator）。 */
     private void vibrate(int ms) {
@@ -381,18 +384,7 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
     }
 
-    /** 麦克风实时音量（0..1），驱动球内 Siri 波的呼吸。 */
-    public static void setAssistantLevel(final float rms) {
-        FloatingBallService s = INSTANCE;
-        if (s == null || s.renderer == null) return;
-        s.renderer.voiceBoost = Math.max(0f, Math.min(1.6f, rms * 1.7f));
-        // 搜索胶囊里没有 Siri 波可看，录音的"看得见在动"落在麦克风图标的光晕上
-        if (s.searchActive && s.sqRecording && s.searchBar != null) {
-            s.searchBar.setLevel(Math.max(0f, Math.min(1f, rms * 2.4f)));
-        }
-    }
-
-    // 波 ↔ 流体圆点 的交叉淡化：状态一变就朝目标推进，避免「聆听→思考」时光效瞬间换脸。
+    // 波 ↔ 流体圆点 的交叉淡化：状态一变就朝目标推进，避免「思考→回答」时光效瞬间换脸。
     private float orbMixNow = 0f;            // 当前值（0=纯 Siri 波，1=纯流体圆点）
     private float orbMixTarget = 0f;
     private long orbMixLastMs = 0;
@@ -428,7 +420,7 @@ public class FloatingBallService extends Service {
     //  ② 生硬：waveMode 是 uniform 里的分支，切换即换脸，没有过渡。
     // 对策：
     //  ① 沉降（settle）：IDLE 不当场生效，压后 IDLE_SETTLE_MS。期间任何一次真实活动
-    //     （THINKING/ANSWERING/LISTENING…）都会取消它 —— 只有「确实安静下来了」才回 IDLE。
+    //     （THINKING/ANSWERING…）都会取消它 —— 只有「确实安静下来了」才回 IDLE。
     //  ② 包络（gate）：换形态先把幅度淡到 0、换完再淡回来（WAVE_FADE_MS ×2）。
     private String stateNow = "IDLE";          // 球当前呈现的助手状态
     private float orbWanted = 0f;              // 文字消失后该显示的形态（0=波 1=流体圆点）
@@ -500,7 +492,7 @@ public class FloatingBallService extends Service {
         setWaveForm(waveModeSaved);
     }
 
-    /** 助手状态：IDLE / LISTENING / TRANSCRIBING / THINKING / ANSWERING / OFF。 */
+    /** 助手状态：IDLE / THINKING / ANSWERING / OFF。 */
     public static void setAssistantState(String state) {
         FloatingBallService s = INSTANCE;
         if (s == null || s.renderer == null || state == null) return;
@@ -658,10 +650,9 @@ public class FloatingBallService extends Service {
         // ── 文字优先：球里有字就只显示字 ────────────────────────────────
         // 用户要求「文字和 Siri 波不能同时出现」。所以：
         //   · 有字 → 波/圆点一律不出（waveGate 压到 0），文字结束后再按状态恢复；
-        //   · LISTENING/TRANSCRIBING（用户在说话）没字 → Siri 波；
         //   · THINKING（思考/操作/执行命令）→ 流体圆点（处理中）；
         //   · ANSWERING/IDLE 没字 → 交还用户自己的 Siri 模式设定。
-        if (hasBallText() && !"LISTENING".equals(state) && !"TRANSCRIBING".equals(state)) {
+        if (hasBallText()) {
             renderer.waveOn = true;
             if ("THINKING".equals(state) && renderer.waveInGlass <= 0.5f) {
                 // ★ 用户 2026-10-16 新要求：「方形里也要能看到处理中动画 —— 处理中的动画和那段
@@ -716,11 +707,6 @@ public class FloatingBallService extends Service {
             renderer.waveOn = true;
             setWaveForm(2);                        // siriFluidDotsCore
             setOrbMixTarget(1f);
-        } else if ("LISTENING".equals(state) || "TRANSCRIBING".equals(state)) {
-            saveWaveOnce();
-            renderer.waveOn = true;
-            setWaveForm(1);                        // siriWaveCore
-            setOrbMixTarget(0f);
         } else {
             // 回答中 / 空闲：不出波，保持「处理中」形态 —— 用户要求处理中动画必须连续，
             // 所以 ANSWERING 不再切回 Siri 波（波只在"初始/结束"出现）。
@@ -734,7 +720,6 @@ public class FloatingBallService extends Service {
                 setWaveForm(-1);
                 waveGateTarget = 0f;
             }
-            if ("IDLE".equals(state)) renderer.voiceBoost = 0f;
         }
         Log.i("FloatingBall", "assistant state=" + state
                 + " waveOn=" + renderer.waveOn + " waveMode=" + renderer.waveMode
@@ -910,7 +895,6 @@ public class FloatingBallService extends Service {
     private float apSaveTHalfX, apSaveTHalfY, apSaveTCorner, apSaveTBlack, apSaveTMaster;
     private float apSaveAHalfX, apSaveAHalfY, apSaveACorner, apSaveABlack, apSaveAMaster;
     private boolean apSaveWaveOn, apSaveSiriGeom;
-    private float apSaveVoiceBoost;
 
     /**
      * 面板整体缩放：字号 / 按钮 / 内边距 / 间距全部乘这个系数（等比）。
@@ -977,7 +961,6 @@ public class FloatingBallService extends Service {
         approvalReq = req;
         approvalClosing = false;
         renderer.waveOn = false;          // 面板不带 Siri 波（退出时按存档还原）
-        renderer.voiceBoost = 0f;
 
         float d = getResources().getDisplayMetrics().density * apScale();   // 面板整体等比缩放
         apPadX = Math.round(AP_PAD_X_DP * d);
@@ -1052,7 +1035,6 @@ public class FloatingBallService extends Service {
         apSaveABlack = aBlack; apSaveAMaster = aMaster;
         apSaveWaveOn = renderer != null && renderer.waveOn;
         apSaveSiriGeom = renderer != null && renderer.siriGeom;
-        apSaveVoiceBoost = renderer == null ? 0f : renderer.voiceBoost;
     }
 
     private void restoreOriginalBall() {
@@ -1070,7 +1052,6 @@ public class FloatingBallService extends Service {
         aBlack = apSaveABlack; aMaster = apSaveAMaster;
         if (renderer != null) {
             renderer.waveOn = apSaveWaveOn;
-            renderer.voiceBoost = apSaveVoiceBoost;
             renderer.siriGeom = apSaveSiriGeom;
         }
         if (siriEnabled) measureSiriTargets(siriStr);
@@ -2489,6 +2470,10 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
+        // 半透明窗口**默认就吃触摸**：文字层没字时也必须明确声明"只画不摸"，
+        // 否则它会以自己那个矩形（球内正文区）吞掉落在球中部的点按（用户 2026-10-22 报的
+        // 「球周围/球下方点不动」的另一半原因）。真正要滚的时候 syncSiriTouchLayer 会摘掉它。
+        siriParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         siriParams.gravity = Gravity.TOP | Gravity.START;
         try {
             wm.addView(sv, siriParams);
@@ -2739,7 +2724,7 @@ public class FloatingBallService extends Service {
     /** 代理窗口（唯一接用户手势的窗口）：agent 注入触摸期间、以及搜索胶囊期间必须让路。 */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
-        boolean blind = agentActing || searchActive || searchClosing;
+        boolean blind = agentActing || searchActive || searchClosing || menuShown || glassFullscreen;
         int want = blind ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
         int now = ballTouchParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         if (want == now) return;
@@ -2792,23 +2777,29 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
     }
 
-    /** 代理窗口的屏幕矩形：**贴合玻璃层的当前矩形** + 少量外扩（数值没变就不动窗口）。
+    /**
+     * 代理窗口的屏幕矩形：**贴合玻璃层真正有像素的那块** + 少量外扩。
      *
-     * 为什么不能只按"球的最小/最大形态"固定一个尺寸：Siri 球宽在 ~700↔~1040 之间动画，
-     * 代理窗口若只按最小形态固定，玻璃层变大时球两侧就出现**死区** —— 触摸确实落在球上，
-     * 但代理窗口没盖住那块，事件要么被丢弃要么跑去窗口外（实测：画布上那一笔凭空消失）。
-     * 所以直接跟玻璃层同尺寸 + 外扩，窗口只在尺寸真的变了才更新。
-     * 注意：球在动画期间这个窗口会跟着改几次尺寸，这是有意的（数值不同的才动）。
+     * 为什么不能用窗口矩形：窗口四边各有 24dp 留白，窗口里没玻璃的地方
+     * （玻璃顶/底到窗口边、球两侧的圆角外）代理窗口照样吃触摸 ——
+     * 用户 2026-10-22 报的「球下方的屏幕有时候触摸失灵」就是它。
+     * 实测修复前：窗口 793×579，玻璃实心只有 661×447 → 球正下方一条 ~66px 高的死带。
+     * 现在把可触摸区钳在「玻璃包围盒」上，再留 12dp 给拖拽起手（球的边缘 SDF 判定仍在
+     * {@link #inBallAtRaw} 里做，所以这 12dp 只影响"能否开始拖"，不影响误触）。
      */
     private void syncBallTouchWindow() {
         if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
-        int pad = Math.round(dp(10));
-        int w = Math.max(2, Math.min(screenW, winW + 2 * pad));
-        int h = Math.max(2, Math.min(screenH, winH + 2 * pad));
-        int x = Math.round(loc[0] + winW * 0.5f - w * 0.5f);
-        int y = Math.round(loc[1] + winH * 0.5f - h * 0.5f);
+        float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
+        float bhx = Math.max(1f, glassHalfW());
+        float bhy = Math.max(1f, glassHalfH());
+        float cx = loc[0] + winW * 0.5f;
+        float cy = loc[1] + winH * 0.5f;
+        int w = Math.max(2, Math.min(screenW, Math.round(2 * (bhx + pad))));
+        int h = Math.max(2, Math.min(screenH, Math.round(2 * (bhy + pad))));
+        int x = Math.round(cx - w * 0.5f);
+        int y = Math.round(cy - h * 0.5f);
         if (ballTouchParams.x == x && ballTouchParams.y == y
                 && ballTouchParams.width == w && ballTouchParams.height == h) return;
         ballTouchParams.x = x;
@@ -2816,6 +2807,34 @@ public class FloatingBallService extends Service {
         ballTouchParams.width = w;
         ballTouchParams.height = h;
         updateProxyWindow();
+    }
+
+    /**
+     * 玻璃（液态球体）当前的屏幕半宽/半高 —— 触摸代理窗口就按它来定大小。
+     *
+     * 公式与 {@code GlassRenderer} 里画球的那套完全一致：
+     *   hx = ref*0.9 * halfX * master，Siri 形态用 sv* 那组（动画值），
+     *   ref = renderer.refSize（原悬浮窗边长，与窗口实际宽高解耦）。
+     * 取 Siri 与常态两者的较大值，避免形态切换的那一瞬代理窗口比玻璃小。
+     */
+    private float glassHalfW() {
+        if (renderer == null) return winW * 0.5f;
+        float ref = renderer.refSize > 0 ? renderer.refSize : winW;
+        float base = ref * 0.9f;
+        float normal = base * renderer.halfX * renderer.master;
+        float siri = base * renderer.svHalfX * renderer.svMaster;
+        float v = Math.max(normal, siri);
+        return v > 2f ? v : winW * 0.5f;
+    }
+
+    private float glassHalfH() {
+        if (renderer == null) return winH * 0.5f;
+        float ref = renderer.refSize > 0 ? renderer.refSize : winW;
+        float base = ref * 0.9f;
+        float normal = base * renderer.halfY * renderer.master;
+        float siri = base * renderer.svHalfY * renderer.svMaster;
+        float v = Math.max(normal, siri);
+        return v > 2f ? v : winH * 0.5f;
     }
 
     /** 代理窗口里的触摸是否落在球上：换算到玻璃窗口本地坐标后用同一套 SDF。 */
@@ -2827,7 +2846,7 @@ public class FloatingBallService extends Service {
         return inSiriBall(rawX - loc[0], rawY - loc[1]);
     }
 
-    // ── 代理窗口：球上的一切用户手势都在这里（单击/双击/长按取消/拖动）──
+    // ── 代理窗口：球上的一切用户手势都在这里（单击/长按取消/拖动）──
     private void setupBallTouchLayer() {
         if (ballTouch != null || wm == null) return;
         View v = new View(this);
@@ -2850,7 +2869,6 @@ public class FloatingBallService extends Service {
         v.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
-            long lastTapAt;
             boolean dragging, longFired;
             /** 双指按住不动 SEARCH_HOLD_MS = 唤起搜索胶囊（用户要的入口）。 */
             final Runnable twoFingerHold = new Runnable() {
@@ -2858,27 +2876,34 @@ public class FloatingBallService extends Service {
                     if (twoHoldFired || dragging) return;
                     if (!twoDown) return;                    // 手指已经抬起来了
                     twoHoldFired = true;
-                    Log.i("FloatingBall", "search: 双指长按 → 唤起搜索胶囊");
+                    Log.i("FloatingBall", "search: 双指长按 → 唤起状态 2");
                     vibrate(30);
-                    enterSearchMode("双指长按");
+                    if (voice != null) voice.cancel();
+                    enterSearchMode("双指长按", "", false, BAR_SEND);
                 }
             };
             boolean twoDown = false, twoHoldFired = false;
-            /** 按住不动 480ms = 长按取消（录音中或正在问答时）。 */
+            /**
+             * 按住不动 480ms = **进入状态 3**（用户 2026-10-23 新交互）。
+             *
+             * 老版本这里是"取消这一轮问答"；现在取消挪到别处（状态 3 的右下角也不做取消，
+             * 因为草图里长按的语义明确是"变成状态 3"）。手指不松开就显示四个圆区，
+             * 滑到某个区再松手才执行；松手不在区里就回初始状态。
+             */
             final Runnable longPress = new Runnable() {
                 @Override public void run() {
                     if (dragging || longFired) return;
                     longFired = true;
-                    SiriAssistant a = SiriAssistant.peek();
-                    if (a != null && a.enabled()) {
-                        a.cancelByGesture();
-                        vibrate(35);
-                    }
+                    Log.i("FloatingBall", "长按 480ms → 状态 3（四个圆区）");
+                    vibrate(35);
+                    enterZones("长按");
                 }
             };
             @Override public boolean onTouch(View view, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_POINTER_DOWN:
+                        // 状态 3 按住期间：第二根手指也归这一串，不要切成"双指长按开搜索框"
+                        if (zonesActive) return true;
                         // 第二根手指落下 = 双指手势的起点。这里不再立刻复位形状，
                         // 而是分成两种意图（用户要求）：
                         //   · 双指**拖动** → 还是老行为：强制回到初始形状（见 ACTION_MOVE）
@@ -2897,6 +2922,7 @@ public class FloatingBallService extends Service {
                         // 审批球挂着时不抢手势：屏幕这时候归审批球用
                         if (approvalShown) return false;
                         if (searchActive) return false;         // 搜索胶囊期间屏幕归胶囊
+                        if (menuShown) return false;            // 玻璃菜单开着时归菜单
                         // 球上才算（代理窗口比球略大，多出来的边不响应）
                         if (!inBallAtRaw(e.getRawX(), e.getRawY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
@@ -2909,6 +2935,11 @@ public class FloatingBallService extends Service {
                         main.postDelayed(longPress, 480);
                         return true;
                     case MotionEvent.ACTION_MOVE: {
+                        // 状态 3：手指还按着 —— 只更新"落在哪个圆区"，不做别的
+                        if (zonesActive) {
+                            updateHoldTouch(e.getRawX(), e.getRawY());
+                            return true;
+                        }
                         float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
                         if (twoDown) {
                             if (!twoHoldFired && moved > dp(12)) {   // 双指拖动了 → 老行为：复位
@@ -2929,6 +2960,7 @@ public class FloatingBallService extends Service {
                         return true;
                     }
                     case MotionEvent.ACTION_POINTER_UP: {
+                        if (zonesActive) return true;
                         main.removeCallbacks(twoFingerHold);
                         if (twoDown && !twoHoldFired) {              // 双指没按够就松手：补一次复位
                             Log.i("FloatingBall", "双指手势 → 强制回到初始形状");
@@ -2941,26 +2973,36 @@ public class FloatingBallService extends Service {
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        if (zonesActive) {                               // 状态 3 松手
+                            finishZones(false);
+                            return true;
+                        }
                         if (longFired || twoHoldFired) return true;
                         float moved = Math.abs(e.getRawX() - downX) + Math.abs(e.getRawY() - downY);
                         if (dragging || moved >= dp(10)) return true;    // 拖动过就只是拖动
-                        long now = System.currentTimeMillis();
-                        if (now - lastTapAt < 340) {                     // 双击：开始聆听 / 结束并发送
-                            lastTapAt = 0;
-                            SiriAssistant a = SiriAssistant.peek();
-                            if (a != null && a.enabled()) {
-                                ensureSiriForAssistant();
-                                a.toggle();
-                            }
-                        } else {
-                            lastTapAt = now;                             // 单击：什么都不做
+                        // ── 初始状态的单击（= 草图里"单击变成状态 2"）──
+                        //   正在听 → 停麦，把已经听出来的字带进状态 2；
+                        //   没在听 → **直接弹出搜索框**（不是"再开一次麦"——用户明确要求
+                        //   "初始状态单击没有弹出搜索框"是 bug）。
+                        vibrate(10);
+                        if (convoOpen) {
+                            Log.i("FloatingBall", "单击 → 退出对话卡");
+                            closeConversation("点球");
+                            return true;
                         }
+                        // 单击**永远**先弹出输入框（用户：球点击不是应该弹出输入框吗）。
+                        // 若此刻正在听：顺手停麦，转写结果回来再填进这个框（不改变"先弹框"这件事）。
+                        boolean listeningNow = voice != null && voice.listening();
+                        Log.i("FloatingBall", "单击 → 弹出状态 2 输入框（listening=" + listeningNow + "）");
+                        enterSearchMode("单击", "", false, BAR_SEND);
+                        if (listeningNow) voice.tapStop();
                         return true;
                     }
                     case MotionEvent.ACTION_CANCEL:
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        if (zonesActive) finishZones(true);
                         return true;
                     default:
                         return false;
@@ -3054,7 +3096,7 @@ public class FloatingBallService extends Service {
     void forceHomeShape(String why) {
         Log.i("FloatingBall", "forceHomeShape: " + why);
         SiriAssistant a = SiriAssistant.peek();
-        if (a != null) a.cancelByGesture();      // 顺手取消正在进行的这一轮（录音/问答）
+        if (a != null) a.cancelByGesture();      // 顺手取消正在进行的这一轮问答
         setAssistantPinned(false);
         siriStr = "";
         forceHideAllText();                      // ① + ②
@@ -3077,6 +3119,9 @@ public class FloatingBallService extends Service {
 
     /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
     private void moveBallDrag(float wantX, float wantY) {
+        // 状态 2/3、菜单、对话卡期间**球不可拖动**（用户：搜索框要弄成不可拖动，
+        // 否则长按开框后手指没松，整块窗口会被拖着走、输入框像被手吸住）
+        if (searchActive || zonesActive || menuShown || glassFullscreen || convoOpen) return;
         params.x = Math.round(wantX);
         params.y = Math.round(wantY);
         rememberHomeIfMinimal();   // 拖动 = 搬家（只在最小形态时才算家）
@@ -3120,7 +3165,11 @@ public class FloatingBallService extends Service {
     private void syncSiriTouchLayer() {
         if (siriText == null || siriParams == null || wm == null) return;
         boolean scrollable = siriTextShown && mdContentH > siriViewportH + 2;
-        if (scrollable == siriTextTouchable) return;
+        // 判据直接看**真实 flags**，不看缓存：早期版本把文字层建成"可触摸"，缓存却是 false，
+        // 于是这里一直 return —— 文字层永远可触摸，把球中部/下方的点按全吃掉（2026-10-22 报的）。
+        int flagsNow = siriParams.flags;
+        boolean nowTouchable = (flagsNow & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0;
+        if (scrollable == nowTouchable) { siriTextTouchable = scrollable; return; }
         siriTextTouchable = scrollable;
         if (scrollable) siriParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         else siriParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -3473,6 +3522,16 @@ public class FloatingBallService extends Service {
             if (textHold) {
                 // 本轮已经出过字、还没结束：文字被清空（多段生成之间的空档）也不缩回圆球，
                 // 继续用本轮量过的最大几何 —— 否则球会在圆球/近方形之间反复缩胀。
+                //
+                // ⚠️ 但「回合已经结束」时继续保持就是 bug（用户 2026-10-22 报的）：
+                // 窗口停在方形态的 993×993 上，球其实已经缩回圆球，
+                // 球周围那一大圈透明区域照样吃触摸 —— 屏幕上看着球好好的，
+                // 点它旁边却没反应。回合结束后落回初始圆球是唯一正确解。
+                if (isIdleState()) {
+                    Log.i("FloatingBall", "text hold: 没在跑且文字为空 → 收回初始圆球（顺带缩窗）");
+                    releaseTextHold();
+                    return;
+                }
                 hideSiriTextNow();
                 applyHoldGeometry();
                 return;
@@ -3561,12 +3620,104 @@ public class FloatingBallService extends Service {
         if (s != null && !s.trim().isEmpty()) showSiriTextNow();
     }
 
+    /**
+     * 球已经回初始形态、窗口却还停在方形态的大盒子上 —— 那块透明区域照样吃触摸
+     * （用户 2026-10-22：「球周围无法触摸屏幕，可能是变成方形后恢复初始状态后触摸有效区域没有及时更新」）。
+     *
+     * 每 400ms 巡检一次，两条判据：
+     *   ① 文字空了、回合也结束了，却还在"保持方形态" → 直接收回初始圆球（releaseTextHold 内部会缩窗）；
+     *   ② 球（动画值）已经是最小圆球了，窗口却明显更大 → 把窗口缩回"球 + 24dp 留白"。
+     */
+    private void auditWindowAgainstBall() {
+        if (searchActive || approvalShown || menuShown || glassFullscreen || zonesActive
+                || renderer == null || wm == null) return;
+        // ① 非 Siri 形态（助手没接管、Siri 模式关着）：球按 renderer.halfX/halfY 画，
+        //    窗口若还停在助手那一轮的方形态大盒子上，四周透明区域就把触摸吃了。
+        //    这条路径以前**根本没人管**：siriTick 在 !siriEnabled 时直接 return，
+        //    所以"方形态 → 回初始状态"之后窗口永远是 993×993（实测玻璃只有 661×449）。
+        if (!siriEnabled) {
+            float b = winSize * 0.9f;
+            float hx = renderer.halfX > 0.02f ? renderer.halfX : 0.37f;
+            float hy = renderer.halfY > 0.02f ? renderer.halfY : 0.25f;
+            int tw = Math.min(screenW, Math.round(2 * b * hx + 2 * dp(24)));
+            int th = Math.min(screenH, Math.round(2 * b * hy + 2 * dp(24)));
+            if (Math.abs(tw - winW) > dp(8) || Math.abs(th - winH) > dp(8)) {
+                Log.i("FloatingBall", "window audit(idle): 窗口 " + winW + "x" + winH
+                        + " → " + tw + "x" + th + "（球 " + Math.round(2 * b * hx) + "x"
+                        + Math.round(2 * b * hy) + " + 2×24dp）");
+                params.x += (winW - tw) / 2;          // 保持球心不动
+                params.y += (winH - th) / 2;
+                winW = tw; winH = th;
+                params.width = tw; params.height = th;
+                renderer.winPixelW = tw; renderer.winPixelH = th;
+                try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+                glView.post(winSync);
+            }
+            return;
+        }
+        // ② Siri 形态：先把「保持」的兜底释放跑起来。pumpTextHoldSafety() 写好了却没人调用 ——
+        //    于是镜像出字（浏览器那边在回话）、或流中途断掉时，textHold 永远不释放，
+        //    窗口就永久停在方形态的大盒子上（用户看到的就是"球周围点不动"）。
+        pumpTextHoldSafety();
+        String s = siriStr;
+        boolean textEmpty = s == null || s.trim().isEmpty();
+        if (textHold && textEmpty && isIdleState()) {
+            Log.i("FloatingBall", "window audit: 没在跑且文字为空 → 收回初始圆球（缩窗）");
+            releaseTextHold();
+            return;
+        }
+        float base = winSize * 0.9f;
+        int restW = Math.round(2 * base * minHalfX + 2 * dp(24));
+        int restH = Math.round(2 * base * minHalfY + 2 * dp(24));
+        boolean ballAtRest = aHalfX <= minHalfX * 1.06f && aHalfY <= minHalfY * 1.06f;
+        // 让「方框缩回圆球」那段缓动先走完再动窗口：动画中途就抢着缩窗，
+        // 用户看到的是"啪一下跳回去"（代码里其它地方专门为这个调过 siriEaseTau）。
+        long now = android.os.SystemClock.uptimeMillis();
+        if (!ballAtRest) { ballRestSince = 0; return; }
+        if (ballRestSince == 0) ballRestSince = now;
+        if (now - ballRestSince < 700) return;
+        if (!textHold && (winW > restW + dp(8) || winH > restH + dp(8))) {
+            Log.i("FloatingBall", "window audit: 球已回最小形态，窗口 " + winW + "x" + winH
+                    + " → " + restW + "x" + restH + "（触摸有效区域跟着缩）");
+            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+            updateSiriWindow(base * minHalfX, base * minHalfY);
+        }
+    }
+
+    /** 每 400ms 巡检一次窗口/触摸区域。Siri 关着时 siriTick 会直接 return，所以必须独立一条。 */
+    private final Runnable auditTick = new Runnable() {
+        @Override public void run() {
+            try { auditWindowAgainstBall(); } catch (Throwable ignored) { }
+            main.postDelayed(this, 400);
+        }
+    };
+
+    /** 回合是否已经结束（turn/end 或本地流收完）且当前没有在跑的状态。 */
+    private boolean isIdleSettled() {
+        String st = SiriAssistant.stateName();
+        if (!("IDLE".equals(st) || "OFF".equals(st))) return false;
+        return SiriAssistant.isTurnSettled();
+    }
+
+    /** 当前不在听/不在这轮问答里（镜像出字、流中断那些没有 turn/end 的路径也认）。 */
+    private boolean isIdleState() {
+        String st = SiriAssistant.stateName();
+        return "IDLE".equals(st) || "OFF".equals(st);
+    }
+
+    private long lastWinAuditAt = 0;
+    /** 球（动画值）落在最小形态上的起始时刻；用来给缩窗留出动画时间。 */
+    private long ballRestSince = 0;
+
     private final Runnable siriTick = new Runnable() {
         @Override public void run() {
             if (!siriEnabled) return;
             long now = android.os.SystemClock.uptimeMillis();
             float dt = siriTickLast == 0 ? 0.016f : Math.min(0.05f, (now - siriTickLast) / 1000f);
             siriTickLast = now;
+            // 窗口/触摸有效区域的兜底巡检（用户 2026-10-22 报的「球周围点不动」）：
+            // 球回圆球了、窗口却还停在方形态的大盒子上时，透明区域照样吃触摸。
+            if (now - lastWinAuditAt > 400) { lastWinAuditAt = now; auditWindowAgainstBall(); }
             // 生长要跟手（0.06s），收起要从容（0.22s）—— 收字时从大方框缩回圆球，
             // 太快就是"啪一下跳回去"（用户报的"上下跳动"）
             float k = 1f - (float) Math.exp(-dt / Math.max(0.02f, siriEaseTau));
@@ -3682,6 +3833,9 @@ public class FloatingBallService extends Service {
 
     private void updateSiriWindow(float hxpx, float hypx) {
         if (!siriEnabled || wm == null || glView == null) return;
+        // 菜单面板 / 状态 3 期间，窗口归那块玻璃用：球的几何更新一律不许改窗口大小
+        // （之前 audit 已挡了，但 siriTick 每帧还会经 measureSiriTargets 调到这里，窗口被打回球尺寸）
+        if (menuShown || (glassFullscreen && searchActive)) return;
         float m = dp(24);
         int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
@@ -3833,7 +3987,7 @@ public class FloatingBallService extends Service {
         INSTANCE = this;
         exemptHiddenApis();
         createChannel();
-        // 语音助手：轻点球体即可跟本机 DSH 说话；同时起一条常驻镜像流，
+        // DSH 文本助手：同时起一条常驻镜像流，
         // DSH 里只要 AI 在回话（不管是谁问的），球就逐字出字。
         try {
             SiriAssistant a = SiriAssistant.get(this);
@@ -3845,6 +3999,7 @@ public class FloatingBallService extends Service {
         } catch (Throwable t) {
             Log.w("FloatingBall", "siri assistant init failed: " + t, t);
         }
+        main.post(auditTick);   // 窗口/触摸区域巡检（Siri 关着也要跑）
     }
 
     /** 构建版本号（日志里认版本用，省得怀疑装错了包）。 */
@@ -3977,10 +4132,1652 @@ public class FloatingBallService extends Service {
         }
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         if (glView == null) setupOverlay();
+        // 初始状态会"听"：等窗口真的起来、且没在做别的事之后再开麦
+        main.postDelayed(new Runnable() {
+            @Override public void run() { armVoice("服务启动/球弹出"); }
+        }, 1200);
         return START_NOT_STICKY;
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // 三态手势机（2026-10-23 按用户草图重做）
+    //
+    //   初始状态（球，会听）
+    //     · 弹出即开麦：VAD 判定"话音刚落" → 自动停 → 转写 → 发到**新会话**
+    //     · 识别过程中单击 → 停止识别（音频照样转写）→ 进入状态 2，文字留在输入框
+    //     · 长按 → 状态 3
+    //
+    //   状态 2（胶囊，= 原来的搜索框）
+    //     · 单击 → 编辑（弹键盘）；回车 → 发送到会话（默认新会话，可先在工作目录/搜索里选）
+    //     · 长按 → 添附件（等价于前端输入框的 `uV2eYG_add`）
+    //     · 双指长按 → Agent 预设 / 模型 / 推理等级 / 权限 弹窗
+    //     · 点输入框以外 / 发送完 → 回初始状态
+    //
+    //   状态 3（四个液玻璃圆区，按住不放才出现）
+    //     · 松手不在任何区 → 回初始状态
+    //     · 左上 → 二级菜单 1：工作目录 → 三级菜单：该目录下的会话
+    //     · 右上 → 状态 2，但发的是"搜索会话"（= 前端侧栏 `bhn1Oq_searchButton`）
+    //     · 左下 → 状态 2（普通输入）；右下 → 参数弹窗
+    //
+    // 视觉：四个圆区与所有菜单面板都由 {@link ZoneLayerShader} 画 —— 与球、搜索胶囊
+    // **同一套液态玻璃材质**（用户：颜色只是草图里用来区分的，实际全部要液态玻璃）。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    static final int ZONE_TL = 0, ZONE_TR = 1, ZONE_BL = 2, ZONE_BR = 3;
+    private static final int BAR_SEND = 0, BAR_SEARCH = 1;
+
+    private BallVoice voice;
+    private boolean zonesActive = false;
+    private int zoneActive = -1;
+    private BallZonesView zonesView;
+    private WindowManager.LayoutParams zonesParams;
+    private final float[] zoneCx = new float[4];
+    private final float[] zoneCy = new float[4];
+    private float zoneR = 1f;
+
+    /** 状态 2 这次打开是"发消息"还是"搜会话"（右上角圆区进来的就是后者）。 */
+    private int barPurpose = BAR_SEND;
+    /** 选中的会话（工作目录三级菜单 / 会话搜索）：下一次发送就发给它。 */
+    private String targetSessionId = null, targetSessionTitle = null;
+    /** 待发送附件（长按添进来的那个）。 */
+    private File pendingAttach = null;
+    private String pendingAttachName = null;
+
+    // 玻璃菜单（工作目录 / 会话列表 / 参数）：面板由 GL 层画，文字排版在 menuView 里
+    private BallGlassMenu menuView;
+    private WindowManager.LayoutParams menuViewParams;
+    private View menuOutside;
+    private WindowManager.LayoutParams menuOutsideParams;
+    private boolean menuShown = false;
+    private long menuArmAt = 0;
+    /** 当前菜单路径："" = 关着；dirs / dir:<path> / sessions:<dir> / settings / preset / model / effort / perm / search */
+    private String menuPath = "";
+    private String menuReturnPath = "";
+    private float[] menuRect = null;          // x, y, w, h（屏幕像素）
+    private boolean glassFullscreen = false;
+
+    static boolean isVoiceListening() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.voice != null && s.voice.listening();
+    }
+
+    static boolean isZonesOpen() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.zonesActive;
+    }
+
+    private boolean voiceAutoEnabled() { return prefs().getBoolean("voice_auto", true); }
+
+    /** 弹球就开始听（用户要的初始状态）。已经在听就什么都不做。 */
+    private void armVoice(String why) {
+        if (!voiceAutoEnabled()) return;
+        if (!siriEnabled) return;
+        if (searchActive || zonesActive || approvalShown || menuShown) return;
+        if (voice == null) voice = new BallVoice(this);
+        if (voice.busy()) return;
+        Log.i("FloatingBall", "voice: 开始听（" + why + "）");
+        vibrate(18);
+        voice.start(new BallVoice.Cb() {
+            @Override public void onListening() { }
+
+            @Override public void onLevel(float level) { }
+
+            @Override public void onTranscribing() { }
+
+            @Override public void onHeard(final String text, final boolean auto) {
+                final String t = text == null ? "" : text.trim();
+                Log.i("FloatingBall", "voice: 转写" + (auto ? "（话音刚落）" : "（点击打断）")
+                        + " = 「" + t + "」");
+                if (t.isEmpty()) {
+                    // 点击打断时没听出字：保持初始状态（用户要的是"变状态 2 时带着识别结果"，
+                    // 一个字都没有就没有可带的东西），只提示一句
+                    toast("没听清，再说一次？");
+                    armVoice("没听清，继续听");
+                    return;
+                }
+                if (auto) {
+                    // 话音刚落 → 直接发到新会话
+                    sendTextNewSession(t, null);
+                } else if (searchActive && searchBar != null) {
+                    // 框已经弹出来了（单击先弹框）：直接填字
+                    searchBar.setText(t);
+                    searchBar.focusInput();
+                    Log.i("FloatingBall", "voice: 识别结果填进已打开的状态 2");
+                } else {
+                    enterSearchMode("语音打断", t, false, BAR_SEND);
+                }
+            }
+
+            @Override public void onError(final String message) {
+                Log.w("FloatingBall", "voice: " + message);
+                toast(message);
+            }
+        });
+    }
+
+    private void toast(final String msg) {
+        try {
+            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) { }
+    }
+
+    private static String message(Throwable t) {
+        if (t == null) return "未知错误";
+        String m = t.getMessage();
+        return m == null || m.trim().isEmpty() ? t.toString() : m;
+    }
+
+    private static byte[] readAll(File f) throws Exception {
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            return bos.toByteArray();
+        }
+    }
+
+    /** 状态 2 的发送目标：有选中会话就发给它，否则按"新会话 + 当前参数档"发。 */
+    private void sendFromBar(final String text, final File attach, final String attachName) {
+        String t = text == null ? "" : text.trim();
+        if (t.isEmpty() && attach == null) return;
+        if (targetSessionId != null) {
+            sendTextToSession(targetSessionId, t, attach, attachName);
+        } else {
+            sendTextNewSession(t, attach);
+        }
+    }
+
+    private void sendTextNewSession(final String text, final File attach) {
+        final String attachName = pendingAttachName;
+        final String cwd = prefs().getString("send_cwd", "");
+        final String preset = prefs().getString("send_preset", "");
+        final String provider = prefs().getString("send_provider", "");
+        final String model = prefs().getString("send_model", "");
+        final String effort = prefs().getString("send_effort", "");
+        final String perm = prefs().getString("send_perm", "");
+        final DshApi api = DshApi.get(this);
+        Log.i("FloatingBall", "send: 新会话 cwd=" + cwd + " preset=" + preset
+                + " model=" + model + "/" + effort + " perm=" + perm + " 附件="
+                + (attach == null ? "无" : attach.getName()));
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    String sid = api.createSession(cwd, preset);
+                    if (!model.isEmpty() && !provider.isEmpty()) {
+                        api.selectModel(sid, provider, model, effort);
+                    }
+                    if (!perm.isEmpty()) api.setPermission(sid, perm);
+                    List<String> receipts = new ArrayList<>();
+                    if (attach != null && attach.exists()) {
+                        String rid = api.upload(sid, attachName == null ? attach.getName() : attachName,
+                                readAll(attach));
+                        receipts.add(rid);
+                    }
+                    final String fid = sid;
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            askIn(fid, text, receipts);
+                        }
+                    });
+                } catch (Throwable t) {
+                    final String m = message(t);
+                    Log.w("FloatingBall", "send: 新会话失败 " + m);
+                    main.post(new Runnable() {
+                        @Override public void run() { toast("发送失败：" + m); }
+                    });
+                }
+            }
+        }, "dsh-send-new").start();
+    }
+
+    private void sendTextToSession(final String sid, final String text,
+                                   final File attach, final String attachName) {
+        final DshApi api = DshApi.get(this);
+        Log.i("FloatingBall", "send: 发到已有会话 " + sid + "（" + targetSessionTitle + "）");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    List<String> receipts = new ArrayList<>();
+                    if (attach != null && attach.exists()) {
+                        receipts.add(api.upload(sid, attachName == null ? attach.getName() : attachName,
+                                readAll(attach)));
+                    }
+                    main.post(new Runnable() {
+                        @Override public void run() { askIn(sid, text, receipts); }
+                    });
+                } catch (Throwable t) {
+                    final String m = message(t);
+                    main.post(new Runnable() {
+                        @Override public void run() { toast("发送失败：" + m); }
+                    });
+                }
+            }
+        }, "dsh-send-session").start();
+    }
+
+    /** 把这一句交给助手：流式回答照旧逐字写进球里。 */
+    private void askIn(final String sessionId, final String text, final List<String> receipts) {
+        SiriAssistant a = SiriAssistant.get(this);
+        if (!a.enabled()) {
+            toast("DSH 助手没开");
+            return;
+        }
+        ensureSiriForAssistant();
+        a.askIn(sessionId, text, receipts);
+    }
+
+    // ── 状态 3：四个液玻璃圆区 ───────────────────────────────────────────────
+
+    /** 按住球 480ms → 四个圆区出现（不松手）。松手不在区里就回初始状态。 */
+    void enterZones(String why) {
+        if (zonesActive || searchActive || approvalShown || menuShown) return;
+        if (wm == null || glView == null || renderer == null || params == null) return;
+        if (!siriEnabled) applySiriEnabled(true);
+        if (!siriEnabled) return;
+        if (voice != null) voice.cancel();               // 长按进状态 3：语音不转了
+        zonesActive = true;
+        zoneActive = -1;
+        holdLevel = 0;
+        holdZoneHover = -1;
+        holdFocus = -1;
+        holdItems.clear();
+        holdDir = null;
+        prefetchZonesData();
+        forceHideAllText();                              // 球内文字先藏（和搜索层一致）
+        computeZones();
+        renderer.zoneMode = true;                        // 球整趟让路：这一帧画的是四个圆区
+        renderer.sHlAmt = 1.5f;
+        renderer.sAb = 0.12f;
+        renderer.sDensity = sqDensity();
+        renderer.zCont = 0.80f;      // 和球同款"上黑下透"（球的黑顶就是这条曲线）
+        renderer.zRefract = 16f;
+        pushZoneScene();
+        showZonesOverlay();
+        applyBallTouchability();
+        vibrate(22);
+        Log.i("FloatingBall", "zones: 进入状态 3（" + why + "）R=" + Math.round(zoneR)
+                + " 中心=(" + Math.round(zoneCx[0] + zoneR * 1.15f) + ","
+                + Math.round(zoneCy[0] + zoneR * 1.15f) + ") 请滑到某个圆区");
+    }
+
+    private void computeZones() {
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        float cx = loc[0] + winW * 0.5f;
+        float cy = loc[1] + winH * 0.5f;
+        float halfH = winSize * 0.9f * minHalfY;
+        zoneR = Math.max(dp(46), halfH * 0.48f);
+        float off = zoneR * 1.15f;
+        zoneCx[ZONE_TL] = cx - off; zoneCy[ZONE_TL] = cy - off;
+        zoneCx[ZONE_TR] = cx + off; zoneCy[ZONE_TR] = cy - off;
+        zoneCx[ZONE_BL] = cx - off; zoneCy[ZONE_BL] = cy + off;
+        zoneCx[ZONE_BR] = cx + off; zoneCy[ZONE_BR] = cy + off;
+        zoneLocalX = new float[]{zoneCx[0] - loc[0], zoneCx[1] - loc[0],
+                zoneCx[2] - loc[0], zoneCx[3] - loc[0]};
+        zoneLocalY = new float[]{zoneCy[0] - loc[1], zoneCy[1] - loc[1],
+                zoneCy[2] - loc[1], zoneCy[3] - loc[1]};
+    }
+
+    private float[] zoneLocalX, zoneLocalY;
+
+    /** 按住的那一刻就把"工作目录 + 最近目录下的会话"取回来，卡片一出现就是热的。 */
+    private void prefetchZonesData() {
+        final DshApi api = DshApi.get(this);
+        prefetchedDirs = null;
+        prefetchDirPath = null;
+        new Thread(() -> {
+            try {
+                final List<String> dirs = api.recentDirs();
+                final String firstDir = dirs.isEmpty() ? null : dirs.get(0);
+                final List<DshApi.SessionRow> rows =
+                        firstDir == null ? new ArrayList<>() : api.sessionsIn(firstDir);
+                main.post(() -> {
+                    prefetchedDirs = dirs;
+                    prefetchDirPath = firstDir;
+                    prefetchedSessions = rows;
+                    Log.i("FloatingBall", "zones: 预取 " + dirs.size() + " 个目录 / "
+                            + rows.size() + " 条会话");
+                });
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "zones: 预取失败 " + message(t));
+            }
+        }, "hold-prefetch").start();
+    }
+
+    /** 每帧把四个圆区（屏幕像素、y 向下）交给 GL 层；高亮跟着 zoneActive 走。 */
+    private void pushZoneScene() {
+        if (renderer == null) return;
+        float[] s = new float[20];
+        float[] m = new float[20];
+        for (int i = 0; i < 4; i++) {
+            s[i * 4] = zoneCx[i];
+            s[i * 4 + 1] = zoneCy[i];
+            s[i * 4 + 2] = zoneR;
+            s[i * 4 + 3] = zoneR;
+            m[i * 4] = (zoneActive == i) ? 1f : 0f;      // act
+            m[i * 4 + 1] = 0.02f;                        // dark：和球一样是浅玻璃
+            m[i * 4 + 2] = 1f;                           // 圆：圆角 = 半宽
+            m[i * 4 + 3] = 1f;                           // enabled
+        }
+        s[16] = 0; s[17] = 0; s[18] = 1; s[19] = 1;
+        m[16] = 0; m[17] = 0; m[18] = 1; m[19] = 0;      // 第 5 个形状关掉
+        renderer.zShape = s;
+        renderer.zMeta = m;
+    }
+
+    private void showZonesOverlay() {
+        if (wm == null) return;
+        if (zonesView == null) {
+            BallZonesView v = new BallZonesView(this);
+            zonesParams = overlayParams(winW, winH,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            zonesParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            zonesParams.x = loc[0];
+            zonesParams.y = loc[1];
+            try {
+                wm.addView(v, zonesParams);
+                zonesView = v;
+                // 只画不摸（不用 FLAG_NOT_TOUCHABLE：那会被 OEM 把 alpha 压到 0.8）
+                makeTouchTransparent(v);
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "add zones overlay failed: " + t);
+                return;
+            }
+        }
+        // 每次进入都重新贴窗口位置（球被挪过 / 窗口位置变过时，图标和玻璃必须还对齐）
+        if (glView != null && zonesParams != null) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            zonesParams.x = loc[0];
+            zonesParams.y = loc[1];
+            zonesParams.width = winW;
+            zonesParams.height = winH;
+            try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
+            for (int i = 0; i < 4; i++) {
+                zoneLocalX[i] = zoneCx[i] - loc[0];
+                zoneLocalY[i] = zoneCy[i] - loc[1];
+            }
+        }
+        zonesView.hideCards();                 // 上一次的列表文字不许留在屏幕上
+        zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+        zonesView.setActive(-1);
+        zonesView.setAppear(1f);
+        zonesParams.width = winW;
+        zonesParams.height = winH;
+        zonesView.setVisibility(View.VISIBLE);
+    }
+
+    /** 手指在某点上：落在哪个圆区（屏幕坐标）。 */
+    private int zoneAt(float rawX, float rawY) {
+        if (!zonesActive) return -1;
+        float bestD = zoneR * 1.15f;
+        int best = -1;
+        for (int i = 0; i < 4; i++) {
+            float dx = rawX - zoneCx[i], dy = rawY - zoneCy[i];
+            float d = (float) Math.hypot(dx, dy);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    // ── 状态 3 的"全程不松手"多级卡片菜单 ─────────────────────────────────
+    //
+    // 用户 2026-10-23 的规则：「状态三下是多级自动隐藏式的卡片菜单，全程需要不松手，
+    // 松手则恢复初始状态」。所以菜单不再是"松手后常驻的面板"，而是：
+    //   按住球 → 四个圆区（一级）
+    //   → 滑进左上圆区（悬停 260ms）→ 二级卡片：工作目录列表
+    //   → 滑到某个目录（悬停 650ms）→ 三级卡片：该目录下的会话
+    //   → 滑到某个会话（悬停 650ms）→ **提交**：收起状态 3、进入状态 2（发给那条会话）
+    //   手指离开卡片区 → 卡片自动隐藏、回到一级圆区；任何时刻松手 → 回初始状态。
+    // 右上/左下圆区悬停 260ms 就直接进状态 2（搜索会话 / 普通输入）；右下进 DSH 设置。
+
+    static final class HoldItem {
+        String label, sub;
+        int kind;          // 0=目录 1=会话 2=新建会话 3=动作
+        String data;       // 目录路径 / 会话 id
+        HoldItem(String label, String sub, int kind, String data) {
+            this.label = label; this.sub = sub; this.kind = kind; this.data = data;
+        }
+    }
+
+    private static final long ZONE_DWELL_MS = 260;
+    private static final long ITEM_DWELL_MS = 650;
+
+    private int holdLevel = 0;                  // 0=四区 1=二级卡片 2=三级卡片
+    private String holdTitle = "";
+    private final List<HoldItem> holdItems = new ArrayList<>();
+    private final float[] holdRects = new float[20];
+    private float[] holdTitleRect = null;
+    private float[] holdTitleLocal = null;
+    private float[] holdListRect = null;
+    private float[] holdListLocal = null;
+    private float lastHoldX = 0, lastHoldY = 0;
+    private float holdEnterY = -1;
+    private boolean holdFocusArmed = false;
+    private long holdLevelAt = 0;
+    private int holdFocus = -1;
+    private long holdFocusAt = 0;
+    private String holdDir = null;
+    private long holdZoneAt = 0;
+    private int holdZoneHover = -1;
+    /** 预取的数据（按住的那一刻就去拿，别等手指停在卡片上才发 RPC）。 */
+    private List<String> prefetchedDirs = null;
+    private String prefetchDirPath = null;
+    private List<DshApi.SessionRow> prefetchedSessions = new ArrayList<>();
+
+    private final Runnable holdZoneDwell = new Runnable() {
+        @Override public void run() {
+            int z = holdZoneHover;
+            if (!zonesActive || z < 0 || holdLevel != 0) return;
+            if (android.os.SystemClock.uptimeMillis() - holdZoneAt < ZONE_DWELL_MS) return;
+            if (z == ZONE_TL) openHoldDirs();
+            else if (z == ZONE_TR) commitHold(() -> enterSearchMode("状态3 右上：搜索会话", "", true, BAR_SEARCH));
+            else if (z == ZONE_BL) commitHold(() -> openSettingsMenu());   // = 搜索框双指长按的参数弹窗
+            else commitHold(() -> openDshSettings("状态3 右下"));
+        }
+    };
+
+    private final Runnable holdItemDwell = new Runnable() {
+        @Override public void run() {
+            int i = holdFocus;
+            if (!zonesActive || i < 0 || i >= holdItems.size()) return;
+            if (android.os.SystemClock.uptimeMillis() - holdFocusAt < ITEM_DWELL_MS) return;
+            if (android.os.SystemClock.uptimeMillis() - holdLevelAt < 300) return;   // 刚换级不许立刻提交
+            HoldItem it = holdItems.get(i);
+            Log.i("FloatingBall", "zones: 悬停提交「" + it.label + "」kind=" + it.kind);
+            if (it.kind == 0) {                       // 目录：不能靠"停住"展开，必须往右滑
+                Log.i("FloatingBall", "zones: 目录要看往右滑（不是停住）");
+            } else if (it.kind == 1) {                // 会话 → 提交：进入这个对话
+                final String sid = it.data, title = it.label;
+                commitHold(() -> openConversation(sid, title));
+            } else if (it.kind == 2) {                // 在该目录新建会话
+                final String dir = it.data;
+                prefs().edit().putString("send_cwd", dir).apply();
+                targetSessionId = null;
+                targetSessionTitle = null;
+                commitHold(() -> enterSearchMode("工作目录：新建会话", "", true, BAR_SEND));
+            } else {                                  // 其它动作
+                commitHold(() -> openDshSettings("状态3 参数"));
+            }
+        }
+    };
+
+    /** 提交：先收起状态 3（球与窗口都回初始几何），再执行动作。 */
+    private void commitHold(Runnable action) {
+        if (!zonesActive) return;
+        exitZones();
+        main.postDelayed(action, 60);
+    }
+
+    /** 悬停进度的可视化：卡片/圆区的高亮跟着手指走。 */
+    private void updateHoldTouch(float rawX, float rawY) {
+        lastHoldX = rawX; lastHoldY = rawY;
+        if (holdLevel == 0) {
+            int z = zoneAt(rawX, rawY);
+            if (z != holdZoneHover) {
+                holdZoneHover = z;
+                holdZoneAt = android.os.SystemClock.uptimeMillis();
+                if (z >= 0) vibrate(8);
+                zoneActive = z;
+                if (zonesView != null) zonesView.setActive(z);
+                pushZoneScene();
+                main.removeCallbacks(holdZoneDwell);
+                if (z >= 0) main.postDelayed(holdZoneDwell, ZONE_DWELL_MS + 20);
+            }
+            return;
+        }
+        // 一级（目录）：直接取最近的一行 —— 用户是"选中目录再往右滑"，不该再要求晃一下。
+        // 二级（会话）：必须先有意识地移动过，否则换级瞬间手指停在哪行就会自动选中哪行（会一路钻到底）。
+        if (holdLevel >= 2 && !holdFocusArmed) {
+            if (holdEnterY > 0 && Math.abs(rawY - holdEnterY) < dp(12)) return;
+            holdFocusArmed = true;
+        }
+        int i = nearestRow(rawY);
+        // 二级面板：手指从该目录行**往右**滑出面板右边 → 展开该目录下的会话（三级）
+        if (holdLevel == 1 && i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
+            float panelRight = holdListRect[0] + holdListRect[2];
+            if (rawX > panelRight - dp(6)) {
+                Log.i("FloatingBall", "zones: 右滑展开「" + holdItems.get(i).label + "」");
+                openHoldSessions(holdItems.get(i).data);
+                holdEnterY = rawY;
+                return;
+            }
+        }
+        if (i != holdFocus) {
+            holdFocus = i;
+            holdFocusAt = android.os.SystemClock.uptimeMillis();
+            if (zonesView != null) zonesView.setCardFocus(i);
+            pushCardScene();
+            main.removeCallbacks(holdItemDwell);
+            if (i >= 0) {
+                vibrate(6);
+                main.postDelayed(holdItemDwell, ITEM_DWELL_MS + 20);
+            }
+        }
+        // 手指离开卡片区 → 自动隐藏，回到一级圆区
+        if (i < 0 && farFromCards(rawY)) {
+            closeCards();
+        }
+    }
+
+    private boolean farFromCards(float rawY) {
+        if (holdItems.isEmpty()) return true;
+        float top = holdRects[1], bottom = holdRects[(holdItems.size() - 1) * 4 + 1]
+                + holdRects[(holdItems.size() - 1) * 4 + 3];
+        return rawY < top - dp(36) || rawY > bottom + dp(36);
+    }
+
+    /** 离手指纵向最近的条目（面板内才有效）。 */
+    private int nearestRow(float rawY) {
+        if (holdItems.isEmpty() || holdListRect == null) return -1;
+        if (rawY < holdListRect[1] - dp(24) || rawY > holdListRect[1] + holdListRect[3] + dp(24)) return -1;
+        int best = -1;
+        float bestD = Float.MAX_VALUE;
+        for (int i = 0; i < holdItems.size(); i++) {
+            float cy = holdRects[i * 4 + 1] + holdRects[i * 4 + 3] * 0.5f;
+            float d = Math.abs(rawY - cy);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    private int cardAt(float rawX, float rawY) {
+        for (int i = 0; i < holdItems.size(); i++) {
+            float x = holdRects[i * 4], y = holdRects[i * 4 + 1];
+            float w = holdRects[i * 4 + 2], h = holdRects[i * 4 + 3];
+            if (rawX >= x - dp(10) && rawX <= x + w + dp(10)
+                    && rawY >= y - dp(6) && rawY <= y + h + dp(6)) return i;
+        }
+        return -1;
+    }
+
+    /** 二级：工作目录（按住时预取过，直接出卡片）。 */
+    private void openHoldDirs() {
+        List<HoldItem> items = new ArrayList<>();
+        List<String> dirs = prefetchedDirs;
+        if (dirs != null) {
+            for (int i = 0; i < Math.min(4, dirs.size()); i++) {
+                String d = dirs.get(i);
+                items.add(new HoldItem(leaf(d), d, 0, d));
+            }
+        }
+        if (items.isEmpty()) items.add(new HoldItem("（没有最近目录）", "", 3, ""));
+        showCards("工作目录", items);
+        if (dirs == null) {
+            // 还没预取完：后台拿一次再刷
+            final DshApi api = DshApi.get(this);
+            new Thread(() -> {
+                try {
+                    final List<String> d = api.recentDirs();
+                    main.post(() -> {
+                        prefetchedDirs = d;
+                        if (zonesActive && holdLevel == 1 && "工作目录".equals(holdTitle)) openHoldDirs();
+                    });
+                } catch (Throwable t) {
+                    Log.w("FloatingBall", "zones: 读目录失败 " + message(t));
+                }
+            }, "hold-dirs").start();
+        }
+    }
+
+    /** 三级：某个目录下的会话。 */
+    private void openHoldSessions(final String dir) {
+        holdDir = dir;
+        List<HoldItem> items = new ArrayList<>();
+        if (dir.equals(prefetchDirPath)) {
+            for (int i = 0; i < Math.min(3, prefetchedSessions.size()); i++) {
+                DshApi.SessionRow r = prefetchedSessions.get(i);
+                items.add(new HoldItem(r.title == null || "null".equals(r.title)
+                                ? "（未命名会话）" : r.title,
+                        relTime(r.updatedAt), 1, r.id));
+            }
+        }
+        items.add(new HoldItem("在此新建会话", leaf(dir), 2, dir));
+        showCards(leaf(dir), items);
+        if (!dir.equals(prefetchDirPath)) {
+            final DshApi api = DshApi.get(this);
+            new Thread(() -> {
+                try {
+                    final List<DshApi.SessionRow> rows = api.sessionsIn(dir);
+                    main.post(() -> {
+                        prefetchDirPath = dir;
+                        prefetchedSessions = rows;
+                        if (zonesActive && holdLevel == 2 && dir.equals(holdDir)) openHoldSessions(dir);
+                    });
+                } catch (Throwable t) {
+                    Log.w("FloatingBall", "zones: 读会话失败 " + message(t));
+                }
+            }, "hold-sessions").start();
+        }
+    }
+
+    /** 卡片上屏（形状 + 文字一起换）。 */
+    private void showCards(String title, List<HoldItem> items) {
+        holdLevel = holdTitle.equals(title) && holdLevel > 0 ? holdLevel : 1;
+        holdLevelAt = android.os.SystemClock.uptimeMillis();
+        holdTitle = title;
+        holdItems.clear();
+        holdItems.addAll(items);
+        holdFocus = -1;
+        computeCardRects();
+        if (zonesView != null) {
+            zonesView.showCards(title, labels(), subs(), localRects(), holdTitleLocal,
+                    holdListLocal, -1);
+        }
+        pushCardScene();
+        Log.i("FloatingBall", "zones: 卡片「" + title + "」" + items.size() + " 项");
+        // 换级后**不**自动选中：手指要真的移到某一行上才算（否则停着不动会一路自动钻到底）
+        holdEnterY = lastHoldY;
+        holdFocusArmed = false;
+    }
+
+    private void closeCards() {
+        if (holdLevel == 0) return;
+        holdLevel = 0;
+        holdItems.clear();
+        holdFocus = -1;
+        holdDir = null;
+        main.removeCallbacks(holdItemDwell);
+        if (zonesView != null) zonesView.hideCards();
+        pushZoneScene();
+        Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到四区");
+    }
+
+    private String[] labels() {
+        String[] a = new String[holdItems.size()];
+        for (int i = 0; i < a.length; i++) a[i] = holdItems.get(i).label;
+        return a;
+    }
+
+    private String[] subs() {
+        String[] a = new String[holdItems.size()];
+        for (int i = 0; i < a.length; i++) a[i] = holdItems.get(i).sub;
+        return a;
+    }
+
+    /**
+     * 一张**整的**列表面板（用户 2026-10-23：「同一个列表不用切成多块」）：
+     * 标题 + n 行全在一张圆角玻璃里，行只是面板内部的条目，不是各自一张卡。
+     */
+    private void computeCardRects() {
+        int n = Math.max(1, holdItems.size());
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        float bw = Math.min(dp(260), winW - dp(36));
+        float th = dp(28);                 // 标题行
+        float rh = dp(36);                 // 每个条目
+        float pad = dp(8);
+        float total = th + n * rh + pad;
+        float cx = loc[0] + winW * 0.5f;
+        float cy = loc[1] + winH * 0.5f;
+        float left = cx - bw * 0.5f;
+        float top = cy - total * 0.5f;
+        holdListRect = new float[]{left, top, bw, total};
+        holdTitleRect = new float[]{left, top + pad * 0.5f, bw, th};
+        for (int i = 0; i < 5; i++) {
+            if (i < n) {
+                holdRects[i * 4] = left + pad;
+                holdRects[i * 4 + 1] = top + th + i * rh;
+                holdRects[i * 4 + 2] = bw - 2 * pad;
+                holdRects[i * 4 + 3] = rh;
+            } else {
+                holdRects[i * 4] = 0; holdRects[i * 4 + 1] = 0;
+                holdRects[i * 4 + 2] = 1; holdRects[i * 4 + 3] = 1;
+            }
+        }
+    }
+
+    private float[] localRects() {
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        float[] out = new float[holdItems.size() * 4];
+        if (holdTitleRect != null) {
+            holdTitleLocal = new float[]{holdTitleRect[0] - loc[0], holdTitleRect[1] - loc[1],
+                    holdTitleRect[2], holdTitleRect[3]};
+        }
+        if (holdListRect != null) {
+            holdListLocal = new float[]{holdListRect[0] - loc[0], holdListRect[1] - loc[1],
+                    holdListRect[2], holdListRect[3]};
+        }
+        for (int i = 0; i < holdItems.size(); i++) {
+            out[i * 4] = holdRects[i * 4] - loc[0];
+            out[i * 4 + 1] = holdRects[i * 4 + 1] - loc[1];
+            out[i * 4 + 2] = holdRects[i * 4 + 2];
+            out[i * 4 + 3] = holdRects[i * 4 + 3];
+        }
+        return out;
+    }
+
+    /** 列表的玻璃形状：**一个**圆角矩形（标题和所有行都在里面）。 */
+    private void pushCardScene() {
+        if (renderer == null || holdListRect == null) return;
+        float[] s = new float[20];
+        float[] m = new float[20];
+        s[0] = holdListRect[0] + holdListRect[2] * 0.5f;
+        s[1] = holdListRect[1] + holdListRect[3] * 0.5f;
+        s[2] = holdListRect[2] * 0.5f;
+        s[3] = holdListRect[3] * 0.5f;
+        m[0] = 0f; m[1] = 0.72f; m[2] = 0.14f; m[3] = 1f;   // 圆角 ≈ 20dp
+        for (int i = 1; i < 5; i++) {
+            s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
+            m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
+        }
+        renderer.zShape = s;
+        renderer.zMeta = m;
+        renderer.zoneMode = true;
+    }
+
+    /** 松手：不管在哪一级，都回初始状态（"松手则恢复初始状态"）。 */
+    void finishZones(boolean cancelled) {
+        if (!zonesActive) return;
+        Log.i("FloatingBall", "zones: 松手 → 回初始状态（level=" + holdLevel + "）");
+        exitZones();
+        armVoice("状态3 松手回到初始态");
+    }
+
+    private void openDshSettings(String why) {
+        Log.i("FloatingBall", "settings: 打开 DSH 自己的设置界面（" + why + "）");
+        try {
+            Intent i = new Intent(this, DshSettingsActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            toast("打不开 DSH 设置：" + message(t));
+        }
+    }
+
+    private void exitZones() {
+        zonesActive = false;
+        zoneActive = -1;
+        if (zonesView != null) {
+            zonesView.hideCards();
+            zonesView.setVisibility(View.GONE);
+        }
+        if (renderer != null) {
+            renderer.zoneMode = false;
+            renderer.zShape = new float[20];
+            renderer.zMeta = new float[20];
+        }
+        // 回到球：几何/文字按当前状态重排（和搜索层收起时同一套收尾）
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
+        if (siriEnabled) {
+            float base = winSize * 0.9f;
+            updateSiriWindow(base * minHalfX, base * minHalfY);
+            measureSiriTargets(siriStr);
+            clampBallOnScreen();
+        }
+        applyBallTouchability();
+    }
+
+    // ── 玻璃面板 = **一个小悬浮窗**（不是全屏层）────────────────────────────
+    // 用户 2026-10-23 的要求：「一切东西都是小悬浮窗的形式……尽可能小到不影响用户正常操作」。
+    // 所以菜单不再铺满整屏：GL 窗口缩到"面板 + 一圈边距"，贴着球的位置摆；
+    // 面板以外的屏幕完全归用户（球在菜单打开期间不参与绘制，触摸代理也不接管）。
+
+    private void enterGlassPanel(int x, int y, int w, int h) {
+        if (wm == null || glView == null || params == null) return;
+        glassFullscreen = true;                    // 复用一个标志：玻璃窗 ≠ 球窗
+        int m = Math.round(dp(14));
+        int W = Math.min(screenW, w + 2 * m);
+        int H = Math.min(screenH, h + 2 * m);
+        int wx = Math.max(0, Math.min(screenW - W, x - m));
+        int wy = Math.max(0, Math.min(screenH - H, y - m));
+        glassBufW = glassBufH = -1;
+        try { glView.getHolder().setFixedSize(0, 0); } catch (Throwable ignored) { }
+        winW = W;
+        winH = H;
+        params.width = W;
+        params.height = H;
+        params.x = wx;
+        params.y = wy - Math.round(winY0());
+        params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        glView.post(winSync);
+        applyBallTouchability();
+        Log.i("FloatingBall", "glass panel window " + W + "x" + H + " @(" + wx + "," + wy + ")");
+    }
+
+    /** 收回球窗（菜单关掉之后）。 */
+    private void exitGlassPanel() {
+        if (!glassFullscreen) return;
+        glassFullscreen = false;
+        if (renderer != null) renderer.zoneMode = false;
+        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
+        if (params != null) {
+            params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED;
+        }
+        if (glView != null && params != null) {
+            float base = winSize * 0.9f;
+            updateSiriWindow(base * minHalfX, base * minHalfY);
+            measureSiriTargets(siriStr);
+            clampBallOnScreen();
+        }
+        applyBallTouchability();
+    }
+
+    // ══════ 对话卡（状态 3 选完目录/会话、状态 2 的搜索选完都进这里）══════
+    // 用户 2026-10-23：「对话框没做出来，直接复用球最终恢复的那个大方形加个输入和侧栏按钮即可」。
+    // 所以这里不新造界面：球的方形（Siri 文字态）+ 底部一条输入 + 左边一个侧栏按钮。
+
+    private boolean convoOpen = false;
+    private String convoSessionId = null, convoTitle = null;
+    private BallSearchBar convoBar;
+    private WindowManager.LayoutParams convoBarParams;
+    private android.widget.TextView convoSideBtn;
+    private WindowManager.LayoutParams convoSideParams;
+
+    void openConversation(final String sid, final String title) {
+        if (sid == null || sid.isEmpty()) return;
+        convoOpen = true;
+        convoSessionId = sid;
+        convoTitle = title == null || title.trim().isEmpty() || "null".equals(title) ? "对话" : title;
+        targetSessionId = sid;
+        targetSessionTitle = title;
+        ensureSiriForAssistant();          // 让球进入方形文字态
+        Log.i("FloatingBall", "convo: 进入对话「" + title + "」" + sid);
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String text = "";
+                try { text = api.lastAnswer(sid); }
+                catch (Throwable t) { Log.w("FloatingBall", "convo: 读最后回答失败 " + message(t)); }
+                final String tt = text;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (!convoOpen || !sid.equals(convoSessionId)) return;
+                        if (tt != null && !tt.trim().isEmpty()) setSiriText(tt);
+                        else setSiriText("（这个对话还没有回复）");
+                    }
+                });
+            }
+        }, "convo-load").start();
+        showConvoChrome(convoTitle);
+    }
+
+    private void showConvoChrome(final String title) {
+        if (wm == null) return;
+        if (convoBar == null) {
+            BallSearchBar bar = new BallSearchBar(this);
+            bar.setHint("发消息给「" + (title == null ? "对话" : title) + "」");
+            bar.setListener(new BallSearchBar.Listener() {
+                @Override public void onSubmit(String text) {
+                    String t = text == null ? "" : text.trim();
+                    if (t.isEmpty() || convoSessionId == null) return;
+                    if (convoBar != null) convoBar.setText("");
+                    Log.i("FloatingBall", "convo: 发送「" + t + "」");
+                    sendTextToSession(convoSessionId, t, null, null);
+                }
+                @Override public void onLongPressAdd() { pickAttachment(); }
+                @Override public void onTwoFingerHold() { openSettingsMenu(); }
+                @Override public void onAttachmentTap() { clearAttachment(); }
+                @Override public void onTapEdit() {
+                    if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
+                }
+            });
+            convoBarParams = overlayParams(2, 2,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            convoBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+            try { wm.addView(bar, convoBarParams); convoBar = bar; }
+            catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
+        }
+        if (convoSideBtn == null) {
+            android.widget.TextView b = new android.widget.TextView(this);
+            b.setText("侧栏");
+            b.setTextColor(0xF2FFFFFF);
+            b.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, dp(11));
+            b.setGravity(Gravity.CENTER);
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0x33000000);
+            bg.setCornerRadius(dp(18));
+            bg.setStroke(Math.round(dp(0.8f)), 0x40FFFFFF);
+            b.setBackground(bg);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    Log.i("FloatingBall", "convo: 打开侧栏（会话列表）");
+                    runSessionSearch("");       // 复用会话列表面板
+                }
+            });
+            convoSideParams = overlayParams(Math.round(dp(52)), Math.round(dp(36)),
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            try { wm.addView(b, convoSideParams); convoSideBtn = b; }
+            catch (Throwable t) { Log.w("FloatingBall", "convo side failed: " + t); }
+        }
+        int side = Math.round(dp(52));
+        int w = Math.min(screenW - 2 * side - Math.round(dp(36)), Math.round(dp(520)));
+        int h = Math.round(dp(48));
+        int x = (screenW - w) / 2 + side / 2;
+        int y = Math.round(screenH * 0.70f);
+        convoBarParams.width = w;
+        convoBarParams.height = h;
+        convoBarParams.x = x;
+        convoBarParams.y = y - Math.round(winY0());
+        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+        convoSideParams.x = Math.max(Math.round(dp(8)), x - side - Math.round(dp(8)));
+        convoSideParams.y = y + (h - Math.round(dp(36))) / 2 - Math.round(winY0());
+        try { wm.updateViewLayout(convoSideBtn, convoSideParams); } catch (Throwable ignored) { }
+        convoBar.setVisibility(View.VISIBLE);
+        convoBar.resetMaterial();
+        convoBar.materialize(true, 0);      // 凝聚出现（构造时 alpha=0，不调这个就永远看不见）
+        convoSideBtn.setVisibility(View.VISIBLE);
+    }
+
+    private void showConvoIme() {
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null && convoBar != null) imm.showSoftInput(convoBar.input(), 0);
+        } catch (Throwable ignored) { }
+    }
+
+    private void closeConversation(String why) {
+        if (!convoOpen) return;
+        convoOpen = false;
+        Log.i("FloatingBall", "convo: 退出对话（" + why + "）");
+        try {
+            if (convoBar != null && wm != null) wm.removeView(convoBar);
+        } catch (Throwable ignored) { }
+        convoBar = null;
+        try {
+            if (convoSideBtn != null && wm != null) wm.removeView(convoSideBtn);
+        } catch (Throwable ignored) { }
+        convoSideBtn = null;
+        convoSessionId = null;
+        setSiriText("");
+        armVoice("对话关闭回到初始态");
+    }
+
+    // ── 状态 2 暂存：菜单是小窗，胶囊那层收不起来 → 开菜单时先收起胶囊，关掉再放回来 ──
+
+    private String stashedBarText = null;
+    private String stashedBarHint = null;
+    private boolean stashedBarFocus = true;
+
+    private void stashBarIfOpen() {
+        if (!searchActive || searchBar == null) return;
+        stashedBarText = searchBar.text();
+        stashedBarHint = null;
+        stashedBarFocus = true;
+        Log.i("FloatingBall", "menu: 暂存状态 2 的文字「" + stashedBarText + "」");
+        dropSearchNow();
+    }
+
+    /** 立刻拆掉搜索层（不播收回动画）：菜单要独占那块玻璃窗。 */
+    private void dropSearchNow() {
+        searchActive = false;
+        searchClosing = false;
+        searchOpen = false;
+        glassFullscreen = false;
+        hideSearchIme();
+        removeSearchWindows();
+        if (renderer != null) renderer.searchMode = false;
+        applyBallTouchability();
+    }
+
+    private void restoreBarIfStashed() {
+        String t = stashedBarText;
+        if (t == null) return;
+        stashedBarText = null;
+        enterSearchMode("菜单关闭：回到状态 2", t, stashedBarFocus, barPurpose);
+    }
+
+    // ── 玻璃菜单（工作目录 / 会话 / 参数）：面板由 GL 画，文字在 menuView 里 ──
+
+    private void ensureMenuWindows() {
+        if (wm == null) return;
+        if (menuOutside == null) {
+            View v = new View(this);
+            v.setBackgroundColor(0x00000000);
+            v.setClickable(true);
+            menuOutsideParams = overlayParams(screenW, screenH,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            menuOutsideParams.x = 0;
+            menuOutsideParams.y = -Math.round(winY0());
+            menuOutsideParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+            v.setOnTouchListener(new View.OnTouchListener() {
+                boolean sawDown = false;
+                @Override public boolean onTouch(View view, MotionEvent e) {
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            sawDown = true;
+                            return true;
+                        case MotionEvent.ACTION_UP: {
+                            if (!sawDown) return true;
+                            sawDown = false;
+                            if (android.os.SystemClock.uptimeMillis() < menuArmAt) return true;
+                            float x = e.getRawX(), y = e.getRawY();
+                            if (menuRect != null && x > menuRect[0] && x < menuRect[0] + menuRect[2]
+                                    && y > menuRect[1] && y < menuRect[1] + menuRect[3]) {
+                                return true;                 // 落在面板上：交给面板那层
+                            }
+                            hideMenu("点空白处");
+                            return true;
+                        }
+                        case MotionEvent.ACTION_CANCEL:
+                            sawDown = false;
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+            try { wm.addView(v, menuOutsideParams); menuOutside = v; }
+            catch (Throwable t) { Log.w("FloatingBall", "add menu outside failed: " + t); }
+        }
+        if (menuView == null) {
+            BallGlassMenu m = new BallGlassMenu(this);
+            menuViewParams = overlayParams(2, 2,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+            menuViewParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+            m.setListener(new BallGlassMenu.Listener() {
+                @Override public void onRow(int index) { onMenuRow(index); }
+                @Override public void onDismiss() { hideMenu("面板返回"); }
+            });
+            try { wm.addView(m, menuViewParams); menuView = m; }
+            catch (Throwable t) { Log.w("FloatingBall", "add menu view failed: " + t); }
+        }
+    }
+
+    /**
+     * 打开一块**小**液玻璃面板（贴着球、最多 5 行可见，不再铺满屏幕）。
+     * 面板形状交给 zone 着色器画 —— 和第 3 状态的四个圆同一套材质。
+     */
+    private void showMenu(String path, String title, String subtitle,
+                          List<BallGlassMenu.Row> rows, String returnPath) {
+        if (wm == null || glView == null) return;
+        if (!menuShown) stashBarIfOpen();             // 第一次开：先把状态 2 收起来
+        menuPath = path;
+        menuReturnPath = returnPath == null ? "" : returnPath;
+
+        int rowHdp = 34;
+        int w = Math.min(Math.round(screenW * 0.62f), Math.round(dp(268)));
+        int headerH = Math.round(dp(14 + 18 + (subtitle == null || subtitle.isEmpty() ? 4 : 16)));
+        int visible = Math.max(1, Math.min(rows.size(), 5));
+        int h = Math.round(headerH + visible * dp(rowHdp) + dp(10));
+        h = Math.min(h, Math.round(screenH * 0.48f));
+        // 贴着球：横向居中于球心，纵向尽量压在球的位置（球此时不画），但不越界
+        int ballCx = screenW / 2;
+        if (glView != null && !glassFullscreen) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            ballCx = loc[0] + winW / 2;
+        }
+        int x = Math.max(Math.round(dp(8)), Math.min(screenW - w - Math.round(dp(8)), ballCx - w / 2));
+        int y = Math.round(screenH * 0.5f - h / 2f);
+        if (glView != null && !glassFullscreen) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            int ballCy = loc[1] + winH / 2;
+            y = ballCy - h / 2;                       // 正压在球的位置（球此时不画）
+        }
+        y = Math.max(Math.round(dp(40)), Math.min(screenH - h - Math.round(dp(40)), y));
+        menuRect = new float[]{x, y, w, h};
+
+        enterGlassPanel(x, y, w, h);
+        ensureMenuWindows();
+        if (menuView == null) return;
+        menuViewParams.width = w;
+        menuViewParams.height = h;
+        menuViewParams.x = x;
+        menuViewParams.y = y - Math.round(winY0());
+        try { wm.updateViewLayout(menuView, menuViewParams); } catch (Throwable ignored) { }
+        menuView.setContent(title, subtitle, rows);
+        menuView.setVisibility(View.VISIBLE);
+        menuShown = true;
+        menuArmAt = android.os.SystemClock.uptimeMillis() + 700;
+        pushMenuScene();
+        Log.i("FloatingBall", "menu: " + path + " 「" + title + "」 " + rows.size() + " 行 "
+                + w + "x" + h + " @(" + x + "," + y + ")");
+    }
+
+    /** 面板形状交给 zone 着色器（窗口已经是面板 + 边距那一小块）。 */
+    private void pushMenuScene() {
+        if (renderer == null || menuRect == null) return;
+        float[] s = new float[20];
+        float[] m = new float[20];
+        s[0] = menuRect[0] + menuRect[2] * 0.5f;
+        s[1] = menuRect[1] + menuRect[3] * 0.5f;
+        s[2] = menuRect[2] * 0.5f;
+        s[3] = menuRect[3] * 0.5f;
+        m[0] = 0f; m[1] = 0.12f; m[2] = 0.22f;   // 面板圆角 = 0.22 × 半高（≈22dp），不是椭圆
+        m[3] = 1f;
+        for (int i = 1; i < 5; i++) {
+            s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
+            m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
+        }
+        renderer.zShape = s;
+        renderer.zMeta = m;
+        renderer.zoneMode = true;
+        renderer.sHlAmt = 1.5f;
+        renderer.sAb = 0.12f;
+        renderer.sDensity = sqDensity();
+        renderer.zCont = 0.82f;
+        renderer.zRefract = 14f;
+    }
+
+    void hideMenu(String why) {
+        if (!menuShown) return;
+        menuShown = false;
+        menuPath = "";
+        menuRect = null;
+        if (menuView != null) menuView.setVisibility(View.GONE);
+        Log.i("FloatingBall", "menu: 关闭（" + why + "）");
+        removeMenuWindows();
+        exitGlassPanel();
+        applyBallTouchability();
+        restoreBarIfStashed();               // 是从状态 2 进来的就把胶囊放回去
+        armVoice("菜单关闭回到初始态");
+    }
+
+    private void removeMenuWindows() {
+        if (menuView != null && wm != null) {
+            try { wm.removeView(menuView); } catch (Throwable ignored) { }
+            menuView = null;
+            menuViewParams = null;
+        }
+        if (menuOutside != null && wm != null) {
+            try { wm.removeView(menuOutside); } catch (Throwable ignored) { }
+            menuOutside = null;
+            menuOutsideParams = null;
+        }
+    }
+
+    // ── 菜单内容：工作目录（二级）→ 会话（三级）────────────────────────────
+    // 注意：**所有 RPC 都在后台线程先跑完、把结果缓存下来**，菜单点击只读缓存 + 改 prefs，
+    //       绝不在主线程上等网络（主线程卡 1 秒就会把球的动画和触摸一起拖死）。
+
+    private List<String> cacheDirs = new ArrayList<>();
+    private String cacheBrowsePath = null;
+    private List<String> cacheBrowseDirs = new ArrayList<>(), cacheBrowseNames = new ArrayList<>();
+    private String cacheSessionsDir = null;
+    private List<DshApi.SessionRow> cacheSessions = new ArrayList<>();
+    private String cacheSearchQuery = null;
+    private List<DshApi.SessionRow> cacheSearch = new ArrayList<>();
+    private List<DshApi.Opt> cachePresets = new ArrayList<>();
+    private List<DshApi.Opt> cachePerms = new ArrayList<>();
+    private List<DshApi.Model> cacheModels = new ArrayList<>();
+    private List<DshApi.Opt> cacheEfforts = new ArrayList<>();
+
+    private void openDirsMenu() {
+        showMenu("dirs", "工作目录", "最近用过的目录", new ArrayList<BallGlassMenu.Row>() {{
+            add(new BallGlassMenu.Row("载入中…", "", true));
+        }}, "");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final List<String> dirs = api.recentDirs();
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheDirs = dirs;
+                            if (!"dirs".equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            for (String dir : dirs) rows.add(new BallGlassMenu.Row(leaf(dir), dir, false));
+                            rows.add(new BallGlassMenu.Row("浏览目录…", "从根目录逐层选", false));
+                            rows.add(new BallGlassMenu.Row("关闭", "", true));
+                            showMenu("dirs", "工作目录", dirs.size() + " 个最近目录", rows, "");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读工作目录失败", t);
+                }
+            }
+        }, "dsh-dirs").start();
+    }
+
+    private void openDirsBrowse(final String dir) {
+        showMenu("browse:" + dir, "浏览目录", dir == null ? "" : dir,
+                new ArrayList<BallGlassMenu.Row>() {{
+                    add(new BallGlassMenu.Row("载入中…", "", true));
+                }}, "dirs");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final DshApi.DirList list = api.listDir(dir);
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheBrowsePath = list.path;
+                            cacheBrowseDirs = list.dirs;
+                            cacheBrowseNames = list.names;
+                            if (!("browse:" + list.path).equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            int n = Math.min(list.dirs.size(), 24);
+                            for (int i = 0; i < n; i++) {
+                                rows.add(new BallGlassMenu.Row(list.names.get(i), list.dirs.get(i), false));
+                            }
+                            rows.add(new BallGlassMenu.Row("在这里新建会话", list.path, false));
+                            rows.add(new BallGlassMenu.Row("返回", "回到最近目录", true));
+                            showMenu("browse:" + list.path, "浏览目录", list.path, rows, "dirs");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("列目录失败", t);
+                }
+            }
+        }, "dsh-browse").start();
+    }
+
+    private void openSessionsForDir(final String dir) {
+        showMenu("sessions:" + dir, leaf(dir), "该目录下的会话",
+                new ArrayList<BallGlassMenu.Row>() {{
+                    add(new BallGlassMenu.Row("载入中…", "", true));
+                }}, "dirs");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final List<DshApi.SessionRow> rows = api.sessionsIn(dir);
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheSessionsDir = dir;
+                            cacheSessions = rows;
+                            if (!("sessions:" + dir).equals(menuPath)) return;
+                            List<BallGlassMenu.Row> out = new ArrayList<>();
+                            for (DshApi.SessionRow r : rows) {
+                                out.add(new BallGlassMenu.Row(r.title,
+                                        (r.running ? "进行中 · " : "") + relTime(r.updatedAt), false));
+                            }
+                            out.add(new BallGlassMenu.Row("在这里新建会话", dir, false));
+                            out.add(new BallGlassMenu.Row("返回", "回到工作目录", true));
+                            showMenu("sessions:" + dir, leaf(dir), rows.size() + " 条会话", out, "dirs");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读会话失败", t);
+                }
+            }
+        }, "dsh-dir-sessions").start();
+    }
+
+    // ── 会话搜索（右上角圆区 / 状态 2 的搜索模式）──────────────────────────
+
+    /**
+     * 「搜索会话」= 前端侧栏 `bhn1Oq_searchButton` 的行为：**本地按标题过滤**。
+     * 本部署把 DSH 的内容检索索引关了（`session/search` 直接报 disabled），所以不走它。
+     */
+    private void runSessionSearch(final String query) {
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final List<DshApi.SessionRow> rows = api.searchSessions(query);
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheSearchQuery = query;
+                            cacheSearch = rows;
+                            List<BallGlassMenu.Row> out = new ArrayList<>();
+                            for (DshApi.SessionRow r : rows) {
+                                out.add(new BallGlassMenu.Row(r.title,
+                                        (r.running ? "进行中 · " : "") + relTime(r.updatedAt), false));
+                            }
+                            if (rows.isEmpty()) out.add(new BallGlassMenu.Row("没有匹配的会话", "", true));
+                            out.add(new BallGlassMenu.Row("关闭", "", true));
+                            showMenu("search", "搜索会话", rows.size() + " 条匹配 · " + query, out, "");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("搜索失败", t);
+                }
+            }
+        }, "dsh-search").start();
+    }
+
+    // ── 参数（Agent 预设 / 模型 / 推理等级 / 权限 / 发送目录）──────────────
+
+    private void openSettingsMenu() {
+        List<BallGlassMenu.Row> rows = new ArrayList<>();
+        rows.add(new BallGlassMenu.Row("Agent 预设", cur("send_preset", "跟随默认"), false));
+        String modelName = prefs().getString("send_model", "");
+        rows.add(new BallGlassMenu.Row("模型", modelName.isEmpty() ? "跟随默认" : modelName, false));
+        String effort = prefs().getString("send_effort", "");
+        rows.add(new BallGlassMenu.Row("推理等级", effort.isEmpty() ? "跟随模型默认" : effort, false));
+        rows.add(new BallGlassMenu.Row("权限", cur("send_perm", "跟随默认"), false));
+        rows.add(new BallGlassMenu.Row("发送目录", cur("send_cwd", "跟随 DSH 默认"), false));
+        rows.add(new BallGlassMenu.Row("关闭", "", true));
+        showMenu("settings", "参数", "下一次发送时生效", rows, "");
+    }
+
+    private String cur(String key, String def) {
+        String v = prefs().getString(key, "");
+        return v == null || v.isEmpty() ? def : v;
+    }
+
+    private void openPresetMenu() {
+        showMenu("preset", "Agent 预设", "新会话用的预设",
+                new ArrayList<BallGlassMenu.Row>() {{ add(new BallGlassMenu.Row("载入中…", "", true)); }},
+                "settings");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final List<DshApi.Opt> opts = api.agentPresets();
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cachePresets = opts;
+                            if (!"preset".equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            String curId = prefs().getString("send_preset", "");
+                            for (DshApi.Opt o : opts) {
+                                rows.add(new BallGlassMenu.Row(
+                                        (o.id.equals(curId) ? "✓ " : "") + o.name, o.desc, false));
+                            }
+                            rows.add(new BallGlassMenu.Row("返回", "", true));
+                            showMenu("preset", "Agent 预设", "新会话用的预设", rows, "settings");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读预设失败", t);
+                }
+            }
+        }, "dsh-presets").start();
+    }
+
+    private void openPermMenu() {
+        showMenu("perm", "权限", "沙箱模式 + 审批策略",
+                new ArrayList<BallGlassMenu.Row>() {{ add(new BallGlassMenu.Row("载入中…", "", true)); }},
+                "settings");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final List<DshApi.Opt> opts = api.permissionPresets();
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cachePerms = opts;
+                            if (!"perm".equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            String curId = prefs().getString("send_perm", "");
+                            for (DshApi.Opt o : opts) {
+                                rows.add(new BallGlassMenu.Row(
+                                        (o.id.equals(curId) ? "✓ " : "") + o.name, "", false));
+                            }
+                            rows.add(new BallGlassMenu.Row("返回", "", true));
+                            showMenu("perm", "权限", "沙箱模式 + 审批策略", rows, "settings");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读权限档失败", t);
+                }
+            }
+        }, "dsh-perms").start();
+    }
+
+    private void openModelMenu() {
+        showMenu("model", "模型", "下一次发送用这个模型",
+                new ArrayList<BallGlassMenu.Row>() {{ add(new BallGlassMenu.Row("载入中…", "", true)); }},
+                "settings");
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final DshApi.Catalog cat = api.modelCatalog();
+                    final List<DshApi.Model> models = new ArrayList<>();
+                    final List<String> groupNames = new ArrayList<>();
+                    for (DshApi.ModelGroup g : cat.groups) {
+                        for (DshApi.Model m : g.models) { models.add(m); groupNames.add(g.name); }
+                    }
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheModels = models;
+                            if (!"model".equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            String curId = prefs().getString("send_model", "");
+                            for (int i = 0; i < models.size(); i++) {
+                                DshApi.Model m = models.get(i);
+                                rows.add(new BallGlassMenu.Row(
+                                        (m.id.equals(curId) ? "✓ " : "") + m.name,
+                                        groupNames.get(i) + " · " + m.id, false));
+                            }
+                            rows.add(new BallGlassMenu.Row("返回", "", true));
+                            showMenu("model", "模型", "下一次发送用这个模型", rows, "settings");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读模型目录失败", t);
+                }
+            }
+        }, "dsh-models").start();
+    }
+
+    private void openEffortMenu() {
+        showMenu("effort", "推理等级", "",
+                new ArrayList<BallGlassMenu.Row>() {{ add(new BallGlassMenu.Row("载入中…", "", true)); }},
+                "settings");
+        final DshApi api = DshApi.get(this);
+        final String provider = prefs().getString("send_provider", "");
+        final String model = prefs().getString("send_model", "");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final DshApi.Catalog cat = api.modelCatalog();
+                    DshApi.Model m = model.isEmpty() ? null : cat.find(provider, model);
+                    if (m == null) m = cat.first();
+                    final DshApi.Model mm = m;
+                    final List<DshApi.Opt> efforts = m == null ? new ArrayList<DshApi.Opt>() : m.efforts;
+                    main.post(new Runnable() {
+                        @Override public void run() {
+                            cacheEfforts = efforts;
+                            if (!"effort".equals(menuPath)) return;
+                            List<BallGlassMenu.Row> rows = new ArrayList<>();
+                            String curId = prefs().getString("send_effort", "");
+                            for (DshApi.Opt o : efforts) {
+                                rows.add(new BallGlassMenu.Row(
+                                        (o.id.equals(curId) ? "✓ " : "") + o.name, o.desc, false));
+                            }
+                            if (rows.isEmpty()) {
+                                rows.add(new BallGlassMenu.Row("这个模型没有推理档", "", true));
+                            }
+                            rows.add(new BallGlassMenu.Row("返回", "", true));
+                            showMenu("effort", "推理等级", mm == null ? "" : mm.name, rows, "settings");
+                        }
+                    });
+                } catch (Throwable t) {
+                    fail("读推理档失败", t);
+                }
+            }
+        }, "dsh-efforts").start();
+    }
+
+    private void fail(final String what, Throwable t) {
+        final String m = message(t);
+        Log.w("FloatingBall", what + "：" + m);
+        main.post(new Runnable() {
+            @Override public void run() { toast(what + "：" + m); }
+        });
+    }
+
+    /** 菜单点击分发：只读缓存 / 改 prefs / 切菜单，**不做网络**。 */
+    private void onMenuRow(int index) {
+        final String path = menuPath;
+        Log.i("FloatingBall", "menu: 点击 " + path + " #" + index);
+        if (path.isEmpty()) return;
+        if (path.equals("dirs")) {
+            if (index < cacheDirs.size()) { openSessionsForDir(cacheDirs.get(index)); return; }
+            if (index == cacheDirs.size()) { openDirsBrowse("/data/data/com.termux/files/home"); return; }
+            hideMenu("关闭");
+            return;
+        }
+        if (path.startsWith("browse:")) {
+            String dir = path.substring("browse:".length());
+            int n = Math.min(cacheBrowseDirs.size(), 24);
+            if (index < n) { openDirsBrowse(cacheBrowseDirs.get(index)); return; }
+            if (index == n) {
+                prefs().edit().putString("send_cwd", dir).apply();
+                targetSessionId = null; targetSessionTitle = null;
+                hideMenu("选定目录");
+                enterSearchMode("工作目录：新建会话", "", true, BAR_SEND);
+                return;
+            }
+            openDirsMenu();
+            return;
+        }
+        if (path.startsWith("sessions:")) {
+            String dir = path.substring("sessions:".length());
+            if (index < cacheSessions.size()) {
+                DshApi.SessionRow r = cacheSessions.get(index);
+                targetSessionId = r.id;
+                targetSessionTitle = r.title;
+                prefs().edit().putString("send_cwd", r.cwd).apply();
+                hideMenu("选定会话");
+                enterSearchMode("发给「" + r.title + "」", "", true, BAR_SEND);
+                return;
+            }
+            if (index == cacheSessions.size()) {
+                prefs().edit().putString("send_cwd", dir).apply();
+                targetSessionId = null; targetSessionTitle = null;
+                hideMenu("目录新建");
+                enterSearchMode("工作目录：新建会话", "", true, BAR_SEND);
+                return;
+            }
+            openDirsMenu();
+            return;
+        }
+        if (path.equals("search")) {
+            if (index < cacheSearch.size()) {
+                DshApi.SessionRow r = cacheSearch.get(index);
+                targetSessionId = r.id;
+                targetSessionTitle = r.title;
+                hideMenu("选定会话");
+                if (searchActive && searchBar != null) {
+                    searchBar.setHint("发给：" + r.title);
+                    searchBar.focusInput();
+                } else {
+                    // 侧栏/搜索里选了一条 → 进的就是"方形对话卡"
+                    openConversation(r.id, r.title);
+                }
+                toast("已选：" + r.title);
+                return;
+            }
+            hideMenu("关闭");
+            return;
+        }
+        if (path.equals("settings")) {
+            switch (index) {
+                case 0: openPresetMenu(); return;
+                case 1: openModelMenu(); return;
+                case 2: openEffortMenu(); return;
+                case 3: openPermMenu(); return;
+                case 4: openDirsMenu(); return;
+                default: hideMenu("关闭"); return;
+            }
+        }
+        if (path.equals("preset")) {
+            if (index < cachePresets.size()) {
+                prefs().edit().putString("send_preset", cachePresets.get(index).id).apply();
+                toast("预设：" + cachePresets.get(index).name);
+            }
+            openSettingsMenu();
+            return;
+        }
+        if (path.equals("perm")) {
+            if (index < cachePerms.size()) {
+                prefs().edit().putString("send_perm", cachePerms.get(index).id).apply();
+                toast("权限：" + cachePerms.get(index).name);
+            }
+            openSettingsMenu();
+            return;
+        }
+        if (path.equals("model")) {
+            if (index < cacheModels.size()) {
+                DshApi.Model m = cacheModels.get(index);
+                prefs().edit().putString("send_provider", m.provider)
+                        .putString("send_model", m.id)
+                        .putString("send_effort", m.defaultEffort == null ? "" : m.defaultEffort)
+                        .apply();
+                toast("模型：" + m.name);
+            }
+            openSettingsMenu();
+            return;
+        }
+        if (path.equals("effort")) {
+            if (index < cacheEfforts.size()) {
+                prefs().edit().putString("send_effort", cacheEfforts.get(index).id).apply();
+                toast("推理：" + cacheEfforts.get(index).name);
+            }
+            openSettingsMenu();
+            return;
+        }
+        hideMenu("未知菜单");
+    }
+
+    private static String leaf(String path) {
+        if (path == null || path.isEmpty()) return "";
+        int i = path.lastIndexOf('/');
+        return i >= 0 && i + 1 < path.length() ? path.substring(i + 1) : path;
+    }
+
+    private static String relTime(long at) {
+        if (at <= 0) return "";
+        long ms = System.currentTimeMillis() - at;
+        if (ms < 60_000L) return "刚刚";
+        if (ms < 3_600_000L) return (ms / 60_000L) + " 分钟前";
+        if (ms < 86_400_000L) return (ms / 3_600_000L) + " 小时前";
+        return (ms / 86_400_000L) + " 天前";
+    }
+
+    // ── 附件（= 前端输入框的 uV2eYG_add）──────────────────────────────────
+
+    /**
+     * 系统文件选择器回来（{@link BallAttachPickerActivity} 从任何界面调起都走这里）：
+     * 记下附件，并把状态 2 拉回来 —— 胶囊里能看到刚选中的文件名（用户要求）。
+     */
+    static void onAttachmentPicked(final File file, final String name) {
+        final FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.pendingAttach = file;
+                s.pendingAttachName = name;
+                if (s.searchActive && s.searchBar != null) {
+                    s.searchBar.setAttachmentName(name);
+                    s.searchBar.focusInput();
+                    s.showSearchIme();
+                    Log.i("FloatingBall", "attach: 回到状态 2，胶囊里显示「" + name + "」");
+                } else {
+                    s.enterSearchMode("附件回来", "", true, BAR_SEND);
+                    s.main.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            if (s.searchBar != null) s.searchBar.setAttachmentName(name);
+                        }
+                    }, 900);
+                }
+            }
+        });
+    }
+
+    /** 长按状态 2 的胶囊：挑一个文件，发送时作为 file part 上传。 */
+    void pickAttachment() {
+        BallAttachPickerActivity.pick(this, new BallAttachPickerActivity.Result() {
+            @Override public void onPicked(File file, String name) {
+                pendingAttach = file;
+                pendingAttachName = name;
+                if (searchBar != null) searchBar.setAttachmentName(name);
+                Log.i("FloatingBall", "attach: 选中 " + name + " (" + file.length() + " 字节)");
+            }
+        });
+    }
+
+    private void clearAttachment() {
+        pendingAttach = null;
+        pendingAttachName = null;
+        if (searchBar != null) searchBar.setAttachmentName(null);
+    }
+
     // ═══════════ 搜索层：metaball-search.html 原样移植（双指长按唤起）═══════════
+
     //
     // 用户要求原话（2026-10-17，两次强调）：
     //   「它长按就隐藏球，然后出现小黑球，然后要和 Metaball→Search 页面里从顶部拿到的黑球
@@ -3996,7 +5793,7 @@ public class FloatingBallService extends Service {
     //
     // 唯一"我们自己的"部分是：① 唤起手势（双指长按，演示页是从顶部拖）；
     // ② 小黑球的出生点 = 球当时的球心（演示页是手指位置）；③ 胶囊里那行 DOM
-    //    （🔍 输入框 🎤）是安卓 View，不是网页 —— 版式仍照演示页的 #search 抄。
+    //    （🔍 输入框）是安卓 View，不是网页 —— 版式仍照演示页的 #search 抄。
 
     /** 演示页的 P（单位 = CSS px；安卓这边 1 CSS px = 1 dp，交给 shader 前再乘 density）。 */
     private static final float SQ_P_K = 64f;        // 融合半径 k
@@ -4016,6 +5813,8 @@ public class FloatingBallService extends Service {
     private static final long SQ_DROP_MS = 260;     // 小黑球先单独待一会儿再弹开（演示页是等人松手）
     private static final long SEARCH_HOLD_MS = 520; // 双指按住多久算"长按"（唤起搜索层）
 
+    private String barInitialText = "";
+    private boolean barAutoFocus = true;
     private boolean searchActive = false;      // 搜索层在屏上（含进场/出场动画）
     private boolean searchClosing = false;      // 正在出场（挡住重复进入）
     private boolean searchOpen = false;         // 胶囊已落定、可以打字
@@ -4028,7 +5827,6 @@ public class FloatingBallService extends Service {
     private View searchOutside;
     private WindowManager.LayoutParams searchOutsideParams;
     private int sqBarX = Integer.MIN_VALUE, sqBarY, sqBarW, sqBarH;
-    private boolean sqRecording = false;        // 麦克风正在录
 
     /** 一维欠阻尼弹簧（半隐式欧拉）—— 与 metaball-search.html 的 class Spring 逐行一致。 */
     private static final class MorphSpring {
@@ -4108,6 +5906,16 @@ public class FloatingBallService extends Service {
      * 所以：长按 = 液滴出生（DRAG 材质：深黑 + k=64），SQ_DROP_MS 之后自动"松手"。
      */
     void enterSearchMode(String why) {
+        enterSearchMode(why, "", true, BAR_SEND);
+    }
+
+    /**
+     * 状态 2 的入口（带内容与焦点策略）：
+     *   text      —— 语音打断留下的文字（要"保留在输入框里"）
+     *   autoFocus —— false = 只显示、不弹键盘（用户单击才进入编辑）
+     *   purpose   —— BAR_SEND（发消息）/ BAR_SEARCH（搜索会话，等于前端 bhn1Oq_searchButton）
+     */
+    void enterSearchMode(String why, String text, boolean autoFocus, int purpose) {
         if (searchActive || searchClosing) return;
         if (approvalShown || approvalClosing) {
             Log.i("FloatingBall", "search: 审批球在屏上，先不开搜索框");
@@ -4119,10 +5927,11 @@ public class FloatingBallService extends Service {
         searchActive = true;
         searchClosing = false;
         searchOpen = false;
+        barPurpose = purpose;
+        barInitialText = text == null ? "" : text;
+        barAutoFocus = autoFocus;
         sqPhase = 1;
         final long gen = ++searchGen;
-        SiriAssistant a = SiriAssistant.peek();
-        if (a != null) a.cancelListeningQuiet();     // 录音中 → 掐掉；正在问答的一轮不动它
         forceHideAllText();                          // 球内文字先藏掉（siriStr 留着，出来还在）
         applyBallTouchability();                     // 搜索期间屏幕归搜索层
         // ── 记下球此刻的屏幕球心（小黑球从这儿出生）── 必须在窗口改尺寸之前算
@@ -4190,9 +5999,25 @@ public class FloatingBallService extends Service {
         searchOpen = true;
         if (searchBar != null) {
             searchBar.setVisibility(View.VISIBLE);
+            searchBar.setHint(barPurpose == BAR_SEARCH ? "搜索会话" : "Search or Ask");
+            searchBar.setText(barInitialText);       // 语音识别结果留在输入框里
+            searchBar.setAttachmentName(pendingAttachName);
             searchBar.materialize(true, 0);          // 演示页 #search.appear：从模糊里凝聚（0.55s）
         }
-        focusSearchInput();
+        if (barAutoFocus) {
+            focusSearchInput();
+        } else {
+            // 不抢焦点：这样"单击一下"才等于"进入编辑"（状态 2 的语法）
+            main.removeCallbacks(searchFocusTask);
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (searchBar == null) return;
+                    searchBar.requestFocus();
+                    searchBar.blurInput();
+                    Log.i("FloatingBall", "search: 已落定（不弹键盘，等单击进入编辑）");
+                }
+            }, 240);
+        }
     }
 
     /** 演示页 retract()：被吸回顶部黑边（cy → EDGE*0.3、bx/by → 1、材质回深黑、容器淡出）。 */
@@ -4203,13 +6028,7 @@ public class FloatingBallService extends Service {
         sqPhase = 3;
         final long gen = ++searchGen;
         Log.i("FloatingBall", "search: 退出（" + why + "）");
-        if (sqRecording) {                            // 还在录音就先掐掉，别让麦克风一直开着
-            SiriAssistant a = SiriAssistant.peek();
-            if (a != null) a.cancelListeningQuiet();
-            sqRecording = false;
-        }
         if (searchBar != null) {
-            searchBar.setRecording(false);
             searchBar.materialize(false, 0);
         }
         hideSearchIme();
@@ -4250,6 +6069,7 @@ public class FloatingBallService extends Service {
             finishSearchClose(searchGen);
             return;
         }
+        if (menuShown) pushMenuScene();                // 面板开着时胶囊仍在弹：每帧把两个形状都递过去
         updateSearchWindows();
     }
 
@@ -4278,6 +6098,7 @@ public class FloatingBallService extends Service {
         if (gen != searchGen) return;
         Log.i("FloatingBall", "search: 收回到顶部黑边，交还给球");
         searchActive = false;                          // 先交还几何通道，下面立刻把窗口收回球窗
+        glassFullscreen = false;                       // ★ 面板标志不清，updateSiriWindow 会一直早退 → 球窗停在全屏、样式全变
         if (renderer != null) { renderer.searchMode = false; renderer.sValid = 0f; }
         float base = winSize * 0.9f;
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
@@ -4295,7 +6116,7 @@ public class FloatingBallService extends Service {
         }, 180);
     }
 
-    /** 演示页的搜索行（🔍 输入框 🎤）+ 一块全屏"点空白关掉"层。 */
+    /** 演示页的搜索行（🔍 输入框）+ 一块全屏"点空白关掉"层。 */
     private void ensureSearchWindows() {
         if (wm == null) return;
         if (searchOutside == null) {
@@ -4348,7 +6169,33 @@ public class FloatingBallService extends Service {
             BallSearchBar bar = new BallSearchBar(this);
             bar.setListener(new BallSearchBar.Listener() {
                 @Override public void onSubmit(String text) { submitSearch(text); }
-                @Override public void onMicTap() { onSearchMicTap(); }
+
+                @Override public void onTapEdit() {
+                    // 状态 2 的单击：进入编辑（弹键盘），文字已在这儿，不用再取一次
+                    focusSearchInput();
+                    if (searchBar != null) searchBar.focusInput();
+                    Log.i("FloatingBall", "search: 单击 → 进入编辑");
+                }
+
+                @Override public void onLongPressAdd() {
+                    // 长按 = 添附件（等价于前端输入框的 uV2eYG_add）
+                    Log.i("FloatingBall", "search: 长按 → 添附件");
+                    vibrate(18);
+                    pickAttachment();
+                }
+
+                @Override public void onTwoFingerHold() {
+                    // 双指长按 = Agent 预设 / 模型 / 推理等级 / 权限
+                    Log.i("FloatingBall", "search: 双指长按 → 参数弹窗");
+                    vibrate(28);
+                    hideSearchIme();
+                    openSettingsMenu();
+                }
+
+                @Override public void onAttachmentTap() {
+                    clearAttachment();
+                    toast("已移除附件");
+                }
             });
             // 故意**不带** FLAG_NOT_FOCUSABLE：悬浮窗能拿焦点，EditText 才收得到输入法
             // （审批面板那三个坑同源，见 HANDOFF「自由输入」一节）。
@@ -4461,78 +6308,120 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
     }
 
-    /** 键盘回车 / IME 发送：把文字交给 DSH（先收搜索层，再提问，回答落在球里）。 */
+    /**
+     * 键盘回车 / IME 发送（状态 2 的"回车"）：
+     *   · BAR_SEARCH → 按标题过滤会话，结果用同一套液玻璃面板列出来；
+     *   · BAR_SEND   → 有选中会话就发给它，否则按当前参数档（预设/模型/推理/权限/目录）
+     *                  新建一条会话再发；带了附件就先把附件传上去换成 receiptId。
+     * 发完/搜完都收起胶囊回初始状态（用户要求："发送完毕或者点击输入框以外的地方变回初始状态"）。
+     */
     private void submitSearch(String text) {
         final String t = text == null ? "" : text.trim();
-        if (t.isEmpty()) return;
-        Log.i("FloatingBall", "search: 发送 " + t.length() + " 字：" + t);
+        Log.i("FloatingBall", "search: 回车 → " + (barPurpose == BAR_SEARCH ? "搜索会话「" : "发送「")
+                + t + "」");
+        if (barPurpose == BAR_SEARCH) {
+            if (t.isEmpty()) return;
+            runSessionSearch(t);
+            return;
+        }
+        final File attach = pendingAttach;
+        final String attachName = pendingAttachName;
+        if (t.isEmpty() && attach == null) return;
         if (searchBar != null) {
             searchBar.setText("");
             searchBar.materialize(false, 0);
+            searchBar.setAttachmentName(null);
         }
         closeSearchMode("发送");
+        clearAttachment();
         main.postDelayed(new Runnable() {
             @Override public void run() {
-                SiriAssistant a = SiriAssistant.get(FloatingBallService.this);
-                if (a == null) return;
-                if (!a.enabled()) {
-                    Log.w("FloatingBall", "search: 语音助手没开，这句话没发出去");
-                    android.widget.Toast.makeText(FloatingBallService.this, "DSH 语音助手没开",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                ensureSiriForAssistant();
-                a.ask(t);
+                sendFromBar(t, attach, attachName);
             }
-        }, 700);            // 等球回来（收层 ≈ 0.5s）再提问，文字才不会撞上搜索层的几何
+        }, 480);            // 等胶囊收回去再发，文字才不会撞上搜索层的几何
     }
 
-    /**
-     * 胶囊里的麦克风：第一下开始录，第二下结束并发送（转写结果先填进输入框，再自动发）。
-     * 转写走 DSH 那条现成的 speech/transcribe（和双击球说话同一条路），
-     * 只是识别完的字交给搜索框，而不是写进球里。
-     */
-    private void onSearchMicTap() {
-        SiriAssistant a = SiriAssistant.get(this);
-        if (!a.enabled()) {
-            Log.w("FloatingBall", "search: 语音助手没开，麦克风不可用");
-            android.widget.Toast.makeText(this, "DSH 语音助手没开",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            return;
+    // ── 三态手势机的调试口子（和 search-open / state-* 同一套：一次性文件，用完即删）──
+    // 真机注入"长按不松手再滑到某个区"在当前工具链里做不到，所以把状态机每一步都开一个口子：
+    //   zone-open         → 进状态 3（不按手指也显示四个圆区）
+    //   zone-move         → 内容 tl/tr/bl/br：模拟手指悬停到对应区
+    //   zone-release      → 松手（有悬停就执行，没有就回初始状态）
+    //   bar-open          → 状态 2（发消息）
+    //   bar-search        → 状态 2（搜索会话）：内容 = 初始文字
+    //   bar-type          → 只填字（不发送）
+    //   voice-tap         → 等价于"识别过程中被点"：停麦 + 转写 + 进状态 2
+    //   menu-dirs / menu-settings / menu-search:<q> → 直接叫出对应玻璃菜单
+    private long nextGestureCheck = 0;
+
+    private void pumpGestureRequest() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now < nextGestureCheck) return;
+        nextGestureCheck = now + 120;
+        File dir = gateDir();
+        File fOpen = new File(dir, "zone-open");
+        if (fOpen.exists()) {
+            fOpen.delete();
+            Log.i("FloatingBall", "zones: 文件钩子 zone-open");
+            enterZones("文件钩子");
         }
-        if (sqRecording || a.isListening()) {
-            a.finishListening();
-            sqRecording = false;
-            if (searchBar != null) searchBar.setTranscribing();
-            return;
+        File fMove = new File(dir, "zone-move");
+        if (fMove.exists()) {
+            String t = readSmallString(fMove, 32).trim().toLowerCase();
+            fMove.delete();
+            int z = t.equals("tl") ? ZONE_TL : t.equals("tr") ? ZONE_TR
+                    : t.equals("bl") ? ZONE_BL : t.equals("br") ? ZONE_BR : -1;
+            if (z >= 0) updateHoldTouch(zoneCx[z], zoneCy[z]);
+            else Log.i("FloatingBall", "zones: zone-move 内容不认识：" + t);
         }
-        sqRecording = true;
-        if (searchBar != null) { searchBar.setRecording(true); searchBar.setLevel(0f); }
-        a.beginListening(new SiriAssistant.TranscriptSink() {
-            @Override public void onTranscript(final String text) {
-                main.post(new Runnable() {
-                    @Override public void run() {
-                        sqRecording = false;
-                        if (searchBar != null) searchBar.setRecording(false);
-                        if (!searchActive) return;
-                        Log.i("FloatingBall", "search: 语音识别到 " + text.length() + " 字：" + text);
-                        if (searchBar != null) searchBar.setText(text);
-                        main.postDelayed(new Runnable() {
-                            @Override public void run() { submitSearch(text); }
-                        }, 450);                      // 让用户先看见"听到了什么"，再发出去
-                    }
-                });
+        File fUp = new File(dir, "zone-release");
+        if (fUp.exists()) {
+            fUp.delete();
+            finishZones(false);
+        }
+        File fBar = new File(dir, "bar-open");
+        if (fBar.exists()) {
+            fBar.delete();
+            enterSearchMode("文件钩子 bar-open", "", false, BAR_SEND);
+        }
+        File fSearch = new File(dir, "bar-search");
+        if (fSearch.exists()) {
+            String t = readSmallString(fSearch, 500).trim();
+            fSearch.delete();
+            enterSearchMode("文件钩子 bar-search", t, true, BAR_SEARCH);
+        }
+        File fType = new File(dir, "bar-type");
+        if (fType.exists()) {
+            final String t = readSmallString(fType, 2000).trim();
+            fType.delete();
+            if (!searchActive) enterSearchMode("文件钩子 bar-type", t, true, BAR_SEND);
+            else if (searchBar != null) {
+                main.postDelayed(new Runnable() {
+                    @Override public void run() { if (searchBar != null) searchBar.setText(t); }
+                }, 200);
             }
-            @Override public void onTranscriptFailed(final String message) {
-                main.post(new Runnable() {
-                    @Override public void run() {
-                        sqRecording = false;
-                        if (searchBar != null) searchBar.setRecording(false);
-                        Log.w("FloatingBall", "search: 转写失败 " + message);
-                    }
-                });
-            }
-        });
+        }
+        File fTap = new File(dir, "voice-tap");
+        if (fTap.exists()) {
+            fTap.delete();
+            if (voice != null && voice.listening()) voice.tapStop();
+            else Log.i("FloatingBall", "voice-tap：现在没在听");
+        }
+        File fDirs = new File(dir, "menu-dirs");
+        if (fDirs.exists()) {
+            fDirs.delete();
+            openDirsMenu();
+        }
+        File fSet = new File(dir, "menu-settings");
+        if (fSet.exists()) {
+            fSet.delete();
+            openSettingsMenu();
+        }
+        File fSearchMenu = new File(dir, "menu-search");
+        if (fSearchMenu.exists()) {
+            String q = readSmallString(fSearchMenu, 200).trim();
+            fSearchMenu.delete();
+            runSessionSearch(q);
+        }
     }
 
     // ── 搜索层的调试口子（和 state-* / ballshot 同一套：一次性文件，用完即删）──
@@ -4540,7 +6429,6 @@ public class FloatingBallService extends Service {
     //   files/search-close  → 收回去
     //   files/search-type   → 文件内容填进输入框（不发送）
     //   files/search-ask    → 文件内容 = 要发的文本（等价于"打字 + 回车"）
-    //   files/search-mic    → 等价于点一下麦克风
     // 为什么需要：真机注入双指长按/输入法在当前工具链里做不到，版式和发送链路必须能脚本化回归。
     private long nextSearchCheck = 0;
 
@@ -4565,11 +6453,6 @@ public class FloatingBallService extends Service {
         if (fClose.exists()) {
             fClose.delete();
             closeSearchMode("文件钩子");
-        }
-        File fMic = new File(dir, "search-mic");
-        if (fMic.exists()) {
-            fMic.delete();
-            onSearchMicTap();
         }
         // search-type：只把字填进输入框（不发送）—— 用来验证"键盘上的回车/发送键"那条路
         File fType = new File(dir, "search-type");
@@ -4773,12 +6656,24 @@ public class FloatingBallService extends Service {
         @Override public void run() { syncWinPos(); main.postDelayed(this, 500); }
     };
 
+    /** syncWinPos 里"后面那些与球几何相关"的部分：菜单面板态下也要跑。 */
+    private void syncWinPosDone() {
+        if (!renderer.selfExcluded && applySkipScreenshot()) {
+            renderer.selfExcluded = true;
+        }
+    }
+
     private void syncWinPos() {
         if (glView == null || renderer == null) return;
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
         renderer.winX = loc[0];
         renderer.winY = loc[1];
+        if (glassFullscreen) {
+            // 玻璃窗此刻是"菜单面板"，不是球：别把球窗几何夹回去、也别让代理窗口跟着变成面板大小
+            syncWinPosDone();
+            return;
+        }
         syncBallTouchWindow();          // 代理窗口跟着玻璃窗口的真实屏幕位置/尺寸走
         clampBallOnScreen();            // 常态也保证整颗球（含文字）在屏内（有自比较，不会抖）
         // ⚠️ 这里**不要**再周期性 rememberHomeIfMinimal()：平滑跟窗时窗口会滞后动画十几像素，
@@ -4926,6 +6821,9 @@ public class FloatingBallService extends Service {
         main.removeCallbacks(renderTick);
         main.removeCallbacks(siriTick);
         removeSiriText();
+        if (voice != null) { try { voice.cancel(); } catch (Throwable ignored) { } voice = null; }
+        try { exitZones(); } catch (Throwable ignored) { }
+        try { hideMenu("服务结束"); } catch (Throwable ignored) { }
         removeApprovalViews();            // 面板的两个内层窗口得自己收
         try {
             SiriAssistant a = SiriAssistant.peek();

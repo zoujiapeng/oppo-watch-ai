@@ -1,22 +1,21 @@
-# 水晶球 × DSH 语音助手（安卓端）
+# 水晶球 × DSH 文本助手（安卓端）
 
 > 换机器部署看 [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)；这份讲原理与实现。
 
-把 **这台手机上的悬浮水晶球** 变成 DeepSeek Harness 的前端：点一下球就能说话，
-AI 的回答**以 Siri 模式的文字写回球里**（球按你那套 `measureSiriTargets` 的几何随文字变形）。
+把 **这台手机上的悬浮水晶球** 变成 DeepSeek Harness 的前端：双指长按球打开搜索胶囊，
+打字提问，AI 的回答**以 Siri 模式的文字写回球里**（球按你那套 `measureSiriTargets` 的几何随文字变形）。
 DSH 本身不动一行代码 —— 只用它已经在给浏览器用的那套 HTTP/JSON-RPC 接口。
 
 ```
-点球 ──► 录音 16kHz PCM16 WAV ──► DSH speech/transcribe（profile 里配的语音插件）
-                                      │
-                                      ▼
-                            session/prompt 发进当前 DSH 会话
-                                      │
-                    session/page 轮询 ◄─┘  （assistant/message 正文）
-                                      │
-                                      ▼
-              FloatingBallService.setSiriText(回答)  ──► 球内 Siri 模式文字
+双指长按 ──► 搜索胶囊（EditText） ──► session/prompt 发进当前 DSH 会话
+                                              │
+                              session/page 轮询 ◄─┘  （assistant/message 正文）
+                                              │
+                                              ▼
+                    FloatingBallService.setSiriText(回答)  ──► 球内 Siri 模式文字
 ```
+
+流式回答优先走 WebSocket（逐 token `text-delta`），断线才退回轮询。
 
 ## 用到的 DSH 接口
 
@@ -27,7 +26,6 @@ DSH 本身不动一行代码 —— 只用它已经在给浏览器用的那套 H
 | 发一句话 | `session/prompt` | `{"request":{"requestId","sessionId","mode":"queue","content":[{"type":"text","text":…}]}}` |
 | **流式回答（主路径）** | WS `/api/remote.mux` + `session/follow` | `{"request":{"address":{…},"assistantStream":true}}` |
 | 读事件页（兜底路径） | `session/page` | `{"request":{"address":{…},"throughSeq":<asOfSeq>,"maxMessages":40}}` |
-| 语音转写 | `speech/transcribe` | `{"request":{"audioBase64":<16kHz mono PCM16 WAV>,"language":"zh"}}` |
 
 信封（`DshHttpTransport` 里逐字实现）：
 
@@ -60,10 +58,9 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
 
 | 助手状态 | 球内文字 | 光效 |
 |---|---|---|
-| LISTENING / TRANSCRIBING | `聆听中…` / `识别中…` | Siri 波（振幅跟麦克风音量走，`voiceBoost` 叠加、不改用户参数） |
-| **THINKING** | `思考中…` | **流体圆点（siriFluidDotsCore）—— 只有这个状态有** |
+| **THINKING** | 不写占位字 | **流体圆点（siriFluidDotsCore）—— 只有这个状态有** |
 | ANSWERING | 回答逐字弹出 | 还原成用户自己的设定（默认就是原本的 Siri 模式） |
-| IDLE / OFF | 保留回答 | 还原用户设定，音量增益归零 |
+| IDLE / OFF | 保留回答 | 还原用户设定 |
 
 ### 思考中的流体圆点：怎么保证「像同一颗球」
 
@@ -78,16 +75,16 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
    实测球边一圈的增量亮度是波动的 **5.2 倍**（0.242 vs 0.046），这就是「边缘太亮、很突兀」。
    现在圆点的 `wglow = 圆点自身亮度 × uOrbRim`（默认 1.30），实测边缘增量 0.0488 ≈ 波动的 0.0461。
 
-另外聆听→思考→回答之间用 `uOrbMix` 做 **320ms 交叉淡化**，不再瞬间换脸。三个参数都在设置页：
+另外思考→回答之间用 `uOrbMix` 做 **320ms 交叉淡化**，不再瞬间换脸。三个参数都在设置页：
 「思考中圆点环半径 / 亮度 / 边缘辉光」。
 
 文字排版**完全走 App 原有设定**：助手只调 `FloatingBallService.setSiriText()`，
 字号（Siri 字号 sp）、距球顶（px）、每多一行黑区下移、内边距、圆角与宽高，
 全部由 `measureSiriTargets()` 按你那套规则算，助手不碰。
 
-**文字可以被"钉住"**：回答出来后单击球内文字，它就保持住不再自动消散（末尾出现 📌），
-再单击一次解除；长按文字同样解除。这是给"想慢慢看/想抄下来"用的干预手段，
-不点的话行为不变（安静 1.5s 自动消散）。在文字区域按住拖动仍然是拖球，手势没有被吃掉。
+**文字可以被"钉住"**：回答出来后单击球内文字，它就保持住不再自动消散，再单击一次解除；
+长按文字同样解除。这是给"想慢慢看/想抄下来"用的干预手段，不点的话行为不变。
+在文字区域按住拖动仍然是拖球，手势没有被吃掉。
 
 「一个字一个字弹出来」由两段拼成：模型侧是 WebSocket 的逐 token `text-delta`，
 客户端再用 40ms/字的打字机揭示（落后超过 80 字才略微加速，绝不跳字），
@@ -95,12 +92,12 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
 
 ## 会话镜像：AI 一回复，球就出字
 
-除了「点球提问」，助手还会常驻一条 **会话镜像**（设置里可关）：
+除了搜索框提问，助手还会常驻一条 **会话镜像**（设置里可关）：
 
 - 跟着 **DSH 里最近在用的那条会话**（`updatedAt` 最新的非子智能体会话）；
   在浏览器里换对话 / 新开一条，约 20 秒内自动跟上；
 - 只要那条会话里有助手输出，就用同一套打字机写进球里 —— **不区分这条回复是谁问的**
-  （浏览器里聊、别的客户端发的、语音问的都一样）；
+  （浏览器里聊、别的客户端发的都一样）；
 - 本 App 自己提问时镜像让路（`askInFlight`），避免同一段文字打两遍；
 - 断线 2.5s 退避重连，状态显示在设置页。
 
@@ -108,7 +105,7 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
 
 ## 审批 / 提问面板：同一颗球变成可交互的玻璃卡片
 
-语音助手之外还有一条**独立**的链路：把 DSH 的审批（`approval/request`）与提问
+文本助手之外还有一条**独立**的链路：把 DSH 的审批（`approval/request`）与提问
 （`ask_user_question` → `user-questions/request`）接到手机上。以前这些只在浏览器里出现，
 人不在 DSH 网页端就等于「没法批/没法答」；现在它们**就是球本身**。
 
@@ -127,43 +124,37 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
 
 ## 代码
 
-新增：
-
 | 文件 | 作用 |
 |---|---|
-| `DshHttpTransport.java` | DSH 客户端：token→cookie、上面 5 个 endpoint、轮询出回答；`org.json` + `HttpURLConnection`，无第三方依赖 |
-| `SiriAssistant.java` | 状态机 OFF/IDLE/LISTENING/TRANSCRIBING/THINKING/ANSWERING；录音→转写→提问→流式写回球；可选系统 TTS 朗读 |
-| `VoiceCapture.java` | `AudioRecord` 16 kHz 单声道 PCM16 → canonical WAV → base64，并上报 RMS 给球的 Siri 波 |
+| `DshHttpTransport.java` | DSH 客户端：token→cookie、上面 5 个 endpoint、WebSocket 流式回答，轮询兜底；`org.json` + `HttpURLConnection`，无第三方依赖 |
+| `DshWebSocket.java` | 最小 RFC6455 客户端（WS 握手 / 帧解析） |
+| `SiriAssistant.java` | 状态机 OFF/IDLE/THINKING/ANSWERING；提问→流式写回球、会话镜像、打字机、安静清空 |
+| `DshApprovalClient.java` | 审批 / 提问事件流与回答 |
+| `BallSearchBar.java` | 搜索胶囊的 🔍 输入框与凝聚动画 |
 | `res/xml/network_security_config.xml` | targetSdk 28 起默认禁明文 HTTP；这里只给 `127.0.0.1/localhost` 开口子 |
 
 改动：
 
 | 文件 | 改动 |
 |---|---|
-| `AndroidManifest.xml` | `RECORD_AUDIO` / `INTERNET`；挂上上面的 network security config |
-| `FloatingBallService.java` | 轻点球（<14dp 位移、<450ms）＝ 说话/结束/打断；`setAssistantLevel`（音量→Siri 波）、`setAssistantState`（聆听=声波，思考=流体圆点）、`siriTextNow()` 回读 |
-| `GlassRenderer.java` | `voiceBoost`：把实时音量叠在用户设置的 `waveAmp` 上，不改用户参数 |
-| `MainActivity.java` | 需要时弹一次录音授权 |
-| `WatchBridge.java` | 给设置页的 JS 接口：开关 / 朗读 / DSH 地址 / 问一句 / 聆听 / 回读球内文字 |
-| `settings.html` | 新增「DSH 语音助手」区块（开关、朗读、地址、问一句、聆听、清空、球内文字与状态实时回读） |
+| `AndroidManifest.xml` | `INTERNET`；挂上上面的 network security config |
+| `FloatingBallService.java` | 双指长按打开搜索胶囊、`setAssistantState`（思考=流体圆点）、`siriTextNow()` 回读、审批面板 |
+| `GlassRenderer.java` | 流体圆点 / Siri 波两种光效与交叉淡化 |
+| `WatchBridge.java` | 给设置页的 JS 接口：开关 / DSH 地址 / 问一句 / 镜像 / 回读球内文字 / 审批 |
+| `settings.html` | 「DSH 文本助手」区块（开关、地址、问一句、镜像、清空、球内文字与状态实时回读） |
 
 ## 怎么用
 
 1. 设置页打开「悬浮于桌面」（球浮起来），并保持「Siri 模式」开启。
-2. 设置页 →「DSH 语音助手」：确认开关打开、地址是 `http://127.0.0.1:3080`。
-3. **轻点球**开始说话，说完再点一下：转写 → 提问 → 回答逐段写进球里。
-   思考/回答中点击 = 打断。
-4. 不想说话时，用「问一句（测试链路）」直接走一遍 DSH 往返（不需要麦克风）；
-   也可以直接在设置页的输入框里打字喂给球（`setSiriText`）。
+2. 设置页 →「DSH 文本助手」：确认开关打开、地址是 `http://127.0.0.1:3080`。
+3. **双指长按球**打开搜索胶囊，打字后按键盘回车发送；回答逐段写进球里。
+4. 也可以点「问一句（测试链路）」直接走一遍 DSH 往返。
 
 回答会发进**最近更新的那个 DSH 会话**（排除子智能体），所以你在浏览器里开的对话就是球在聊的那条。
 想固定某条会话，删掉应用的 `siri_assistant` prefs 里的 `session_id` 让它重新跟随即可。
 
 ## 已知边界
 
-- **录音权限**：这台机器上应用不是设备所有者，所以系统会弹一次授权框；授权后一直有效。
-  若能用 `adb shell dpm set-device-owner com.glslplayground.app/.AdminReceiver` 设为设备所有者，
-  `SiriAssistant.ensureMicPermission()` 会静默自授权。
 - **回答是逐 token 的**：走 `ws://127.0.0.1:3080/api/remote.mux` 上的 `session/follow{assistantStream:true}`，
   渲染 `chunk.type=="text-delta"`；只有连不上 WebSocket 时才退回 `session/page` 轮询（约 850ms）。
 - 上游 DSH 的 cookie 校验在这台机器上被本地补丁关掉了；本实现走的是**上游也认的** token→cookie 流程，
@@ -183,12 +174,11 @@ pm install -r glsl-playground.apk
 
 ## 球内文字：只留必要的，空闲就清空
 
-- **不写任何占位字**：没有「聆听中…／识别中…／思考中…」，球里只可能出现
-  ①语音识别到的那句话 ②AI 的回答。设置页里手动输入的文字属显式操作，照旧。
-- **空闲 8 秒后自动清空**：回答打完、状态回到 IDLE 之后再留 8 秒给人看完，
-  然后球恢复成原本那颗水晶球（`SiriAssistant.idleClear`）。长按取消则立即清空。
-- 想彻底不要浏览器聊天的内容进球，把设置页「镜像当前会话」关掉即可 ——
-  那样球只在语音交互时出字。
+- **不写任何占位字**：没有「思考中…」之类，球里只会出现 AI 的回答。
+  设置页里手动输入的文字属显式操作，照旧。
+- **空闲后自动清空**：球内文字静默 `IDLE_CLEAR_MS`（4s）清空并回 IDLE；
+  最终方形态在 `FINAL_SHAPE_BACK_MS`（30s）后收回。长按取消则立即清空。
+- 想彻底不要浏览器聊天的内容进球，把设置页「镜像当前会话」关掉即可。
 
 ## 黑区下沿：按文字实际高度算，不再按行数
 
@@ -213,6 +203,6 @@ tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5);
 
 ## 球体截图（调试）
 
-设置页「DSH 语音助手」里有个「保存球体截图」：用 `PixelCopy` 只抓悬浮窗那一帧
+设置页「DSH 文本助手」里有个「保存球体截图」：用 `PixelCopy` 只抓悬浮窗那一帧
 （球 + 24dp 边距，不含桌面内容），存到 App 内部 `files/ball-capture.png`，
 用来对着调黑区 / 文字 / 波的位置。

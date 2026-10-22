@@ -678,7 +678,7 @@ raw assistant-stream frames observed (wire values of {"type":"item","value":…}
 
 `match: YES` — the streamed deltas and the durable assistant message both equal the expected `协议正常`.
 
-**Supporting probe:** `/data/data/com.termux/files/home/oppo-watch-ai/dsh-speech-probe.mjs` produced the `speech/transcribe` output quoted in §2.4(4).
+**Supporting probe:** the `speech/transcribe` output quoted in §2.4(4) was captured with a standalone probe (not part of this repo).
 
 ---
 

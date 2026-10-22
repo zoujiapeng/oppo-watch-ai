@@ -13,7 +13,7 @@
 
 ## 一句话现状
 
-手机上的**悬浮液态玻璃水晶球**已经是 **DSH 的前端**：双击球说话 → 本机 DSH 转写+回答 →
+手机上的**悬浮液态玻璃水晶球**已经是 **DSH 的前端**：双指长按打开搜索胶囊、打字提问 → 本机 DSH 回答 →
 回答**逐字打进球里**（Siri 模式的形变球）；DSH 里任何会话的 AI 输出也会被镜像进球。
 DSH 侧一行没改，只走它已经在给浏览器用的 HTTP/WebSocket 接口。
 
@@ -47,22 +47,21 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 
 | 文件 | 作用 |
 |---|---|
-| `android/src/.../DshHttpTransport.java` | DSH 客户端：token→cookie、session/{list,create,prompt,page}、speech/transcribe、**常驻镜像** |
+| `android/src/.../DshHttpTransport.java` | DSH 客户端：token→cookie、session/{list,create,prompt,page}、**常驻镜像** |
 | `android/src/.../DshWebSocket.java` | 自实现最小 RFC6455 客户端（握手/掩码/分片/ping） |
 | `android/src/.../DshApprovalClient.java` | **审批/提问的数据面**：`$events` 瀑布订阅 + 答案回传（审批=字符串、提问=答案对象）+ 调试回路 |
 | `android/src/.../SiriAssistant.java` | 状态机 + 打字机 + 镜像回调 + 空闲清空 + 审批流生命周期 |
-| `android/src/.../VoiceCapture.java` | 16kHz PCM16 → WAV → base64，50ms 上报 RMS |
-| `android/src/.../FloatingBallService.java` | 悬浮球：手势、Siri 形变几何（`measureSiriTargets`）、黑区、球体截图、**审批/提问面板** |
+| `android/src/.../FloatingBallService.java` | 悬浮球：手势、Siri 形变几何（`measureSiriTargets`）、黑区、球体截图、**审批/提问面板**、搜索胶囊 |
 | `android/tools/approval-debug-server.mjs` | 调试回路（喂假审批 / 收球上的点击），端口 = DSH 端口 + 1 |
 | `android/docs/probes/dsh-approval-probe.mjs` | 只读探针：订阅 `$events`、打印瀑布请求、可选自动应答 |
 | `android/docs/probes/dsh-approval-trigger.mjs` | 造场景：建会话 / 切权限预设 / 发会触发审批的 prompt |
-| `settings.html` | 设置页（「DSH 语音助手」区块 + Siri 参数 + **审批球**区块） |
+| `settings.html` | 设置页（「DSH 文本助手」区块 + Siri 参数 + **审批球**区块） |
 | `android/docs/DSH_ASSISTANT.md` | 完整接入文档（协议、状态表、黑区公式） |
 
 ## 已经确定的行为（别改错）
 
-- **手势**：双击=开始说话；再双击=结束并发送；长按=取消；拖动=只拖动；**单击不响应**。
-- **球内文字只有两种**：语音识别到的那句话、AI 的回答。没有「聆听中/识别中/思考中」占位字。
+- **手势**：双指长按=打开搜索胶囊打字；长按=取消当前轮；拖动=只拖动；**单击不响应**。
+- **球内文字只有一种**：AI 的回答。没有「思考中」之类的占位字。
 - **球缩回最小形态时文字「同一刻」消失**：`measureSiriTargets` 走到「0/1 个字 → 最短形态」那一支时
   会立刻 `hideSiriTextNow()`（`setVisibility(GONE)`，不进布局）—— 只把文字设成空串不够，
   窗口/测量的更新是异步的，球收缩的半秒里旧字还会留在屏上（用户看到的「球小了、字飞出球外」）。
@@ -70,12 +69,12 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
   长按文字也是解除；在文字上按住拖动 = 照常拖球。实现是「文字之上盖一个透明触摸层」，
   文字层本身永远 NOT_TOUCHABLE —— 否则文字那块就没法拖球了（见 `setupSiriTouchLayer`）。
   新一轮提问会自动解除钉住。
-- **回答结束、球变回原本状态时文字一起消失**：等打字机弹完最后一个字 → 安静 1.5s → 清空并回 IDLE
-  （`SiriAssistant.IDLE_CLEAR_MS` + `quietTick`）。
+- **回答结束、球变回原本状态时文字一起消失**：等打字机弹完最后一个字 → 文字静默 4s 清空并回 IDLE，
+  最终方形态 30s 后收回（`SiriAssistant.FINAL_SHAPE_BACK_MS` / `IDLE_CLEAR_MS` + `quietTick`）。
   **注意清空不看 turn/end**：镜像跟的那条会话可能是一轮跑很久的长任务（几十个 step、几分钟不 end），
   只认 turn/end 的话文字会一直挂在球里 —— 现在只要「没新字进来」就自己消散。
-- **光效**：只有 THINKING 是流体圆点；LISTENING/TRANSCRIBING 是 Siri 波；
-  ANSWERING/IDLE 还原用户自己的波形设定（`FloatingBallService.setAssistantState`）。
+- **光效**：只有 THINKING 是流体圆点；ANSWERING/IDLE 还原用户自己的波形设定
+  （`FloatingBallService.setAssistantState`）。
   圆点与波**共用同一套坐标框架**（屏幕像素 / `uOrbRadius` * 0.17，x/y 同倍率），
   边缘辉光取「圆点自身亮度 × `uOrbRim`」而不是固定满值；切换时 `uOrbMix` 做 320ms 交叉淡化。
   调这三个参数：设置页「思考中圆点环半径 / 亮度 / 边缘辉光」，
@@ -85,7 +84,7 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
   滑块「文字与 Siri 波的安全距离」= `waveGap`（pref `float_siri_wavegap`，默认 100 → 0.10）。
 - **球体大小**：设置页「液态玻璃 · 形状 → 球体大小（整体 scale）」= `master`（20%~200%，1.00 = 原始大小），
   实时生效、随 `float_params` 一起持久化。
-  注意：Siri 模式（聆听/思考/回答）下球体几何走 `svHalf*/tMaster`，`master` 不参与 ——
+  注意：Siri 模式（思考/回答）下球体几何走 `svHalf*/tMaster`，`master` 不参与 ——
   所以 `minHalfX/minHalfY`（空球基准比例）刻意**不乘** master，否则滑块一动就双重缩放。
 - **球高封顶屏高 55%**（`SIRI_H_RATIO`，2026-10-16 用户要求从 85% 收到 55%），
   封顶后**不再截断**：多出来的内容在玻璃**内部滚动**（见下面「球内富文本」一节）。
@@ -232,16 +231,12 @@ POST http://127.0.0.1:3080/api/<namespace>/<method>      # 斜杠，不是点
 
 ## 还没做 / 可继续的方向
 
-1. **语音识别没有实时字幕**：DSH 的 `speech/transcribe` 是整段返回，说话时只有波形反馈。
-   想边说话边出字，得改用系统 `SpeechRecognizer`（`onPartialResults`），代价是不走 DSH 语音插件了。
-2. **麦克风授权**：本机 App 不是设备所有者，首次双击会弹一次系统授权框。
-   免弹窗：`adb shell dpm set-device-owner com.glslplayground.app/.AdminReceiver`。
-3. **镜像跟随**：跟"最近更新的非子智能体会话"，20 秒轮询切换；想固定某条会话需要另加设置。
-4. `android/docs/probes/*.mjs` 是当时跑通的 Node 探针，可复用。
-5. 仓库里 `dsh-liquid-glass-siri/` 是早期做的**网页版** DSH 插件（用户最终没要），
+1. **镜像跟随**：跟"最近更新的非子智能体会话"，20 秒轮询切换；想固定某条会话需要另加设置。
+2. `android/docs/probes/*.mjs` 是当时跑通的 Node 探针，可复用。
+3. 仓库里 `dsh-liquid-glass-siri/` 是早期做的**网页版** DSH 插件（用户最终没要），
    独立功能、可从 profile 移除：`dsh plugin --profile web remove dsh-liquid-glass-siri`。
-6. 设置页很长、WebView 不能滚动（实测自动化 swipe 无效），要触发「思考中」只能：
-   双击球说话（真机路径），或先把 DSH 区块挪到页首再重装。球体截图在
+4. 设置页很长、WebView 不能滚动（实测自动化 swipe 无效），要触发「思考中」只能：
+   在搜索框里打字发送（真机路径），或先把 DSH 区块挪到页首再重装。球体截图在
    `/data/data/com.glslplayground.app/files/ball-capture.png`（root 可读，Termux 要经
    `su -c cp` 到 `~/oppo-watch-ai/.preview/`，`/sdcard` 与 `/data/local/tmp` 在 Termux 命名空间里看不见）。
    （注：用 `mobile` 工具的 swipe 其实能滚 WebView，这条老结论已经不成立。）
@@ -479,7 +474,7 @@ SELinux 禁区，所以只能用 127.0.0.1 上的小服务当信箱。安卓侧�
 
 **问题**：DSH 的 mobile 工具注入触摸走 `/system/bin/input`，和真手指走**同一套窗口命中测试**，
 `MotionEvent` 里没有"注入"标记。球常驻屏幕中间又可触摸，于是注入的 `ACTION_DOWN` 被球吃掉 →
-底下 App 收不到 down（滑动半途而废），球还会把这串手势当成用户在操作（双击开听、按住挪球）。
+底下 App 收不到 down（滑动半途而废），球还会把这串手势当成用户在操作（按住挪球）。
 
 **做法**（详见 [`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)）：
 
@@ -487,7 +482,7 @@ SELinux 禁区，所以只能用 127.0.0.1 上的小服务当信箱。安卓侧�
    —— **只画不摸**；顺手消掉"窗口里那圈看不见的透明边也在吞触摸"的老坑。
 2. 新增**代理触摸窗口**（`setTitle("dsh-ball-proxy")`，`setupBallTouchLayer()`）：贴身包住球
    （+10dp），在玻璃层之后 addView → z 序最低的触摸层，审批面板/文字层/输入行照样压在它上面。
-   单击/双击/长按取消/拖动的手感与旧代码同源（同一个 `inSiriBall()` SDF + `moveBallDrag()`）。
+   单击/长按取消/拖动的手感与旧代码同源（同一个 `inSiriBall()` SDF + `moveBallDrag()`）。
 3. **agent 门控** `pumpAgentGate()`（60ms 一次）：DSH 要发 click/swipe/key 之前**原子写**一个
    唯一 nonce 到 `<GATEDIR>/dsh-ball-act`；球读到**内容变了**就从**本地时钟**起算 1500ms 让路窗口
    （此时代理窗口也设 NOT_TOUCHABLE），并回写 `<GATEDIR>/dsh-ball-ack`；DSH 侧读到 ACK 才真正注入。
@@ -678,221 +673,6 @@ text(文字层) : (348, 1076, 733, 1280)
 
 **注意**：夹取依赖 `renderer.winY - params.y` 这个系统 inset 差值，换 ROM/换分辨率后
 应当重新实测一次（看 `clampBallOnScreen` 的日志是否合理）。
-
-## 朗读稿清洗（TTS）：把 markdown 转成"给耳朵听的话"
-
-**用户反馈**：朗读"怪怪的"，把空格和一些字符念成星号，想要只读中文和短英文、避开拗口符号。
-
-**根因**：`speak()` 直接把 DSH 的**原始 markdown** 丢给 TTS —— `**加粗**`、反引号、`#`、`-`、`|`
-都被念成"星号/井号/竖线"。
-
-**为什么不用另一个模型改写**（用户原本的想法）：那会引入"回答完还得再等一次生成"的延迟、
-额外 token 成本，而且模型可能改内容、把事实讲错。**确定性规则零延迟、零成本、不改语义**，
-这个场景不值得上模型。
-
-**实现**：`SiriAssistant.toSpeechText()`（纯静态、无副作用），送 TTS 之前过一遍：
-
-- 代码块整段跳过（留一句"（有代码，略过）"）；行内代码去反引号留内容
-- 标题/引用/列表/表格/分隔线去标记留文字；链接只留链接文字
-- emoji、箭头、进度条等符号一律丢掉；只保留汉字/假名/谚文/拉丁字母数字/空白/常用标点
-- 路径与连字符（`-` `/` `:` `@` `.`）替换成空格再合并 —— 直接删会粘连
-  （`-r` → `r`、`package/activity` → `packageactivity`），听感更差
-- 收尾合并空白、去掉行首残留空格和多余空行
-
-**踩到的两个坑（都值得记住）**：
-
-1. **Java `replaceAll` 的替换串里 `\n` 会被当成"转义字母 n"**，不是换行 ——
-   实测「第一行\n第二行」被替换成「第一行n第二行」，念出来多一个字母 n。
-   替换串改用 `$0`（整个匹配文本），`$` 开头的按字面处理。
-   最小复现：`"a\nb".replaceAll("[ ]*\\n[ ]*", "\\n")` → `"anb"`。
-2. **清洗顺序**：表格对齐行（`|---|---|`）必须先清，否则后面的"连字符→空格"先把 `-` 干掉，
-   对齐行规则再也匹配不到，听感就是莫名一顿。
-
-**调试口子**：每次朗读都会把"要念的稿子"写到
-`/sdcard/Android/data/com.glslplayground.app/files/last-spoken.txt`，
-配合 `logcat -s SiriAssistant` 的 `speak(N字): …` 就能核对清洗效果（不用反复听音频）。
-
-**验证方式**：`toSpeechText` 是纯静态函数，从源码里抽出来在本机跑即可，不必刷机：
-
-```
-$ java SpeakTest < sample.md
-结论
-可以 ，但要分两步做：
-先跑 adb shell input tap 100 200 看看效果
-…
-（有代码，略过）
-```
-
-## 朗读稿改写：交给大模型（2026-10-15 新增，默认关）
-
-**用户要求**：用大模型把回复改写成适合朗读的稿子；只有开启朗读时才这样，不开朗读完全不影响 DSH；
-**用最简单的方式做，反正朗读不需要那么长**。
-
-**实现（`SpeechRewriter`，131 行，刻意最简）**：
-
-- 只在 `speakReplies`（朗读回答）打开、且设置页填了 DeepSeek key 时才发请求；
-  否则一律走本地规则清洗（`SiriAssistant.toSpeechText`）；
-- **不做任何"值不值得改写"的判断**（第一版写了 `needsRewrite`/`isSane` 两道启发式，
-  按用户"最简单"的要求删掉了）；
-- 提示词直接要求**输出 100 字以内的口播稿** —— 短了既好念又省钱，比在代码里截断自然；
-- 3s 连接 / 5s 读取超时；**任何失败（没 key / 断网 / 超时 / 空返回）都回落规则清洗版**，
-  朗读不会因为网络问题停摆；
-- 输入裁剪到 1200 字；`max_tokens=300`；
-- **不碰 DSH**：不改它的代码、不占它的会话、不读它的凭据；key 存在 App 自己的首选项
-  （`watch` prefs 的 `speak_key`），只在开启该功能时用到。
-
-**实测提示词效果**（直接用设备上的 key 打一次 API 验证，未经过 App）：
-
-```
-输入：## 结论 / **可以**，但分两步：/ 1. 跑 `adb shell input tap 100 200` / 表格 / 链接 🚀
-输出：可以，但得分两步。先跑 adb shell input tap 100 200，再改 settings.html 的开关。本地规则成本是 0。
-```
-
-**设置页**（「DSH 语音助手」展开后）：
-
-- 开关「朗读稿交给模型改写（更自然、要联网）」→ `swAsstSpeakModel`
-- 输入框「DeepSeek API Key（只存本 App）」→ `asstSpeakKey`（填完即存，输入框清空；
-  用 `hasAssistantSpeechKey()` 只判断"有没有"，不回显 key）
-
-**核对方式**：`files/last-spoken.txt`（实际要念的稿子）+ `logcat -s SpeechRewrite SiriAssistant`
-（会打 `speak(N字，模型改写)` 或 `speak(N字，规则清洗)`，一眼看出走的是哪条路）。
-
-## 口播稿插件 dsh-plugin-speech（2026-10-15，替代 App 侧 key 方案）
-
-**用户要求**：用 DSH 插件配合，**依赖 DSH、不要第二份 key**。
-
-**做法**：一个 DSH 插件（`~/dsh-plugin-speech`，源码也存仓库 `dsh-plugin-speech/`）——
-监听 `session/event` 里的 `assistant/message`，取出正文与 `message.source.{provider,model}`，
-用 `ctx.llm.stream()`（官方 `dsh-session-title-llm` 同款用法）生成 ≤100 字口播稿，
-原子写到 `/sdcard/Android/data/com.glslplayground.app/files/spoken.txt`。
-
-球侧：朗读前**优先读这个文件**（2 分钟内有效，用掉即删），没有就回落本地规则清洗
-—— 所以插件是"可选增强"：不装也能用，装了更自然。App 里那条 DeepSeek key 的路径保留但不再是主路。
-
-**装法（要点，容易踩）**：
-
-1. 插件要 `import "@deepseek-ai/dsh-llm"`，但插件目录解析不到 DSH 的包 →
-   在插件下 `node_modules/@deepseek-ai/` 里**软链到 DSH 自己的包**
-   （`.../dsh/node_modules/@deepseek-ai/dsh-llm` 与 `dsh-util-values`）；
-2. `dsh plugin --profile web add .` **只把它装成普通依赖**（会提示 "declares no dsh.bundle"），
-   必须在插件 `package.json` 里声明 `dsh.bundle.patch = ./cordis.patch.yml`，
-   并把它**加进 profile 的 `bundles` 数组**，否则不会被加载；
-3. 重启 DSH 生效（`pkill -f "dsh/lib/bin.js web"`，看门狗约 30 秒拉起）。
-
-**核对**：`files/spoken.txt` 是否出现、`logcat -s SiriAssistant | grep speak` 里是
-「口播稿」（走了插件）还是「规则清洗」（回落）。
-
-**踩坑（第一次真实回合就翻车）**：`session.append(type, data)` 产生的事件是
-`{type, seq, time, data}`，**消息体在 `event.data.message`**，不是 `event.message`。
-写成后者 → 每次都在 `if (!text) return;` 静默返回：不报错、不写文件，
-表现是"插件好像装了但完全没工作"（那一轮球只能走规则清洗）。
-现在 `messageOf()` 按 `data.message → message → data` 兜底，并且拿不到 provider/model 时
-会打一行日志（不再静默）。
-
-**已验证**：插件可被 DSH 解析加载；用**真实事件结构**（`data.message` + `source`）驱动时，
-模型调用与原子写全部走通（`→ provider=… model=… 输入=25字` → `口播稿 8 字已写入`）。
-
-## 口播稿插件：真正的失败原因（2026-10-15 定位完成）
-
-排查链条（每一步都靠"直接落盘"的日志，因为 `ctx.logger` 的输出看不到）：
-
-```
-15:26:47 收到 assistant/message 但取不到正文              ← 该回合第 1 条只有 reasoning+tool-call，正常跳过
-15:26:56 收到 assistant/message：正文 64 字，deepseek-official/deepseek-flash
-15:26:56 开始调用 ctx.llm.stream …
-15:26:58 模型返回 chunks=304 blocks=reasoning 文本=0 字     ← ★ 真凶
-15:26:58 模型没给文本，跳过（球用规则清洗）
-```
-
-**根因**：这个模型默认**带推理**，而改写请求只给了 `maxTokens: 300` ——
-模型把额度全花在 reasoning 块上，正文一个字都没输出就被截断，
-于是插件永远写不出稿子（球只能走本地规则清洗，所以听感"不像被模型改写过"）。
-
-**改法**：
-1. `reasoningEffort: ReasoningEffortId("off")` —— DeepSeek 适配器原生支持
-   `off/low/high/max`（在 `dsh-llm-deepseek` 里定义），改写是纯格式化任务，不需要推理；
-2. `maxTokens` 300 → 400；
-3. 兜底：万一仍然只回 reasoning，**自动用 1200 token 重试一次**。
-
-**顺带记两个排查经验**：
-- `ctx.logger.info` 的输出在设备上**看不到**（不知道它去了哪），排查这类插件要
-  **直接 `fs.appendFileSync` 到 files/ 下的日志**，否则永远是"静默失败"；
-- 一个回合里 `assistant/message` 会来**多条**（每一步一条），
-  其中有些只有 `reasoning|tool-call` 没有正文 —— 插件跳过它们是正确行为，不是 bug。
-
-## 插件对 DSH 的影响面（2026-10-15，按"尽可能不影响 DSH"收敛后）
-
-**结论：插件是纯旁路，改不到 DSH 的能力。** 逐条对照：
-
-| 维度 | 情况 |
-|---|---|
-| 改 DSH 代码 | ❌ 没有。插件是 profile 里的一个 bundle，DSH 源码一行没动 |
-| 会话历史 | ❌ 不写。插件只 `ctx.on("session/event")` 读事件，从不 `session.append`，改写稿不进对话上下文 |
-| 阻塞主流程 | ❌ 不会。监听是同步返回、改写是 fire-and-forget；每一步 `try/catch`，出错只写自己的日志 |
-| 影响回复内容 | ❌ 不会。改写用的是**独立的** LLM 请求（`purpose: "speech-rewrite"`），不是会话的一部分 |
-| 额度/限流 | ⚠️ **唯一的真实成本**：每条够长的回复多 1 次小请求 |
-
-**为把那个唯一成本压到最小，做了 4 件事**（都在插件里）：
-
-1. **一回合最多改写 1 次**：`assistant/message` 每步都来一条且正文是累积的，
-   不去重的话一条 3 步回复会改写 3 次（实测 64/139/210 字各一次）。
-   现在按「会话 + 正文长度」判重，实测 3 步回合只调用 **1 次**；
-2. **短回复跳过**：正文 < 50 字（"好的""已完成"）直接用规则清洗，零请求；
-3. **额度按正文给**：正文 > 300 字才给 400 token，否则 250；
-4. **超时 8s → 5s**：卡住就早点放弃，不占着连接。
-
-**单回合最坏开销**：1 次请求 ≈ 输入 ≤1200 字 + 输出 ≤400 token。
-按 deepseek-chat 的价格量级 ≈ 千分之几美分/次；一天几百轮也远低于一次正常对话的消耗。
-
-**如果哪天不想要它**：把 `dsh-plugin-speech` 从
-`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 里删掉、重启 DSH 即可，
-App 侧会自动回落本地规则清洗（不需要改 App）。
-
-## 口播稿终于打通：三个真坑（2026-10-15 全部定位）
-
-前三轮一直"听不到改写稿"，靠**直接落盘的两份 trace**（球一份、插件一份）才逐层查清：
-
-| # | 坑 | 症状 | 修法 |
-|---|---|---|---|
-| 1 | 事件形状：正文在 `event.data.message` | 插件取不到正文，静默 return | `messageOf()` 三层兜底 |
-| 2 | 模型默认带推理 | `chunks=304 blocks=reasoning 文本=0`，正文被 `max_tokens` 截断 | `reasoningEffort: "off"` + 额度重试 |
-| 3 | **`assistant/message` 是流式追加的** | 一回合来很多条（实测 0 → 20 → 26 字），**最后一条很短** → 我的 `MIN_TEXT=50` + 长度判重把它全挡掉，永远不触发 | 改为**按会话累积、`turn/end` 时改写一次**，并去掉最小长度门槛 |
-
-**球的等待时长也必须配套**：插件是在**回合结束**后才发模型请求，
-所以 3.5s / 6s 都不够（实测两次都"等满超时"→ 念规则清洗版），
-现在默认 **15 秒**（`speak_wait_ms` 可调）。
-
-**两份 trace 是这次能查清的关键**（`logcat` 在这台机器上会被别的服务刷掉）：
-
-- `files/speak-trace.log` —— 球：`speakOnce 进入 N 字` → `开始等插件口播稿` →
-  `等到插件稿 N 字（等了 Xms）` / `没等到插件稿（等满 Xms）` → `交给 TTS N 字（插件口播稿/规则清洗）`
-- `files/speech-plugin.log` —— 插件：`开始改写：本回合正文 N 字` → `口播稿 N 字已写入`
-
-**经验**：这类"跨进程 + 时序"的问题，别靠听感和 logcat，
-直接让两边各自把判断过程写文件，对照时间戳，一次就能定位。
-
-## 删掉 App 侧的 key 路径（2026-10-15，改用插件后就不需要了）
-
-插件方案跑通后，App 自己调 DeepSeek 那条路（设置页的「DeepSeek API Key」输入框 +
-`SpeechRewriter` 类 + `speak_model` 开关）就是**多余的第二条路**，全部删除：
-
-- 删 `SpeechRewriter.java`（App 不再自己调模型）
-- 删 `speakUseModel()` / `setSpeakUseModel()` / `setSpeechApiKey()` / `hasSpeechApiKey()`
-  及 `WatchBridge` 里对应的 4 个 `@JavascriptInterface`
-- 删 `settings.html` 里的「朗读稿交给模型改写」开关与 key 输入框
-- 启动时**一次性清理**历史遗留的 `speak_key` / `speak_model`（避免留一份无用的敏感数据）
-
-**现在的朗读稿只有两个来源**：
-
-1. **DSH 插件**写的 `spoken.txt`（首选，球最多等 15 秒）
-2. **本地规则清洗**（兜底：插件没装/失败/超时）
-
-实测（`speak-trace.log` + `speech-plugin.log` 对照）：
-
-```
-插件: 本回合正文 810 字 → 口播稿 68 字已写入（约 1 秒）
-球  : 开始等插件口播稿(15000ms) → 等到 68 字（等了 1414ms）→ 交给 TTS 68 字（插件口播稿）
-```
 
 ## 球体玻璃：按"真实物理观感"重调 + 参数热重载（2026-10-16）
 
@@ -1130,7 +910,7 @@ vec2 wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - waveAnchor) / max(uWaveScale, 0.1);
   想露得多一点就往 -1.1 调，想只剩一丝就 -1.4。
 - 闸门在 `refreshFinalWave()`：`siriEnabled && turnEnded && 有字` 才把 `uWaveInGlass` 置 1；
   有字但这一轮还没结束 → 幅度压到 0（一点波都没有），与老行为一致。
-- 圆球态（聆听/思考）**一点没动**：那边 `uWaveInGlass=0`，锚点仍是黑区下沿 `b1`。
+- 圆球态（思考/回答）**一点没动**：那边 `uWaveInGlass=0`，锚点仍是黑区下沿 `b1`。
 
 ### ⚠️ 走过的两条弯路（都别再捡回来）
 
@@ -1394,80 +1174,6 @@ dumpsys window windows | grep -A14 glslplayground | grep mAttrs   # 收字后应
 logcat -d | grep "ball window ->"                                  # 收字过程应是连续的一串尺寸
 ```
 
-## 朗读 v2：每条回复都念 + 15 秒怪停顿的根因（2026-10-17）
-
-### 用户的两句话
-
-1. 「只要有新的回复就朗读，不是最终回复也要朗读」；
-2. 「朗读的停顿太久了很奇怪，帮我查一下原因」。
-
-### 根因：那个"停顿"是**盲等满 15 秒**
-
-`speak-trace.log` 里最近十几次朗读全是同一个形状：
-
-```
-speakOnce 进入: 907 字 → 开始等插件口播稿（最多 15000ms）
-  → 没等到插件稿（等满 15149ms）→ 交给 TTS 713 字（规则清洗）
-```
-
-球在念之前会等 DSH 插件写的口播稿，等不到就**等满 `speak_wait_ms`（默认 15000）**才回落。
-而插件那时根本没在跑：
-
-- `~/.dsh/profiles/web/package.json` 的 `dependencies` 里有 `dsh-plugin-speech`，但
-  **`dsh.profile.bundles` 里没有它** —— 2026-10-16 02:15 装 `dsh-web-mobile-fix` 时
-  `dsh plugin add` 重写了 package.json，把手工加的 bundle 登记**抹掉了**；
-- 插件日志最后一笔停在 10-16 02:13:47，DSH 10-16 09:25 重启后再没加载过。
-
-所以：**每一次朗读都实打实停 15 秒**，然后念规则清洗版。
-
-### 顺便修掉的第二件事：只有最终回复才念
-
-原来只有 `turn/end`（镜像路径）和本地流的 `onDone` 调 `speakOnce`，
-中间每个 step 的 `assistant/message`（跑工具前的旁白）虽然**球里出字了**，却一声不响。
-
-### 改法
-
-**球側（`SiriAssistant.java` / `DshHttpTransport.java`）**
-
-- `Mirror` / `Stream` 两个接口都加了 `onMessage(text, turn, step, hasTools)`：
-  DSH 的 `assistant/message` 是**一步一条**，`turn`/`step` 从 `event.data` 取
-  （取不到就用 `seq` 兜底）；`hasTools` = 这条消息带不带 tool-call 块
-  （**不带 = 本回合最终回复**，因为 agent loop 里"没有 tool-call 就 return completed"）。
-- 每条消息都念一次，按 `(turn, step)` 去重（镜像 WebSocket 重连会重放事件，
-  只按文本哈希去重挡不住）：
-  - 处理中的旁白 → **立刻念**（规则清洗，短句本来就好听）；
-  - 最终回复 → 才去等插件口播稿，且**只在插件心跳新鲜时**等，上限默认 2500ms。
-- 心跳：`files/speech-plugin.alive`（插件每 15 秒 touch，球 45 秒内算"在跑"）。
-  **插件没在跑 → 一秒都不等** —— 这一条是对这次事故的直接免疫。
-- 口播稿带身份：`files/spoken.json = {v,turn,step,text}`，球只认 `(turn,step)` 对得上的那份；
-  `text` 为空串 = 插件说"这条我没稿子，念你本地那版"（太短/改写失败都这么回），
-  球因此**立刻**回落，不必等满超时。
-- `turn/end` 只在"本轮一条都没念过"时兜底补念。
-- 朗读排了序：`speakGen` 序号 + 主线程排队，等待期间来了新消息就丢掉旧的那次（不会倒着念）。
-
-**插件側（`dsh-plugin-speech/lib/index.js` v2）**
-
-- 只改写「不带 tool-call」的那条 = 最终回复（v1 取"本回合最长正文"，可能取到中间旁白）；
-- 写 `spoken.json`（带身份）+ `spoken.txt`（纯文本，老版球兜底）+ 心跳文件；
-- 正文 < 60 字直接跳过模型，写空稿让球立刻出声；
-- **登记改放 `~/.dsh/profiles/web/cordis.patch.yml`**（profile 自己的 patch 层，
-  `dsh plugin add` 不碰它），不再写 `dsh.profile.bundles`。
-
-**设置页**：新增「处理中也念（每条回复都念）」（`speak_steps`，默认开）、
-「等口播稿上限」（`speak_wait_ms`，默认 2500，0 = 不等）、
-状态行「口播稿插件：在跑 / 没在跑」（`WatchBridge.getSpeechPluginAlive()`）。
-
-### 实测核对（改完当天）
-
-```
-speak-trace.log: 处理中回复 1/90：93 字
-                 不等口播稿（非最终回复）→ 直接念规则清洗版
-                 交给 TTS: 87 字（规则清洗）        ← 3ms，零等待
-```
-
-另一个发现：改 `cordis.patch.yml` 会**触发热重载**（插件当场就被加载了），
-但 **ESM 模块按路径缓存**，改 `lib/index.js` 必须重启 DSH 进程才生效。
-
 ## metaball 搜索层：双指长按 → 小黑球 → 搜索胶囊（2026-10-17 新增，**移植**不是仿制）
 
 ### 用户要的是什么（两次强调，第一版做错了一次）
@@ -1486,7 +1192,7 @@ speak-trace.log: 处理中回复 1/90：93 字
 |---|---|---|
 | 形状/材质 | `metaball-search.html` 的 `const FRAG = \`…\`` | `SearchLayerShader.java`（**整段抄**，只改 4 处必须改的） |
 | 动画/手感 | 演示页的 `class Spring` + `P` 参数 + 状态机（IDLE/DRAG/CAPSULE/RETRACT） | `FloatingBallService` 的 `MorphSpring` + `SQ_*` 常量 + `sqPhase` |
-| 界面 | 演示页 `#search` 那段 DOM/CSS | `BallSearchBar.java`（🔍 输入框 🎤，含自绘发光光标） |
+| 界面 | 演示页 `#search` 那段 DOM/CSS | `BallSearchBar.java`（🔍 输入框，含自绘发光光标） |
 
 着色器只改了四处（都在 `SearchLayerShader` 的头注释里标了 ★）：
 ① 去掉 `#version 300 es`、`outColor`→`gl_FragColor`（本机是 GLES2）；
@@ -1514,8 +1220,8 @@ speak-trace.log: 处理中回复 1/90：93 字
 1. **`winY0()` 在"窗口贴屏幕最上沿"时算成 0**：老实现要求 `renderer.winY > 0` 才算数，
    而整屏窗口的 winY 正好是 0 → 输入行整体下移一个状态栏（实测行在 347、胶囊在 253）。
    现在改为**先问 `glView.getLocationOnScreen()`**（唯一在 y=0 时也对得上的来源）。
-2. **放大镜贴到了胶囊左边缘**：我一开始把左边距写成 `14dp - hot`（hot 是麦克风的热区 padding），
-   但放大镜没有热区 —— 用户一眼看出来"搜索按钮偏左一点点"。现在左边距 = 14dp、右边距 = 0。
+2. **放大镜贴到了胶囊左边缘**：我一开始为了给图标加热区把左边距写小了，
+   用户一眼看出来"搜索按钮偏左一点点"。现在左边距 = 14dp，输入框右侧也留 14dp。
 3. **全屏"点空白关掉"层会被唤起手势的尾巴点到**：手指还按着的时候这一层就挂上了，代理窗口
    一让路，同一串手势剩下的 `ACTION_UP` 就落到它头上 → "搜索框刚出现就自己关掉"。
    现在只认**从本层自己 DOWN 开始**的那一串 + 800ms 静默期。
@@ -1537,13 +1243,12 @@ D=/sdcard/Android/data/com.glslplayground.app/files
 touch $D/search-open                      # 打开（不必真做双指长按）
 printf '你好' > $D/search-type            # 只填字（再用键盘回车发）
 printf '你好' > $D/search-ask             # 一条龙：打开 → 填字 → 发送
-touch $D/search-mic                       # 点一下麦克风（再点一次=结束并转写发送）
 touch $D/search-close
 logcat -d | grep -E "search: "            # 全程日志
 printf '' > $D/ballshot && su -c "cp /data/user/0/com.glslplayground.app/files/ball-capture.png /sdcard/cap.png"
 ```
 
-设置页「DSH 语音助手」里也有两个按钮：**打开搜索框（调版式）** / **关掉搜索框**。
+设置页「DSH 文本助手」里也有两个按钮：**打开搜索框（调版式）** / **关掉搜索框**。
 
 ### 已验证 / 未验证
 
@@ -1552,10 +1257,8 @@ printf '' > $D/ballshot && su -c "cp /data/user/0/com.glslplayground.app/files/b
 - ✅ **小黑球 → 胶囊**的弹簧与材质（抓帧对过：胶囊 + 软阴影 + 折射背景）。
 - ✅ **顶部黑区已删**：抓帧量顶部 0~40 行 alpha=0（黑边在时那一段是满的）。
 - ✅ **发光光标**：连抓 6 帧，x≈163 那一列亮/灭交替（1.12s 里 60% 亮）。
-- ✅ **打字 + 键盘回车发送**：`search: 发送 N 字` → `ws stream done: N text-deltas` → 球里出字 + TTS。
-- ✅ **麦克风**：`state=LISTENING` → 再点 `state=TRANSCRIBING` → 转写回来走 `TranscriptSink`
-  （没声音时正确回落 `search: 转写失败 没听清`）。
+- ✅ **打字 + 键盘回车发送**：`search: 发送 N 字` → `ws stream done: N text-deltas` → 球里出字。
 - ✅ 点空白 / 发送 / 返回键 都能收，收完球**精确回到原来的家**（`siri window place: home=(…)`）。
-- ⚠️ **没验到的**：真实语音走一遍"录音→识别→自动发送"；浅色桌面下胶囊底部的折射观感
+- ⚠️ **没验到的**：浅色桌面下胶囊底部的折射观感
   （设置页/桌面偏暗，看不透）；胶囊里那行字在**极亮背景**下的可读性。
 - ⚠️ 双指长按的 520ms 阈值、SQ_DROP_MS=260（小黑球单独待多久）只有用户能定。

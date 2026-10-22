@@ -11,7 +11,7 @@ python3 sweep.py --sweep radius --values 139,120,100,80 --modes wave,dotsonly --
 ```
 
 - `--bg synthetic|dark|capture`：合成桌面 / 深色桌面 / 直接用 `.preview/ball-capture.png`（设置页存的球体截图）当桌面。
-- `--modes wave,old,new,dotsonly,blend`：`wave`=聆听中的 Siri 波，`old`=改之前的流体圆点，
+- `--modes wave,old,new,dotsonly,blend`：`wave`=波形态的 Siri 波，`old`=改之前的流体圆点，
   `new`=现在的参数，`dotsonly`=只画圆点本体（不乘 uWaveAmp/waveVis，便于量尺寸），`blend`=两者交叉淡化。
 - 可调：`--radius`(环半径px) `--offny`(环心偏移) `--dotr` `--intensity` `--gain` `--t`(时间秒) `--fadein`。
 - 统计里的 `addMean/addPeak` 是「有光效 − 无光效」的增量亮度，用来对齐两种形态的观感。

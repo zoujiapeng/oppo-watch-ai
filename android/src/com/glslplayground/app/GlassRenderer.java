@@ -56,6 +56,21 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float sDensity = 2.75f;   // 物理像素 / CSS px（演示页的 uDpr）
     private int searchProg = 0;
 
+    // ── 状态 3 / 玻璃菜单层（ZoneLayerShader）────────────────────────────────
+    // 和搜索层同一条渲染套路：整屏窗口、抓屏当折射源、材质公式一模一样，
+    // 只是形状从"单个 blob"变成"最多 5 个圆角形状里取最近的那个"。
+    // 服务侧每帧组装好数组再整体赋值（copy-on-write），避免 GL 线程读到半截数据。
+    public volatile boolean zoneMode = false;
+    /** 5 × vec4(cx, cy, halfX, halfY)，屏幕像素、y 向下。 */
+    public volatile float[] zShape = new float[20];
+    /** 5 × vec4(act, dark, cornerRadius, enabled)。 */
+    public volatile float[] zMeta = new float[20];
+    public volatile float zCont = 0.55f;
+    public volatile float zRefract = 14f;
+    public volatile float zHeight = 18f;
+    public volatile float zDensity = 2.75f;
+    private int zoneProg = 0;
+
     private OnSurfaceReady readyCb;
 
     // ── 球体参数（默认值与 liquid-glass.html 滑块一致）──
@@ -75,7 +90,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     /**
      * 「波进玻璃」模式：1 = 把 Siri 波先画进背景纹理，再走折射/色散/模糊 ——
      * 观感就是"玻璃后面的一道光"，跟背景完全同一套光学（用户 2026-10-16 要的方形态效果）；
-     * 0 = 老样子：波直接叠在玻璃上（圆形球聆听/思考时的观感，别动）。
+     * 0 = 老样子：波直接叠在玻璃上（圆球态/思考时的观感，别动）。
      */
     public volatile float waveInGlass = 0f;
     /**
@@ -95,8 +110,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      * 中间那一瞬没有任何波/点在画，切换就看不出来了。
      */
     public volatile float waveGate = 1f;
-    /** 语音助手实时音量叠加在 waveAmp 上的增益（0 = 不影响用户设置）。 */
-    public volatile float voiceBoost = 0f;
 
     // ── 思考中（流体圆点）的成形参数：环半径按屏幕像素给，圆点在任何球里都是等大的圆 ──
     public volatile float orbRadius = 90f;    // 圆点环半径（屏幕像素）
@@ -433,7 +446,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    } else {\n" +
         // 黑区遮蔽：圆球态照旧（波画在黑区里，不压一下会过曝）
         "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
-        "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：聆听→思考时不再「啪」地换一套光效\n" +
+        "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：思考→回答时不再「啪」地换一套光效\n" +
         "    vec3 waveEff = waveCol(wp, iTime, 1.0);\n" +
         "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
         "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
@@ -531,7 +544,59 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
     }
 
-    // ─────────────────────────── GL 生命周期 ───────────────────────────
+    /**
+     * 状态 3 / 玻璃菜单层：和 {@link #drawSearchLayer} 同一条管线（抓屏→背景→模糊→合成），
+     * 只是把 5 个形状与它们的高亮/深浅/圆角交给 {@link ZoneLayerShader}。
+     *
+     * 坐标同样是"屏幕像素、y 向下"，画布是绘制缓冲 → 所有长度量乘 k。
+     */
+    private void drawZoneLayer(int bgTex) {
+        if (zoneProg == 0) return;
+        float k = (winPixelW > 0 && winW > 0) ? (float) winW / (float) winPixelW : 1f;
+        float invK = 1f / Math.max(k, 1e-3f);
+        float dpr = Math.max(0.5f, zDensity) * k;
+        useProgram(zoneProg);
+        bindFullscreen(zoneProg);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, winW, winH);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurSrcTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(zoneProg, "iBg"), 0);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(zoneProg, "iBlur"), 1);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(zoneProg, "uRes"), winW, winH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(zoneProg, "uScreen"), screenW, screenH);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(zoneProg, "uWinPos"), winX, winY);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uK"), 10f * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uHeight"), zHeight * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uRefract"), zRefract * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uHlAmt"), sHlAmt);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uAb"), sAb);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uDpr"), dpr);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCont"),
+                Math.max(0f, Math.min(1f, zCont)));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uValid"), 1f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uPxToScreen"), invK);
+
+        float[] s = zShape;
+        float[] m = zMeta;
+        for (int i = 0; i < 5; i++) {
+            // ⚠ 形状坐标是**屏幕**像素，而 shader 里的 p 是**窗口内**画布像素：
+            //   先减窗口在屏幕上的位置，再乘 k。搜索层不用减是因为它整屏、且窗口顶边对齐屏幕顶边。
+            GLES20.glUniform4f(GLES20.glGetUniformLocation(zoneProg, "uS" + i),
+                    (s[i * 4] - winX) * k, (s[i * 4 + 1] - winY) * k,
+                    Math.max(s[i * 4 + 2], 0.5f) * k, Math.max(s[i * 4 + 3], 0.5f) * k);
+            GLES20.glUniform4f(GLES20.glGetUniformLocation(zoneProg, "uM" + i),
+                    Math.max(0f, Math.min(1f, m[i * 4])),      // act
+                    Math.max(0f, Math.min(1f, m[i * 4 + 1])),  // dark
+                    Math.max(0f, Math.min(1f, m[i * 4 + 2])) * Math.min(
+                            Math.max(s[i * 4 + 2], 0.5f), Math.max(s[i * 4 + 3], 0.5f)) * k,
+                    m[i * 4 + 3] >= 0.5f ? 1f : 0f);           // enabled
+        }
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
+    }
+
     @Override public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -541,6 +606,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         blurProg = build(VS, FS_BLUR);
         compProg = build(VS, FS_COMP);
         searchProg = build(VS, SearchLayerShader.FRAG);   // metaball-search 那一层（原样移植）
+        zoneProg = build(VS, ZoneLayerShader.FRAG);       // 状态 3：同一套材质、多个形状
         maskProg = build(VS, FS_MASK);
 
         int[] b = new int[1];
@@ -688,11 +754,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             bgTex = bg.tex;
         }
 
-        // 波的幅度（含音量增益与闸门）
-        float waveAmpEff = waveOn ? waveAmp * (1f + voiceBoost) * waveGate : 0f;
+        // 波的幅度（含闸门）
+        float waveAmpEff = waveOn ? waveAmp * waveGate : 0f;
 
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
         buildBlur(bgTex);
+
+        // ── 状态 3 / 玻璃菜单层（同一套材质，多个形状）────────────────────────
+        if (zoneMode) {
+            drawZoneLayer(bgTex);
+            return;
+        }
 
         // ── 搜索层：演示页那一套（球整趟让路）──────────────────────────────
         // 抓屏/抠图/模糊三趟照旧复用（搜索层的折射就是要"球窗之外的真实桌面"），

@@ -39,7 +39,6 @@ import java.util.List;
  *   session/create   → 新会话
  *   session/prompt   → 发一句话
  *   session/page     → 读事件页（含 assistant/message 正文）
- *   speech/transcribe→ 16 kHz PCM16 WAV(base64) → 文本，走 profile 里配的语音插件
  */
 public final class DshHttpTransport implements SiriAssistant.Transport {
 
@@ -53,6 +52,14 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         "/data/data/com.termux/files/home/dsh-watchdog.log",
     };
 
+    /**
+     * 有人（`tools/dsh-cookie.sh`）替我们把会话 cookie 落在 Termux 家目录时，直接用它。
+     *
+     * 适用场景：DSH 是 `dshpj` 起的 —— token 只在它自己的终端里打印，`~/dsh.log` 没有，
+     * 而反代（3081）手里握着的就是一条 30 天有效的 cookie。抄过来就不用再起第二个 DSH。
+     */
+    private static final String COOKIE_FILE = "/data/data/com.termux/files/home/dsh.cookie";
+
     private final Context app;
     private final String base;
     private final SharedPreferences prefs;
@@ -60,6 +67,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     private volatile int rpcSeq = 0;
     private volatile boolean cancelled = false;
     private volatile Thread worker;
+    /** 落盘的会话 cookie 被 DSH 拒过一次（过期/换实例）→ 本次进程内不再用它，回退去找 token。 */
+    private volatile boolean cookieFileRejected = false;
 
     public DshHttpTransport(Context ctx, String endpoint) {
         this.app = ctx.getApplicationContext();
@@ -73,24 +82,6 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
 
     // ── Transport ─────────────────────────────────────────────────────
 
-    @Override public void transcribe(final String wavBase64, final SiriAssistant.Result<String> cb) {
-        runAsync(new Runnable() {
-            @Override public void run() {
-                try {
-                    JSONObject args = new JSONObject();
-                    JSONObject req = new JSONObject();
-                    req.put("audioBase64", wavBase64);
-                    req.put("language", "zh");
-                    args.put("request", req);
-                    JSONObject value = rpc("speech/transcribe", args);
-                    cb.ok(value == null ? "" : value.optString("text", ""));
-                } catch (Throwable t) {
-                    cb.fail(message(t));
-                }
-            }
-        });
-    }
-
     @Override public void ask(final String text, final SiriAssistant.Stream cb) {
         cancelled = false;
         runAsync(new Runnable() {
@@ -102,7 +93,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                     String sessionId = pickSession();
                     // 优先走 WebSocket：只有它给得了逐 token 的 text-delta，
                     // 「一个字一个字弹出来」靠的就是这条流；失败再退回轮询。
-                    if (askStreaming(sessionId, text, cb)) return;
+                    if (askStreaming(sessionId, textContent(text), cb)) return;
                     if (cancelled) return;
                     askPolling(sessionId, text, cb);
                 } catch (Throwable t) {
@@ -113,12 +104,53 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     }
 
     /**
+     * 发到**指定会话**（三态手势机用：语音/状态 2 的发送目标可能是刚建的新会话，
+     * 也可能是工作目录/搜索里选中的旧会话），并且允许带附件回执。
+     */
+    @Override public void askContent(final String sessionId, final String text,
+                                     final java.util.List<String> receipts,
+                                     final SiriAssistant.Stream cb) {
+        cancelled = false;
+        runAsync(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (cookie == null) {
+                        try { authenticate(); } catch (Exception e) { Log.i(TAG, "no cookie: " + e.getMessage()); }
+                    }
+                    JSONArray content = textContent(text);
+                    if (receipts != null) {
+                        for (String r : receipts) {
+                            if (r != null && !r.isEmpty()) {
+                                content.put(new JSONObject().put("type", "file").put("receiptId", r));
+                            }
+                        }
+                    }
+                    if (askStreaming(sessionId, content, cb)) return;
+                    if (cancelled) return;
+                    askPolling(sessionId, text, cb);
+                } catch (Throwable t) {
+                    if (!cancelled) cb.onError(message(t));
+                }
+            }
+        });
+    }
+
+    /** prompt content 里的文字段（至少一段：空文本时给一个空格，避免"没有内容可发"）。 */
+    private static JSONArray textContent(String text) throws Exception {
+        JSONArray content = new JSONArray();
+        String t = text == null ? "" : text;
+        if (t.trim().isEmpty()) t = "（附件）";
+        content.put(new JSONObject().put("type", "text").put("text", t));
+        return content;
+    }
+
+    /**
      * 流式路径：`ws://…/api/remote.mux` 上开一条 `session/follow`
      * （带 `assistantStream:true` 才有增量），边收 `chunk.text-delta`
      * 边把累积文本回调出去；durable 的 assistant/message 到达时用它的
      * 正文覆盖累积值（权威文本），turn/end 收尾。
      */
-    private boolean askStreaming(String sessionId, String text, final SiriAssistant.Stream cb) {
+    private boolean askStreaming(String sessionId, JSONArray content, final SiriAssistant.Stream cb) {
         java.net.URI uri;
         try {
             uri = java.net.URI.create(base);
@@ -175,8 +207,6 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                                     cb.onDelta(buf.toString());
                                 }
                             }
-                            // 逐条朗读：球自己问的这一轮同样每个 step 念一次
-                            cb.onMessage(body, turnOf(ev), stepOf(ev), hasToolCall(ev));
                         } else if ("turn/end".equals(type) || "session/removed".equals(type)) {
                             synchronized (lock) { done[0] = true; lock.notifyAll(); }
                         }
@@ -210,7 +240,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             open.put("payload", payload);
             ws.sendText(open.toString());
 
-            prompt(sessionId, text);
+            prompt(sessionId, content);
         } catch (Throwable t) {
             ws.close();
             Log.i(TAG, "ws setup/prompt failed: " + t);
@@ -242,7 +272,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     /** 兜底路径：轮询 session/page。流式不可用时才走这里。 */
     private void askPolling(String sessionId, String text, SiriAssistant.Stream cb) throws Exception {
         long baseline = cursorOf(sessionId);
-        prompt(sessionId, text);
+        prompt(sessionId, textContent(text));
         long deadline = System.currentTimeMillis() + 180000L;
         String best = "";
         while (!cancelled && System.currentTimeMillis() < deadline) {
@@ -260,15 +290,13 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         else cb.onDone(best);
     }
 
-    /** 发一条用户消息。 */
-    private void prompt(String sessionId, String text) throws Exception {
+    /** 发一条用户消息（content 已经是 prompt content parts）。 */
+    private void prompt(String sessionId, JSONArray content) throws Exception {
         JSONObject args = new JSONObject();
         JSONObject req = new JSONObject();
         req.put("requestId", "android-" + System.currentTimeMillis() + "-" + (++rpcSeq));
         req.put("sessionId", sessionId);
         req.put("mode", "queue");
-        JSONArray content = new JSONArray();
-        content.put(new JSONObject().put("type", "text").put("text", text));
         req.put("content", content);
         args.put("request", req);
         rpc("session/prompt", args);
@@ -387,9 +415,6 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             if ("assistant/message".equals(type)) {
                 String body = textOf(ev);
                 if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
-                // 逐条朗读用：**每个 step** 的 assistant/message 都回调一次（含非最终回复）。
-                // 事件里带 turn/step，球拿它去重、也拿它跟插件口播稿对号。
-                cb.onMessage(body, turnOf(ev), stepOf(ev), hasToolCall(ev));
             } else if ("turn/end".equals(type)) {
                 cb.onTurnEnd();
             }
@@ -570,35 +595,6 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         return sb.toString();
     }
 
-    /**
-     * 事件的回合号。assistant/message 的数据里带 turn/step（DSH 一步一条消息）；
-     * 万一某个版本没带，就用事件的 seq 当身份，保证「同一件事只念一次」不失效。
-     */
-    private static long turnOf(JSONObject event) {
-        JSONObject data = event.optJSONObject("data");
-        long turn = data == null ? -1L : data.optLong("turn", -1L);
-        if (turn > 0) return turn;
-        return event.optLong("seq", -1L);
-    }
-
-    private static int stepOf(JSONObject event) {
-        JSONObject data = event.optJSONObject("data");
-        return data == null ? 0 : (int) data.optLong("step", 0L);
-    }
-
-    /** 这条消息里有没有工具调用 —— 有 = 处理中的旁白，没有 = 本回合最终回复。 */
-    private static boolean hasToolCall(JSONObject event) {
-        JSONObject data = event.optJSONObject("data");
-        JSONObject message = data == null ? null : data.optJSONObject("message");
-        JSONArray content = message == null ? null : message.optJSONArray("content");
-        if (content == null) return false;
-        for (int i = 0; i < content.length(); i++) {
-            JSONObject block = content.optJSONObject(i);
-            if (block != null && "tool-call".equals(block.optString("type"))) return true;
-        }
-        return false;
-    }
-
     // ── 给审批流用的几个入口（同一个 cookie / 同一个地址）────────────────
 
     /** 换一次签名 cookie 并把 cookie 串交出去（WebSocket 握手要带它）。 */
@@ -645,6 +641,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 int code = c.getResponseCode();
                 if (code == 401 || code == 403) {          // cookie 过期/服务重启 → 重新换一次
                     cookie = null;
+                    cookieFileRejected = true;             // 磁盘上那份也可能过期了，别再拿它试
                     drain(c);
                     last = new IOException("DSH 认证失败(" + code + ")");
                     continue;
@@ -680,11 +677,25 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         throw last == null ? new IOException("DSH 调用失败") : last;
     }
 
-    /** 用启动 token 换签名 cookie。 */
+    /**
+     * 用启动 token 换签名 cookie。
+     *
+     * 但**先看有没有人替我们把 cookie 落盘了**：`dshpj` / 反代那条路上，token 只打印在
+     * 它自己的终端里、`~/dsh.log` 里没有；由 `tools/dsh-cookie.sh` 把反代手里的
+     * 会话 cookie 写进 `~/dsh.cookie`，球就直接用它 —— 不必再起第二个 DSH，
+     * 也不必占一个多余端口（用户 2026-10-22 的要求）。
+     */
     private void authenticate() throws IOException {
+        String fileCookie = cookieFileRejected ? null : readCookieFile();
+        if (fileCookie != null) {
+            cookie = fileCookie;
+            Log.i(TAG, "authenticated against " + base + " via dsh.cookie ("
+                    + fileCookie.substring(0, Math.min(24, fileCookie.length())) + "…)");
+            return;
+        }
         String token = readLaunchToken();
         if (token == null || token.isEmpty()) {
-            throw new IOException("没找到 DSH 启动 token（dsh.log）");
+            throw new IOException("没找到 DSH 启动 token（dsh.log），也没有 dsh.cookie");
         }
         HttpURLConnection c = open("/?token=" + URLEncoder.encode(token, "UTF-8"), "GET");
         int code = c.getResponseCode();
@@ -698,6 +709,18 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         if (!pair.startsWith("dsh-auth-")) throw new IOException("DSH cookie 名称异常");
         cookie = pair;
         Log.i(TAG, "authenticated against " + base + " (" + pair.substring(0, Math.min(24, pair.length())) + "…)");
+    }
+
+    /** 读 `~/dsh.cookie`：普通 App 读不到 Termux 家目录，直接读失败就走 root。 */
+    private static String readCookieFile() {
+        String txt = readTailQuietly(COOKIE_FILE, 4096);
+        if (txt == null || txt.trim().isEmpty()) txt = rootTail(COOKIE_FILE, 4096);
+        if (txt == null || txt.isEmpty()) return null;
+        for (String line : txt.split("\\r?\\n")) {
+            String t = line.trim();
+            if (t.startsWith("dsh-auth-") && t.indexOf('=') > "dsh-auth-".length()) return t;
+        }
+        return null;
     }
 
     /** 从 DSH 启动日志里取 launch token；直接读不到就用 root 读。 */

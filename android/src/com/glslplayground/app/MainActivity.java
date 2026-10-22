@@ -28,6 +28,19 @@ public class MainActivity extends Activity {
     private static final int MEDIA_PROJECTION_REQUEST = 1002;
     private static final int OVERLAY_REQUEST = 1003;
 
+    /**
+     * 初始状态的语音输入要麦克风。Android 6+ 是运行时权限 —— 打开 App（首页/设置页）时
+     * 顺手要一次；用户拒绝也不影响别的功能（球只是不会自动听，点球会说"麦克风不可用"）。
+     */
+    private void askRecordAudio() {
+        try {
+            if (Build.VERSION.SDK_INT < 23) return;
+            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, 1004);
+        } catch (Throwable ignored) { }
+    }
+
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private boolean kiosk = false;
@@ -36,12 +49,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        askRecordAudio();
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         if (isKeepScreenOn()) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         goImmersive();
-        maybeRequestMic();
 
         webView = new WebView(this);
         WebSettings s = webView.getSettings();
@@ -98,19 +111,6 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-    }
-
-    /**
-     * 语音助手要录音。设备所有者身份下 SiriAssistant 会静默自授权；
-     * 只有拿不到时才由这里弹一次系统对话框（需要前台 Activity）。
-     */
-    private void maybeRequestMic() {
-        boolean want = getIntent() != null && getIntent().getBooleanExtra("request_mic", false);
-        if (!want) return;
-        if (Build.VERSION.SDK_INT < 23) return;
-        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
-                == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
-        requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, 2001);
     }
 
     @Override

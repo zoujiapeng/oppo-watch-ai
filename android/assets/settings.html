@@ -149,32 +149,20 @@
       <input type="range" id="orbRim" min="0" max="400" step="5" value="130">
       <div class="muted" style="margin-top:6px">「思考中」的那组流体圆点：环半径按<b>屏幕像素</b>给，圆点在任何形状的球里都是等大的圆
         （旧版把竖轴多放大了一倍多，扁球里被拉成高椭圆，又大又亮、整颗球像换了个东西）；亮度默认与 Siri 波在黑区里对齐。
-        聆听→思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。<br>
+        思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。<br>
         <b>边缘辉光</b>是圆点带起的球壳高光 / 赤道线 / 底缘亮度：波动形态用的是波自己的暗色，
         圆点形态若用固定满值会让整圈球边亮 5 倍（就是「思考中边缘太亮、很突兀」），
         所以这里按「圆点自身亮度 × 系数」走，默认 1.30 与 Siri 波同亮；调到 0 = 圆点完全不带边缘光。</div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
 
-    <div class="row" style="margin-top:16px"><label>DSH 语音助手（点球说话）</label><div class="switch" id="swAsst"></div></div>
+    <div class="row" style="margin-top:16px"><label>DSH 文本助手（打字问答）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
-      <div class="row"><label>朗读回答</label><div class="switch" id="swAsstSpeak"></div></div>
-      <div id="speakBox" style="display:none">
-        <div class="row" style="margin-top:8px"><label>处理中也念（每条回复都念）</label><div class="switch" id="swAsstSteps"></div></div>
-        <div class="row" style="margin-top:10px"><label>等口播稿上限</label><span class="v" id="vSpeakWait">2.5s</span></div>
-        <input type="range" id="speakWait" min="0" max="8000" step="250" value="2500">
-        <div class="muted" style="margin-top:6px">口播稿插件：<b id="speakPlugin">—</b>。
-          <b>开</b>=最终回复最多等这么久拿模型写的短稿（插件实测约 1 秒写好），等不到就用本地规则清洗版；
-          <b>0</b>=一秒都不等。<b>插件没在跑时一秒都不等</b>，与这个滑块无关。</div>
-        <div class="muted" style="margin-top:6px">「处理中也念」= DSH 每个 step 的回复都念（含跑工具前的旁白）。
-          处理中的旁白又短又干净，<b>立刻念、不等口播稿</b>；只有本回合的最终回复才等上面那个上限。</div>
-      </div>
       <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
       <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
       <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
       <div class="btns" style="margin-top:8px">
         <button id="btnAsstTest">问一句（测试链路）</button>
-        <button id="btnAsstToggle">聆听 / 停止</button>
         <button id="btnAsstClear">清空球内文字</button>
         <button id="btnBallShot">保存球体截图</button>
       </div>
@@ -183,20 +171,15 @@
         <button id="btnSearchClose">关掉搜索框</button>
       </div>
       <div class="muted" style="margin-top:6px"><b>搜索框（打字问 DSH）</b>：<b>双指长按</b>水晶球（任何状态下都行）→
-        球缩成小黑球 →「一团黑」弹开成胶囊 → 🔍 输入框 🎤 从模糊里凝聚出来。<br>
-        打字后按<b>键盘回车（发送键）</b>直接把这句话发给 DSH；点右边的 <b>🎤</b> 开始录音、<b>再点一次</b>结束，
-        识别到的字会先填进输入框再自动发出去。<b>点空白处 / 返回键</b>收起胶囊。<br>
+        球缩成小黑球 →「一团黑」弹开成胶囊 → 🔍 输入框从模糊里凝聚出来。<br>
+        打字后按<b>键盘回车（发送键）</b>直接把这句话发给 DSH。<b>点空白处 / 返回键</b>收起胶囊。<br>
         老的 <b>双指拖动</b>手势保持不变（仍是"回到初始形状"）；胶囊停在小黑球原来的高度，
         键盘弹出来时整条胶囊会自动上移躲开键盘。</div>
-      <div class="muted" style="margin-top:8px">手势：<b>双击水晶球</b>开始说话（球变回小球、波形跟着你的声音呼吸），
-        <b>再双击</b>结束并发送 —— 识别完先把你说的那句话显示在球里，随后回答逐字替换它；
-        <b>单指长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作；单击不响应；
+      <div class="muted" style="margin-top:8px">手势：<b>单指长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作；单击不响应；
         <b>双指长按</b>=打开打字搜索框，<b>双指拖动</b>=回到初始形状。</div>
-      <div class="muted" style="margin-top:6px">转写交给本机 DSH 的语音插件（该接口是整段返回、没有逐字中间结果），
-        所以说话时只有波形反馈，识别完立刻把「你说了什么」显示出来。</div>
       <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
         只要 DSH 当前会话里 AI 在回话，球就会逐字出字；在 DSH 里切换对话后约 20 秒自动跟上。</div>
-      <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返，不需要麦克风。</div>
+      <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返。</div>
       <div class="muted" style="margin-top:8px">球内当前文字（实时回读）：<b id="ballText">—</b></div>
       <div class="muted" style="margin-top:4px">助手状态：<b id="asstState">—</b> · 球 Siri 模式：<b id="ballSiri">—</b></div>
       <div class="muted" style="margin-top:4px">镜像：<b id="mirrorState">—</b></div>
@@ -236,7 +219,7 @@
     <div class="row"><label>球体大小（整体 scale）</label><span class="v" id="vSC">1.00</span></div>
     <input type="range" id="SC" min="20" max="200" value="100">
     <div class="muted" style="margin:-6px 0 10px">球体整体大小：1.00 = 原始大小，0.50 = 一半。
-      实时生效、自动保存。说话/回答时球会按文字大小变形，但仍以这个倍率为基准。</div>
+      实时生效、自动保存。回答出字时球会按文字大小变形，但仍以这个倍率为基准。</div>
     <div class="row"><label>整体 y 位置</label><span class="v" id="vPY">0.50</span></div>
     <input type="range" id="PY" min="8" max="92" value="50">
     <div class="row"><label>整体 x 位置</label><span class="v" id="vPX">0.50</span></div>
@@ -477,18 +460,15 @@
     }, 180);
   });
 
-  // ── DSH 语音助手 ──────────────────────────────────────────────
+  // ── DSH 文本助手 ──────────────────────────────────────────────
   var swAsst = document.getElementById('swAsst');
   var asstBox = document.getElementById('asstBox');
-  var swAsstSpeak = document.getElementById('swAsstSpeak');
   var asstUrl = document.getElementById('asstUrl');
   function syncAsst() {
-    var on = false, speak = false, url = '';
+    var on = false, url = '';
     try { on = W.getAssistantEnabled(); } catch (e) {}
-    try { speak = W.getAssistantSpeak(); } catch (e) {}
     try { url = W.getAssistantEndpoint(); } catch (e) {}
     swAsst.classList.toggle('on', !!on);
-    swAsstSpeak.classList.toggle('on', !!speak);
     asstBox.style.display = on ? 'block' : 'none';
     if (!asstUrl.value && url) asstUrl.value = url;
   }
@@ -498,50 +478,11 @@
     try { W.setAssistantEnabled(on); } catch (e) {}
     syncAsst();
   });
-  swAsstSpeak.addEventListener('click', function () {
-    var on = !swAsstSpeak.classList.contains('on');
-    try { W.setAssistantSpeak(on); } catch (e) {}
-    syncAsst();
-  });
-  // 每步都念 + 等口播稿上限 + 插件在不在跑
-  var swAsstSteps = document.getElementById('swAsstSteps');
-  var speakBox = document.getElementById('speakBox');
-  var speakWait = document.getElementById('speakWait');
-  var vSpeakWait = document.getElementById('vSpeakWait');
-  var speakPlugin = document.getElementById('speakPlugin');
-  function fmtWait(ms) { return ms <= 0 ? '不等' : (parseFloat((ms / 1000).toFixed(2)) + 's'); }
-  function syncSpeak() {
-    var on = swAsstSpeak.classList.contains('on');
-    speakBox.style.display = on ? 'block' : 'none';
-    if (!on) return;
-    var steps = true;
-    try { steps = !!W.getAssistantSpeakSteps(); } catch (e) {}
-    swAsstSteps.classList.toggle('on', steps);
-    try { var ms = W.getAssistantSpeakWaitMs(); if (ms !== undefined && ms !== null) speakWait.value = ms; } catch (e) {}
-    vSpeakWait.textContent = fmtWait(parseInt(speakWait.value, 10));
-    var alive = false;
-    try { alive = !!W.getSpeechPluginAlive(); } catch (e) {}
-    speakPlugin.textContent = alive ? '在跑（心跳正常）' : '没在跑（不等口播稿）';
-  }
-  syncSpeak();
-  swAsstSteps.addEventListener('click', function () {
-    var on = !swAsstSteps.classList.contains('on');
-    try { W.setAssistantSpeakSteps(on); } catch (e) {}
-    swAsstSteps.classList.toggle('on', on);
-  });
-  speakWait.addEventListener('input', function () {
-    vSpeakWait.textContent = fmtWait(parseInt(speakWait.value, 10));
-    try { W.setAssistantSpeakWaitMs(parseInt(speakWait.value, 10)); } catch (e) {}
-  });
-  setInterval(syncSpeak, 3000);
   asstUrl.addEventListener('change', function () {
     try { W.setAssistantEndpoint(asstUrl.value); } catch (e) {}
   });
   document.getElementById('btnAsstTest').addEventListener('click', function () {
     try { W.assistantAsk('只回复四个字：球内链路正常'); } catch (e) {}
-  });
-  document.getElementById('btnAsstToggle').addEventListener('click', function () {
-    try { W.assistantToggle(); } catch (e) {}
   });
   document.getElementById('btnAsstClear').addEventListener('click', function () {
     try { W.setSiriText(''); } catch (e) {}

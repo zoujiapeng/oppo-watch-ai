@@ -7,9 +7,8 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
-import android.graphics.RadialGradient;
-import android.graphics.RectF;
 import android.graphics.Shader;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.text.InputType;
 import android.util.TypedValue;
@@ -22,27 +21,36 @@ import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 /**
- * 搜索胶囊里的那一行：🔍 输入框 🎤 —— 版式照抄 metaball-search.html 的 #search。
+ * 搜索胶囊里的那一行：🔍 输入框 +（可选）附件小标签 —— 版式照抄 metaball-search.html 的 #search。
  *
  * 三个刻意的地方：
  *
- * 1. **图标是画出来的，不是 emoji/字体**。放大镜与麦克风的路径直接取自演示页那两段 SVG
+ * 1. **图标是画出来的，不是 emoji/字体**。放大镜的路径直接取自演示页那段 SVG
  *    （viewBox 20×20），按控件尺寸等比缩放 —— 换字体/换 ROM 都不会变成豆腐块。
  * 2. **"凝聚"动画走 RenderEffect 模糊**（Apple Intelligence materialize）：
  *    演示页用 CSS `filter: blur(9px) → 0`，Android 12+ 有等价的 View.setRenderEffect。
  *    低版本只淡入，不影响功能。
- * 3. **录音反馈落在麦克风自己身上**（电平辉光）：搜索胶囊里没有 Siri 波可看，
- *    而录音必须"看得见在动"，所以 RMS 直接驱动图标背后的光晕。
+ * 3. **手势全部在这一层判**（状态 2 的语法，见 FloatingBallService）：
+ *    单击 = 进入编辑（弹键盘）；长按 = 添附件（等同 DSH 输入框那个 `uV2eYG_add`）；
+ *    双指长按 = 参数弹窗（Agent 预设 / 模型 / 推理等级 / 权限）。
+ *    判手势用的是**窗口级的 dispatchTouchEvent**，所以点在输入框里也算数。
  */
 public class BallSearchBar extends LinearLayout {
 
     public interface Listener {
         /** 键盘回车 / IME 的发送键：把文字交出去。 */
         void onSubmit(String text);
-        /** 点了麦克风（录音开始 / 结束由外面决定）。 */
-        void onMicTap();
+        /** 长按：添附件（等价于前端输入框左边那个「＋」）。 */
+        void onLongPressAdd();
+        /** 双指长按：弹出 Agent 预设 / 模型 / 推理等级 / 权限。 */
+        void onTwoFingerHold();
+        /** 点了附件小标签：把它去掉。 */
+        void onAttachmentTap();
+        /** 单击胶囊 / 输入框：进入编辑（状态 2 的"单击=编辑"）。 */
+        void onTapEdit();
     }
 
     // 颜色/透明度照 metaball-search.html 的 #search 抄：图标 #fff @ .72、
@@ -50,18 +58,37 @@ public class BallSearchBar extends LinearLayout {
     private static final int COL_ICON = 0xB8FFFFFF;
     private static final int COL_TEXT = 0xFFFFFFFF;
     private static final int COL_HINT = 0x73EBEBF5;
-    private static final int COL_REC = 0xFFFF6B6B;      // 录音中：暖红
-    private static final int COL_BUSY = 0xFF6FA8FF;     // 转写中：蓝
 
     private final float d;
     private final IconView iconSearch;
     private final EditText input;
-    private final IconView iconMic;
+    private final TextView attachChip;
     private Listener listener;
 
     /** 凝聚动画：0 = 完全没出现（模糊+透明），1 = 落定。 */
     private float material = 0f;
     private ValueAnimator matAnim;
+
+    // ── 手势：长按添附件 / 双指长按参数（都在本窗口里判）─────────────────────
+    private static final long ADD_HOLD_MS = 500;
+    private static final long TWO_HOLD_MS = 520;
+    private float downX, downY;
+    private boolean gestureTwo = false;
+    private boolean gestureFired = false;
+    private final Runnable addHold = new Runnable() {
+        @Override public void run() {
+            if (gestureFired || gestureTwo) return;
+            gestureFired = true;
+            if (listener != null) listener.onLongPressAdd();
+        }
+    };
+    private final Runnable twoHold = new Runnable() {
+        @Override public void run() {
+            if (gestureFired || !gestureTwo) return;
+            gestureFired = true;
+            if (listener != null) listener.onTwoFingerHold();
+        }
+    };
 
     public BallSearchBar(Context c) {
         super(c);
@@ -69,8 +96,24 @@ public class BallSearchBar extends LinearLayout {
         setOrientation(HORIZONTAL);
         setGravity(Gravity.CENTER_VERTICAL);
 
-        iconSearch = new IconView(c, IconView.SEARCH);
+        iconSearch = new IconView(c);
         iconSearch.setIconColor(COL_ICON);
+
+        // 附件小标签：默认不占位；有附件时插在图标右边（对应前端输入框上方那排附件条）
+        attachChip = new TextView(c);
+        attachChip.setTextColor(0xE6FFFFFF);
+        attachChip.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(12));
+        attachChip.setGravity(Gravity.CENTER);
+        attachChip.setPadding(Math.round(dp(9)), 0, Math.round(dp(9)), 0);
+        GradientDrawable chipBg = new GradientDrawable();
+        chipBg.setColor(0x33FFFFFF);
+        chipBg.setCornerRadius(dp(11));
+        chipBg.setStroke(Math.round(dp(0.8f)), 0x4DFFFFFF);
+        attachChip.setBackground(chipBg);
+        attachChip.setVisibility(GONE);
+        attachChip.setOnClickListener(new OnClickListener() {
+            @Override public void onClick(View v) { if (listener != null) listener.onAttachmentTap(); }
+        });
 
         input = new EditText(c);
         input.setBackgroundColor(Color.TRANSPARENT);
@@ -103,36 +146,33 @@ public class BallSearchBar extends LinearLayout {
             }
         });
 
-        iconMic = new IconView(c, IconView.MIC);
-        iconMic.setIconColor(COL_ICON);
-        iconMic.setOnClickListener(new OnClickListener() {
-            @Override public void onClick(View v) { if (listener != null) listener.onMicTap(); }
-        });
-        // 触摸热区比图标大一圈（胶囊只有 50dp 高，图标本身才 17dp，直接点很难点中）
-        int hot = Math.round(dp(14));
-        iconMic.setPadding(hot, hot, hot, hot);
-
-        // 演示页窄屏档：.ic margin-left:14px / .mic margin-right:14px，输入框自己 padding 0 8px
+        // 演示页窄屏档：.ic margin-left:14px / 输入框自己 padding 0 8px；
+        // 左右各留 14px，胶囊内部看起来才对称。
         int side = Math.round(dp(14));
         addView(iconSearch, new LayoutParams(Math.round(dp(17)), Math.round(dp(17))));
+        addView(attachChip, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                Math.round(dp(22))));
+        ((LayoutParams) attachChip.getLayoutParams()).setMargins(Math.round(dp(6)), 0, 0, 0);
         addView(input, new LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
-        addView(iconMic, new LayoutParams(Math.round(dp(17)) + 2 * hot, Math.round(dp(17)) + 2 * hot));
-        // ⚠️ 左内边距**不能**减去 hot：hot 只是麦克风为了好点而加的热区，
-        // 放大镜没有这层，减掉就等于把它贴到胶囊左边缘（用户实测："搜索按钮偏左一点点"）。
-        // 右边距 = 0 是对的：麦克风的 hot 本身就给出了 .mic{margin-right:14px} 那 14px。
-        setPadding(side, 0, 0, 0);
+        setPadding(side, 0, side, 0);
 
-        // 点空白处也聚焦输入框（iOS 搜索框就是这个手感）
+        // 点空白处也聚焦输入框（iOS 搜索框就是这个手感）—— 现在这句只在"编辑态"成立，
+        // 未编辑时点一下由服务侧翻成"进入编辑"（状态 2 的单击语义）。
         input.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { keepCaretSolid(); }
             @Override public void afterTextChanged(android.text.Editable s) { }
         });
         input.setOnClickListener(new OnClickListener() {
-            @Override public void onClick(View v) { keepCaretSolid(); }
+            @Override public void onClick(View v) {
+                keepCaretSolid();
+                if (listener != null) listener.onTapEdit();
+            }
         });
         setOnClickListener(new OnClickListener() {
-            @Override public void onClick(View v) { focusInput(); keepCaretSolid(); }
+            @Override public void onClick(View v) {
+                if (listener != null) listener.onTapEdit();
+            }
         });
         setAlpha(0f);
     }
@@ -141,7 +181,6 @@ public class BallSearchBar extends LinearLayout {
 
     public void setListener(Listener l) { this.listener = l; }
     public EditText input() { return input; }
-    public View mic() { return iconMic; }
 
     public String text() {
         return input.getText() == null ? "" : input.getText().toString();
@@ -150,6 +189,22 @@ public class BallSearchBar extends LinearLayout {
     public void setText(String s) {
         input.setText(s == null ? "" : s);
         if (s != null && !s.isEmpty()) input.setSelection(input.getText().length());
+    }
+
+    public void setHint(String hint) {
+        input.setHint(hint == null ? "" : hint);
+    }
+
+    /** 附件小标签：传 null/空 就收起来。 */
+    public void setAttachmentName(String name) {
+        if (name == null || name.isEmpty()) {
+            attachChip.setVisibility(GONE);
+            return;
+        }
+        String n = name;
+        if (n.length() > 12) n = "…" + n.substring(n.length() - 11);
+        attachChip.setText(n);
+        attachChip.setVisibility(VISIBLE);
     }
 
     private void submit() {
@@ -162,6 +217,59 @@ public class BallSearchBar extends LinearLayout {
             input.setFocusableInTouchMode(true);
             input.requestFocus();
         } catch (Throwable ignored) { }
+    }
+
+    /** 退出编辑态（状态 2 刚落定、或点了输入框以外时）。 */
+    public void blurInput() {
+        try {
+            input.clearFocus();
+            setFocusableInTouchMode(false);
+            setFocusable(false);
+        } catch (Throwable ignored) { }
+    }
+
+    public boolean isEditing() { return input.hasFocus(); }
+
+    // ── 手势判定：窗口级，点在输入框里也收得到 ────────────────────────────
+    @Override public boolean dispatchTouchEvent(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = e.getX(); downY = e.getY();
+                gestureTwo = false;
+                gestureFired = false;
+                removeCallbacks(addHold);
+                removeCallbacks(twoHold);
+                postDelayed(addHold, ADD_HOLD_MS);
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (e.getPointerCount() >= 2) {
+                    gestureTwo = true;
+                    removeCallbacks(addHold);
+                    removeCallbacks(twoHold);
+                    postDelayed(twoHold, TWO_HOLD_MS);
+                }
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (!gestureFired && !gestureTwo
+                        && (Math.abs(e.getX() - downX) + Math.abs(e.getY() - downY)) > dp(8)) {
+                    removeCallbacks(addHold);
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                removeCallbacks(addHold);
+                removeCallbacks(twoHold);
+                break;
+        }
+        boolean handled = super.dispatchTouchEvent(e);
+        // 长按已经触发过：把这一串剩下的 up/cancel 吃掉，避免它再被当成"点了一下输入框"
+        if (gestureFired && (e.getActionMasked() == MotionEvent.ACTION_UP
+                || e.getActionMasked() == MotionEvent.ACTION_CANCEL)) {
+            gestureFired = false;
+            gestureTwo = false;
+            return true;
+        }
+        return handled;
     }
 
     // ── 凝聚（materialize）───────────────────────────────────────────────
@@ -282,73 +390,33 @@ public class BallSearchBar extends LinearLayout {
         caretBar.setColor(0xFFFFFFFF);
         cv.drawRoundRect(caretRect, dp(1), dp(1), caretBar);
     }
-
-    // ── 麦克风状态 ──────────────────────────────────────────────────────
-    public void setRecording(boolean rec) {
-        iconMic.setAccent(rec ? COL_REC : 0);
-        if (!rec) iconMic.setLevel(0f, 0f);
-    }
-
-    public void setTranscribing() {
-        iconMic.setAccent(COL_BUSY);
-        iconMic.setLevel(0.35f, 0.5f);
-    }
-
-    /** 录音电平（0..1）：麦克风背后的光晕跟着声音呼吸。 */
-    public void setLevel(float rms) {
-        iconMic.setLevel(rms, 1f);
-    }
 }
 
 /**
- * 搜索胶囊里的那两个图标：放大镜 / 麦克风。
+ * 搜索胶囊里的放大镜图标。
  *
- * 路径直接照抄 metaball-search.html 里那两段 SVG（viewBox 20×20，stroke 1.6/1.5、
+ * 路径直接照抄 metaball-search.html 里那段 SVG（viewBox 20×20，stroke 1.6、
  * 圆头圆角），画的时候整体缩放到控件尺寸 —— 不依赖任何字体或 drawable 资源。
- * 录音时在图标背后叠一层 accent 色光晕，半径跟着电平走。
  */
 class IconView extends View {
 
-    static final int SEARCH = 0, MIC = 1;
-
-    private final int kind;
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
-    private final RectF tmp = new RectF();
 
     private int iconColor = 0xCCFFFFFF;
-    private int accent = 0;
-    private float level = 0f, glowAmt = 0f;
 
-    IconView(Context c, int kind) {
+    IconView(Context c) {
         super(c);
-        this.kind = kind;
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.ROUND);
         stroke.setStrokeJoin(Paint.Join.ROUND);
-        stroke.setStrokeWidth(kind == SEARCH ? 1.6f : 1.5f);
+        stroke.setStrokeWidth(1.6f);
         stroke.setColor(iconColor);
-        glow.setStyle(Paint.Style.FILL);
     }
 
     void setIconColor(int c) {
         iconColor = c;
         stroke.setColor(c);
-        invalidate();
-    }
-
-    /** 非 0 = 打开背后那层光晕（录音红 / 转写蓝）。 */
-    void setAccent(int c) {
-        accent = c;
-        if (c == 0) { level = 0f; glowAmt = 0f; }
-        invalidate();
-    }
-
-    /** rms 0..1；amount 0..1 = 这层光晕的强度。 */
-    void setLevel(float rms, float amount) {
-        level = Math.max(0f, Math.min(1f, rms));
-        glowAmt = Math.max(0f, Math.min(1f, amount));
         invalidate();
     }
 
@@ -360,15 +428,6 @@ class IconView extends View {
         float s = Math.min(w, h);
         if (s <= 1f) return;
 
-        if (accent != 0 && glowAmt > 0.01f) {
-            float r = s * (0.75f + 0.55f * level);
-            int a = (int) (Math.min(1f, glowAmt * (0.35f + 0.65f * level)) * 150) << 24;
-            glow.setShader(new RadialGradient(cx, cy, r, accent & 0x00FFFFFF | a, 0x00000000,
-                    Shader.TileMode.CLAMP));
-            cv.drawCircle(cx, cy, r, glow);
-            glow.setShader(null);
-        }
-
         cv.save();
         cv.translate(cx - s * 0.5f, cy - s * 0.5f);
         cv.scale(s / 20f, s / 20f);          // 之后一律按演示页那套 20×20 坐标下笔
@@ -379,17 +438,8 @@ class IconView extends View {
 
     private void build() {
         path.reset();
-        if (kind == SEARCH) {
-            path.addCircle(8.5f, 8.5f, 5.5f, Path.Direction.CW);
-            path.moveTo(12.8f, 12.8f);
-            path.lineTo(17f, 17f);
-        } else {
-            tmp.set(7.2f, 2.2f, 12.8f, 11.8f);
-            path.addRoundRect(tmp, 2.8f, 2.8f, Path.Direction.CW);
-            tmp.set(4.6f, 4.2f, 15.4f, 15.0f);        // 圆心 (10,9.6) r=5.4
-            path.arcTo(tmp, 180f, -180f);             // 负方向 = 向屏幕下方鼓出来（麦克风托）
-            path.moveTo(10f, 15f);
-            path.lineTo(10f, 17.6f);
-        }
+        path.addCircle(8.5f, 8.5f, 5.5f, Path.Direction.CW);
+        path.moveTo(12.8f, 12.8f);
+        path.lineTo(17f, 17f);
     }
 }

@@ -461,7 +461,7 @@ public class WatchBridge {
         });
     }
 
-    // ─────────── DSH 语音助手（悬浮球 ↔ 本机 DSH）───────────
+    // ─────────── DSH 文本助手（悬浮球 ↔ 本机 DSH）───────────
 
     @JavascriptInterface
     public boolean getAssistantEnabled() {
@@ -474,51 +474,6 @@ public class WatchBridge {
             public void run() { SiriAssistant.get(act).setEnabled(v); }
         });
     }
-
-    @JavascriptInterface
-    public boolean getAssistantSpeak() {
-        return SiriAssistant.get(act).speakReplies();
-    }
-
-    @JavascriptInterface
-    public void setAssistantSpeak(final boolean v) {
-        ui(new Runnable() {
-            public void run() { SiriAssistant.get(act).setSpeakReplies(v); }
-        });
-    }
-
-    /** 「每步都念」：处理中的非最终回复也朗读（AI 一有新回复就出声）。 */
-    @JavascriptInterface
-    public boolean getAssistantSpeakSteps() {
-        return SiriAssistant.get(act).speakSteps();
-    }
-
-    @JavascriptInterface
-    public void setAssistantSpeakSteps(final boolean v) {
-        ui(new Runnable() {
-            public void run() { SiriAssistant.get(act).setSpeakSteps(v); }
-        });
-    }
-
-    /** 等插件口播稿的上限（毫秒）。0 = 一秒都不等，直接念规则清洗版。 */
-    @JavascriptInterface
-    public int getAssistantSpeakWaitMs() {
-        return (int) SiriAssistant.get(act).getSpeakWaitMs();
-    }
-
-    @JavascriptInterface
-    public void setAssistantSpeakWaitMs(final int ms) {
-        ui(new Runnable() {
-            public void run() { SiriAssistant.get(act).setSpeakWaitMs(ms); }
-        });
-    }
-
-    /** 口播稿插件在不在跑（读它的心跳文件）：没在跑时球一秒都不等。 */
-    @JavascriptInterface
-    public boolean getSpeechPluginAlive() {
-        return SiriAssistant.get(act).speechPluginAlive();
-    }
-
 
     @JavascriptInterface
     public String getAssistantEndpoint() {
@@ -558,17 +513,6 @@ public class WatchBridge {
     @JavascriptInterface
     public boolean isSearchBoxOpen() {
         return FloatingBallService.isSearchBoxOpen();
-    }
-
-    /** 等同于点一下球：开始/结束聆听，或打断当前一轮。 */
-    @JavascriptInterface
-    public void assistantToggle() {
-        ui(new Runnable() {
-            public void run() {
-                FloatingBallService.ensureSiriForAssistant();
-                SiriAssistant.get(act).toggle();
-            }
-        });
     }
 
     @JavascriptInterface

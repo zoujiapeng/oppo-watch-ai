@@ -1,5 +1,5 @@
 // Siri 波 / Fluid Dots 的 GPU 数学搬到 CPU —— 与 GlassRenderer.FS_COMP 逐行对应，
-// 用来在电脑上离线对比「思考中」和「聆听中」的观感，不必每次刷 APK。
+// 用来在电脑上离线对比「思考中」和「波形态」的观感，不必每次刷 APK。
 // 坐标约定：c = fc - center，c.y 向上；ny = -c.y / hy（球顶 +1，球底 -1）。
 
 export const PI = Math.PI;

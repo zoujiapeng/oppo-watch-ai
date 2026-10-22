@@ -8,13 +8,15 @@ import android.util.Base64;
 import java.io.ByteArrayOutputStream;
 
 /**
- * 语音采集：16 kHz 单声道 PCM16 —— 与 DSH 语音插件发给宿主 speech/transcribe 的载荷一致。
+ * 语音采集：16 kHz 单声道 PCM16 —— 与 DSH 语音插件发给宿主 `speech/transcribe` 的载荷一致。
  *
  * 采到的原始 PCM 在这里直接封成 canonical WAV（44 字节头 + little-endian PCM），
  * 再 base64 交给 DSH；PCM 与 WAV 的分辨率不需要额外重采样，因为 AudioRecord
  * 直接就按 16 kHz 采集。
  *
- * 采集过程中按 50 ms 上报一次 RMS（0..1），用来驱动水晶球的 Siri 波振幅。
+ * 采集过程中按 50 ms 上报一次 RMS（0..1），用来驱动水晶球的 Siri 波振幅；
+ * 同时做**端点检测（VAD）**：说过话之后静音超过 {@link #SILENCE_MS} 就算"话音刚落"，
+ * 通过 {@link Listener#onSpeechEnd} 通知调用方自动收尾（用户要的"话音刚落自动停"）。
  */
 public final class VoiceCapture {
 
@@ -23,12 +25,26 @@ public final class VoiceCapture {
         void onLevel(float rms);
         /** @param reason 采集失败原因，已本地化 */
         void onError(String reason);
+        /**
+         * 端点检测认为"说完了"：已经有一段语音，且随后静音超过 SILENCE_MS。
+         * 调用方收到后应当 {@link #stop()} 拿到 WAV 去转写。
+         */
+        void onSpeechEnd(float voicedSeconds);
     }
 
     public static final int SAMPLE_RATE = 16000;
     /** DSH 宿主对 audioBytes 的上限是 4 MiB；16 kHz PCM16 约 32 KB/s，留足余量。 */
     private static final int MAX_BYTES = 3 * 1024 * 1024;
     private static final int MAX_SECONDS = 90;
+
+    /** 判定"在说话"的 RMS 门槛（未做感知曲线，0..1）。 */
+    private static final float VAD_SPEECH_RMS = 0.020f;
+    /** 说过话之后静音多久算说完（"话音刚落"）。 */
+    public static final long SILENCE_MS = 900;
+    /** 至少要有这么长的有效语音，才值得自动收尾（防止一声咳嗽就发出去）。 */
+    private static final long MIN_VOICED_MS = 260;
+    /** 开头这段没人说话就当"用户还没开口"，不触发端点。 */
+    private static final long ARM_AFTER_MS = 220;
 
     private AudioRecord record;
     private Thread worker;
@@ -38,12 +54,18 @@ public final class VoiceCapture {
     private Listener listener;
     private long startedAt;
 
+    /** 累计"在说话"的毫秒数（供 UI 判断值不值得发）。 */
+    private volatile long voicedMs = 0;
+    private volatile boolean endFired = false;
+
     public boolean isRunning() { return running; }
 
     /** 当前已采集时长（秒）。 */
     public float seconds() {
         return running ? (System.currentTimeMillis() - startedAt) / 1000f : 0f;
     }
+
+    public long voicedMs() { return voicedMs; }
 
     /**
      * 打开麦克风并开始采集。失败时不抛异常，通过 {@link Listener#onError} 上报，
@@ -73,12 +95,17 @@ public final class VoiceCapture {
         pcm = new ByteArrayOutputStream(SAMPLE_RATE * 2 * 8);
         aborted = false;
         running = true;
+        ended = false;
+        endFired = false;
+        voicedMs = 0;
         startedAt = System.currentTimeMillis();
 
         worker = new Thread(new Runnable() {
             @Override public void run() {
                 final short[] buf = new short[Math.max(1024, bufSize / 2)];
                 long lastReport = 0;
+                long silenceSince = 0;      // 静音起点（0 = 还没进入静音）
+                long voicedAtLast = 0;
                 try {
                     record.startRecording();
                     while (running) {
@@ -97,17 +124,33 @@ public final class VoiceCapture {
                             pcm.write(bytes, 0, bytes.length);
                         }
                         long now = System.currentTimeMillis();
+                        double sum = 0;
+                        for (int i = 0; i < n; i++) {
+                            double v = buf[i] / 32768.0;
+                            sum += v * v;
+                        }
+                        float rms = (float) Math.sqrt(sum / Math.max(1, n));
+                        long span = Math.max(1, n) * 1000L / SAMPLE_RATE;
+                        boolean voiced = rms >= VAD_SPEECH_RMS;
+                        if (voiced) {
+                            voicedMs += span;
+                            voicedAtLast = now;
+                            silenceSince = 0;
+                        } else if (voicedAtLast > 0) {
+                            if (silenceSince == 0) silenceSince = now;
+                        }
                         if (now - lastReport >= 50) {
                             lastReport = now;
-                            double sum = 0;
-                            for (int i = 0; i < n; i++) {
-                                double v = buf[i] / 32768.0;
-                                sum += v * v;
-                            }
-                            float rms = (float) Math.sqrt(sum / Math.max(1, n));
                             // 语音大致落在 0.02..0.25 RMS：做一点感知曲线
                             final float shaped = Math.min(1f, (float) Math.pow(rms * 4.2, 0.75));
                             if (listener != null) listener.onLevel(shaped);
+                        }
+                        // ── 端点检测：说过话 + 静音够久 + 采集够久（开头那 220ms 不算）──
+                        if (!endFired && now - startedAt > ARM_AFTER_MS
+                                && voicedMs >= MIN_VOICED_MS
+                                && silenceSince > 0 && now - silenceSince >= SILENCE_MS) {
+                            endFired = true;
+                            if (listener != null) listener.onSpeechEnd(voicedMs / 1000f);
                         }
                         if (pcm.size() >= MAX_BYTES
                                 || (now - startedAt) / 1000f >= MAX_SECONDS) {
@@ -125,9 +168,12 @@ public final class VoiceCapture {
         return true;
     }
 
+    private volatile boolean ended;
+
     /** 结束采集并返回 WAV 字节；没有有效音频时返回 null。 */
     public byte[] stop() {
         running = false;
+        ended = true;
         Thread w = worker;
         worker = null;
         if (w != null) {

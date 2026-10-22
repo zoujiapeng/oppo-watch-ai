@@ -1,4 +1,4 @@
-// CLI：渲染「聆听中 / 思考中」球体对比图 + 增益统计。
+// CLI：渲染「波形态 / 思考中」球体对比图 + 增益统计。
 //   node run.mjs --bg synthetic|capture|dark [--out x.png] [--t 4] [--modes wave,old,new]
 import path from 'node:path';
 import { defaultUi, syntheticDesktop, loadBg, render, gainMetrics, rimMetrics, saveFrame, stripFrames } from './render.mjs';

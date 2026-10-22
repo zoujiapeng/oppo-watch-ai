@@ -4,7 +4,7 @@
 
 **一组 WebGL / GLSL shader 实验：声波、液态玻璃、流体融合**
 
-A set of WebGL / GLSL shader experiments — voice waves, liquid glass, and fluid metaball morphing
+A set of WebGL / GLSL shader experiments — sound waves, liquid glass, and fluid metaball morphing
 
 [**在线预览 / Live Demo**](https://aaaa-zhen.github.io/glsl-playground/)
 
@@ -23,14 +23,14 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 ## 📱 安卓悬浮水晶球 = 本机 DSH 的前端
 
 这个仓库里还有一个**安卓端**（已合入 `main`）：一颗浮在桌面上的液态玻璃水晶球，
-**双击说话 → 本机 DSH 转写并回答 → 回答逐字打进这颗球里**（球随文字变形；聆听时是 Siri 波、
+**双指长按打字提问 → 本机 DSH 回答 → 回答逐字打进这颗球里**（球随文字变形；
 思考中是流体圆点、回答完文字消散、球缩回原本那颗水晶球）。DSH 侧一行没改，
 走的是它已经在给浏览器用的 HTTP / WebSocket 接口。
 
-不想说话时**双指长按这颗球**就能打字问它：球当场让路，换 **metaball-search 那一层本身**
+**双指长按这颗球**就能问它：球当场让路，换 **metaball-search 那一层本身**
 （不是球的形变）—— 小黑球从球原来的位置冒出来，再照演示页那套弹簧与材质弹成顶部一条
-**玻璃搜索胶囊**（🔍 输入框 🎤，光标也是演示页那颗发光白条）。键盘回车直接发送，
-点麦克风则是"录音 → 转写 → 自动发送"，点空白/返回键收回去并把球还回来。
+**玻璃搜索胶囊**（🔍 输入框，光标也是演示页那颗发光白条）。键盘回车直接发送，
+点空白/返回键收回去并把球还回来。
 见 [`OPERATIONS.md`](android/docs/OPERATIONS.md) 第三·五节。
 
 | 你想干什么 | 看这份 |
@@ -41,16 +41,8 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
 | **Agent 操控手机时球不吃手势**（球让路协议 / 验证脚本） | [`android/docs/BALL_TOUCH_GUARD.md`](android/docs/BALL_TOUCH_GUARD.md) |
 | **全部操作说明**（手势 / 状态 / 每个开关 / 调试口子 / 日志速查） | [`android/docs/OPERATIONS.md`](android/docs/OPERATIONS.md) |
-| **朗读为什么好听**：用 DSH 自己的模型把回复改写成口播稿 | [`dsh-plugin-speech/README.md`](dsh-plugin-speech/README.md) |
 
-**朗读回答**：DSH 里**每来一条新回复就念**（一个 step 一条，**包括不是最终回复的那些**：
-跑工具前的旁白立刻就念）。**本回合最终回复**则优先念「口播稿」—— 一个 DSH 插件
-（[`dsh-plugin-speech`](dsh-plugin-speech/README.md)）用你**当前会话的模型**把回复压成
-一句到三句（≤100 字）再交给 TTS；最多等它 2.5 秒，**插件没在跑就一秒都不等**。
-所以 **不需要第二份 API key**，DSH 那边也不改一行代码；插件挂了或没装，球会自动回落到
-本地的规则清洗（去掉 markdown / 代码块 / 表格 / emoji，路径与时间戳保持完整），朗读不会因此停摆。
-
-一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，但没有语音助手）。
+一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，见部署文档）。
 
 ```bash
 curl -L -o glsl-playground.apk \
@@ -84,7 +76,7 @@ javac --release 8 -classpath .build/android.jar -d .build/javac-check $(find .bu
 
 | Demo | 说明 | 交互 |
 |---|---|---|
-| **[Siri Wave](https://aaaa-zhen.github.io/glsl-playground/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 语音声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
+| **[Siri Wave](https://aaaa-zhen.github.io/glsl-playground/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
 | **[Liquid Glass](https://aaaa-zhen.github.io/glsl-playground/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | 液态玻璃材质：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
 | **[Metaball → Search](https://aaaa-zhen.github.io/glsl-playground/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | 从屏幕边缘拖出液滴唤起搜索框：梯度感知 smooth-min（液滴渗出时起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
 
@@ -132,7 +124,6 @@ python3 -m http.server 8000   # 然后访问 http://localhost:8000
 |---|---|
 | 三个 WebGL / GLSL demo（`*.html`） | MIT |
 | 安卓悬浮球（`android/`、`glsl-playground.apk`） | MIT |
-| DSH 口播稿插件（`dsh-plugin-speech/`） | MIT |
 
 > 液态玻璃的折射/色散/黑顶参数、SDF 与 `sdf_union` 的公式来自对 iOS QuartzCore
 > 的逆向记录（`metaball-search.html` 头部注释），属于公开的逆向资料整理，未包含任何 Apple 二进制。
