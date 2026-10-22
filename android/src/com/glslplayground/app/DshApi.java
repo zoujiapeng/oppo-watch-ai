@@ -254,6 +254,54 @@ final class DshApi {
         return text;
     }
 
+    /** 会话最后一条**用户**消息（"我发过什么"）。 */
+    String lastUserMessage(String sessionId) throws Exception {
+        long cursor = 0;
+        try {
+            JSONObject listArgs = new JSONObject();
+            listArgs.put("_request", new JSONObject());
+            JSONObject value = call("session/list", listArgs);
+            JSONArray items = value == null ? null : value.optJSONArray("items");
+            if (items != null) {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject it = items.optJSONObject(i);
+                    if (it == null || !sessionId.equals(it.optString("sessionId"))) continue;
+                    JSONObject proj = it.optJSONObject("projections");
+                    if (proj != null) cursor = proj.optLong("asOfSeq", 0);
+                }
+            }
+        } catch (Throwable ignored) { }
+        if (cursor <= 0) return "";
+        JSONObject req = new JSONObject();
+        JSONObject addr = new JSONObject();
+        addr.put("kind", "session");
+        addr.put("sessionId", sessionId);
+        req.put("address", addr);
+        req.put("throughSeq", cursor);
+        req.put("maxMessages", 30);
+        JSONObject page = call("session/page", argsOf(req));
+        JSONArray records = page == null ? null : page.optJSONArray("records");
+        if (records == null) return "";
+        String text = "";
+        for (int i = 0; i < records.length(); i++) {
+            JSONObject rec = records.optJSONObject(i);
+            JSONObject ev = rec == null ? null : rec.optJSONObject("event");
+            if (ev == null) continue;
+            if (!"user/message".equals(ev.optString("type"))) continue;
+            JSONObject data = ev.optJSONObject("data");
+            JSONObject msg = data == null ? null : data.optJSONObject("message");
+            JSONArray content = msg == null ? null : msg.optJSONArray("content");
+            if (content == null) continue;
+            StringBuilder sb = new StringBuilder();
+            for (int k = 0; k < content.length(); k++) {
+                JSONObject b = content.optJSONObject(k);
+                if (b != null && "text".equals(b.optString("type"))) sb.append(b.optString("text", ""));
+            }
+            if (sb.length() > 0) text = sb.toString();
+        }
+        return text;
+    }
+
     /** 新建会话（预设在这里落库：`session/create` 的 agentPreset 只在首轮之前生效）。 */
     String createSession(String cwd, String agentPreset) throws Exception {
         JSONObject req = new JSONObject();

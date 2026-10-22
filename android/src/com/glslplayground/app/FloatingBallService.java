@@ -5065,6 +5065,7 @@ public class FloatingBallService extends Service {
     private boolean convoStashed = false;
     private long convoDragLogAt = 0;
     private String convoStashText = "";
+    private String convoSentText = "";
     private boolean suppressConvoAutoClose = false;
     private String convoSessionId = null, convoTitle = null;
     private BallSearchBar convoBar;
@@ -5085,14 +5086,27 @@ public class FloatingBallService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 String text = "";
+                String lastUser = "";
                 try { text = api.lastAnswer(sid); }
                 catch (Throwable t) { Log.w("FloatingBall", "convo: 读最后回答失败 " + message(t)); }
+                try { lastUser = api.lastUserMessage(sid); }
+                catch (Throwable t) { Log.w("FloatingBall", "convo: 读最后提问失败 " + message(t)); }
                 final String tt = text;
+                final String lu = lastUser;
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (!convoOpen || !sid.equals(convoSessionId)) return;
-                        if (tt != null && !tt.trim().isEmpty()) setSiriText(tt);
-                        else setSiriText("（这个对话还没有回复）");
+                        StringBuilder sb = new StringBuilder();
+                        if (lu != null && !lu.trim().isEmpty()) sb.append("你：").append(lu.trim()).append("\n\n");
+                        if (tt != null && !tt.trim().isEmpty()) sb.append(tt);
+                        else sb.append("（这个对话还没有回复）");
+                        setSiriText(sb.toString());
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                measureSiriTargets(siriStr);   // 让方形的宽度/高度重新按文字收紧
+                                updateConvoChrome();
+                            }
+                        }, 350);
                     }
                 });
             }
@@ -5105,13 +5119,19 @@ public class FloatingBallService extends Service {
         if (convoBar == null) {
             BallSearchBar bar = new BallSearchBar(this);
             bar.setBackdrop(true);          // 对话卡的输入行不在球里，需要自带一层胶囊玻璃底
-            bar.setHint("发消息给「" + (title == null ? "对话" : title) + "」");
+            bar.setHint("发消息…");
             bar.setListener(new BallSearchBar.Listener() {
                 @Override public void onSubmit(String text) {
                     String t = text == null ? "" : text.trim();
                     if (t.isEmpty() || convoSessionId == null) return;
-                    if (convoBar != null) convoBar.setText("");
+                    if (convoBar != null) {
+                        convoBar.setText("");
+                        convoBar.setHint("已发出 · 等待回复…");
+                    }
                     Log.i("FloatingBall", "convo: 发送「" + t + "」");
+                    // 先把"我发了什么"显示出来：球里先显示这句，回答到了再被回答逐字替换
+                    convoSentText = t;
+                    setSiriText("你：" + t + "\n\n· 已发出，等待回复…");
                     sendTextToSession(convoSessionId, t, null, null);
                 }
                 @Override public void onLongPressAdd() { pickAttachment(); }
@@ -5128,8 +5148,12 @@ public class FloatingBallService extends Service {
             try { wm.addView(bar, convoBarParams); convoBar = bar; }
             catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
         }
-        int w = Math.min(screenW - Math.round(dp(36)), Math.round(dp(560)));
-        int h = Math.round(dp(48));
+        // 宽度跟"大方形"同宽（玻璃宽度 = 2 × glassHalfW），不再固定 560dp
+        int squareW = (siriText != null && siriText.getWidth() > dp(120))
+                ? siriText.getWidth() + Math.round(dp(22))
+                : Math.round(screenW * SIRI_W_RATIO);
+        int w = Math.max(Math.round(dp(160)), Math.min(screenW - Math.round(dp(48)), squareW));
+        int h = Math.round(dp(42));
         int x = (screenW - w) / 2;                 // 输入框居中（侧栏按钮已删除）
         int y = convoChromeY(h);
         convoBarParams.width = w;
@@ -5158,6 +5182,15 @@ public class FloatingBallService extends Service {
         if (!convoOpen || convoBar == null || convoBarParams == null) return;
         int h = convoBarParams.height;
         int y = convoChromeY(h);
+        if (siriText != null && siriText.getWidth() > dp(120)) {
+            int w2 = Math.max(Math.round(dp(160)),
+                    Math.min(screenW - Math.round(dp(48)), siriText.getWidth() + Math.round(dp(22))));
+            if (Math.abs(w2 - convoBarParams.width) > 2) {
+                convoBarParams.width = w2;
+                convoBarParams.x = (screenW - w2) / 2;
+                try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+            }
+        }
         if (Math.abs(convoBarParams.y - (y - Math.round(winY0()))) < 2) return;
         convoBarParams.y = y - Math.round(winY0());
         try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
