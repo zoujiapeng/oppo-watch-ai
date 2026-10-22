@@ -5179,10 +5179,12 @@ public class FloatingBallService extends Service {
             catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
         }
         // 宽度跟"大方形"同宽（玻璃宽度 = 2 × glassHalfW），不再固定 560dp
+        int glassW = Math.round(2f * glassHalfW()) - Math.round(dp(28));   // 比玻璃窄一点，左右图标都在玻璃内
         int squareW = (siriText != null && siriText.getWidth() > dp(120))
-                ? siriText.getWidth() + Math.round(dp(22))
+                ? siriText.getWidth()
                 : Math.round(screenW * SIRI_W_RATIO);
-        int w = Math.max(Math.round(dp(160)), Math.min(screenW - Math.round(dp(48)), squareW));
+        int w = Math.max(Math.round(dp(160)),
+                Math.min(Math.min(screenW - Math.round(dp(48)), squareW), glassW));
         int h = Math.round(dp(40));
         int x = (screenW - w) / 2;                 // 输入框居中（侧栏按钮已删除）
         int y = convoChromeY(h);
@@ -5203,7 +5205,7 @@ public class FloatingBallService extends Service {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             int glassBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
-            y = glassBottom - h - Math.round(dp(8));   // **玻璃内部**、离底边恒定 8dp
+            y = glassBottom - h - Math.round(dp(12));  // 玻璃内部、离底边 12dp（再抬高一点，图标不会顶出玻璃）
         }
         return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
     }
@@ -5214,7 +5216,8 @@ public class FloatingBallService extends Service {
         int y = convoChromeY(h);
         if (siriText != null && siriText.getWidth() > dp(120)) {
             int w2 = Math.max(Math.round(dp(160)),
-                    Math.min(screenW - Math.round(dp(48)), siriText.getWidth() + Math.round(dp(22))));
+                    Math.min(Math.min(screenW - Math.round(dp(48)), siriText.getWidth()),
+                            Math.round(2f * glassHalfW()) - Math.round(dp(28))));
             if (Math.abs(w2 - convoBarParams.width) > 2) {
                 convoBarParams.width = w2;
                 convoBarParams.x = (screenW - w2) / 2;
@@ -5250,6 +5253,9 @@ public class FloatingBallService extends Service {
                                 attachName == null ? attach.getName() : attachName, readAll(attach));
                         receipts.add(rid);
                         Log.i("FloatingBall", "convo: 附件已上传 receipt=" + rid);
+                        main.post(new Runnable() {
+                            @Override public void run() { toast("已带附件发出"); }
+                        });
                         main.post(new Runnable() {
                             @Override public void run() { clearAttachment(); }
                         });
@@ -6442,6 +6448,7 @@ public class FloatingBallService extends Service {
 
                 @Override public void onAttachmentTap() {
                     clearAttachment();
+                    if (convoBar != null) convoBar.setHint("发消息…");
                     toast("已移除附件");
                 }
             });
