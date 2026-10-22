@@ -3560,6 +3560,15 @@ public class FloatingBallService extends Service {
             tBlack = 0f;
             float b0 = winSize * 0.9f;
             updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+            // 球回初始圆球 = 对话结束：输入行（和附件标签）必须一起消失
+            // 只有"进过对话、且确实显示过内容"之后球才允许因为文字清空而收铬；
+            // 刚打开对话时的那一帧文字还是空的，不能据此就把对话关掉。
+            if (convoOpen && convoHadText
+                    && android.os.SystemClock.uptimeMillis() - convoOpenedAt > 1500) {
+                main.post(new Runnable() {
+                    @Override public void run() { closeConversation("球回到初始形态"); }
+                });
+            }
             // 球要缩回最小形态了 —— 文字必须「同一时刻」消失。
             // 只把文字设成空串是不够的：窗口/测量的更新是异步的，球收缩的这半秒里
             // 旧文字还留在屏幕上，看起来就是「球变小了、文字却飞出球外」。
@@ -5078,6 +5087,8 @@ public class FloatingBallService extends Service {
 
     private boolean convoOpen = false;
     private boolean convoStashed = false;
+    private long convoOpenedAt = 0;
+    private boolean convoHadText = false;
     private long convoDragLogAt = 0;
     private String convoStashText = "";
     private String convoSentText = "";
@@ -5091,6 +5102,8 @@ public class FloatingBallService extends Service {
     void openConversation(final String sid, final String title) {
         if (sid == null || sid.isEmpty()) return;
         convoOpen = true;
+        convoOpenedAt = android.os.SystemClock.uptimeMillis();
+        convoHadText = false;
         convoSessionId = sid;
         convoTitle = title == null || title.trim().isEmpty() || "null".equals(title) ? "对话" : title;
         targetSessionId = sid;
@@ -5119,6 +5132,7 @@ public class FloatingBallService extends Service {
                         if (!convoLastUser.isEmpty()) sb.append("你：").append(convoLastUser).append("\n\n");
                         if (tt != null && !tt.trim().isEmpty()) sb.append(tt);
                         else sb.append("（这个对话还没有回复）");
+                        convoHadText = true;
                         setSiriText(sb.toString());
                         main.postDelayed(new Runnable() {
                             @Override public void run() {
@@ -5222,6 +5236,7 @@ public class FloatingBallService extends Service {
         final File attach = pendingAttach;
         final String attachName = pendingAttachName;
         convoLastUser = text;
+        convoHadText = true;
         String echo = convoLastUserBlock();
         if (attach != null) echo += "\n［附件］" + (attachName == null ? attach.getName() : attachName);
         setSiriText(echo + "\n\n· 已发出，等待回复…");
@@ -5996,6 +6011,7 @@ public class FloatingBallService extends Service {
         pendingAttach = null;
         pendingAttachName = null;
         if (searchBar != null) searchBar.setAttachmentName(null);
+        if (convoBar != null) convoBar.setAttachmentName(null);   // 对话卡上那枚附件小标签也要收掉
     }
 
     // ═══════════ 搜索层：metaball-search.html 原样移植（双指长按唤起）═══════════
