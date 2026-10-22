@@ -3589,8 +3589,10 @@ public class FloatingBallService extends Service {
         //     用户原话：「方形不是说是正方形，且方形的宽要固定好（屏幕宽度的 85%）不可变，
         //     高度随文字往下涨的体积变化（不限字号）」。
         float hxpx = maxBallW / 2f;
-        float hypx = Math.max(base * minHalfY, th / 2f + padY);
-        hypx = Math.min(hypx, maxBallH / 2f);                         // 高 ≤ 屏幕 88%（物理上限）
+        // 对话卡：底部多留一条"输入区"，输入框就落在玻璃里（而不是浮在玻璃外面）
+        float convoExtra = convoOpen ? (dp(40) + dp(8) + dp(6)) : 0f;
+        float hypx = Math.max(base * minHalfY, th / 2f + padY + convoExtra / 2f);
+        hypx = Math.min(hypx, maxBallH / 2f + convoExtra / 2f);       // 高 ≤ 屏高 50%（+输入区）
         // 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，方框不缩回去。
         if (textHold) {
             hypx = Math.max(hypx, holdHalfY * base);
@@ -5094,6 +5096,9 @@ public class FloatingBallService extends Service {
         targetSessionId = sid;
         targetSessionTitle = title;
         ensureSiriForAssistant();          // 让球进入方形文字态
+        main.postDelayed(new Runnable() {
+            @Override public void run() { if (convoOpen) measureSiriTargets(siriStr); }
+        }, 120);                            // 让"底部输入区"立刻算进方形高度
         Log.i("FloatingBall", "convo: 进入对话「" + title + "」" + sid);
         final DshApi api = DshApi.get(this);
         new Thread(new Runnable() {
@@ -5132,7 +5137,7 @@ public class FloatingBallService extends Service {
         if (wm == null) return;
         if (convoBar == null) {
             BallSearchBar bar = new BallSearchBar(this);
-            bar.setBackdrop(true);          // 对话卡的输入行不在球里，需要自带一层胶囊玻璃底
+            bar.setBackdrop(false);         // 输入行现在落在方形玻璃内部，不需要自带底
             bar.setHint("发消息…");
             bar.setListener(new BallSearchBar.Listener() {
                 @Override public void onSubmit(String text) {
@@ -5183,8 +5188,8 @@ public class FloatingBallService extends Service {
         if (glView != null) {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
-            int ballBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
-            y = ballBottom + Math.round(dp(8));      // 与方形底边保持恒定 8dp
+            int glassBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
+            y = glassBottom - h - Math.round(dp(8));   // **玻璃内部**、离底边恒定 8dp
         }
         return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
     }
