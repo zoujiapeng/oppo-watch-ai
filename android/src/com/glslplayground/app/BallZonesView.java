@@ -56,9 +56,13 @@ final class BallZonesView extends View {
         stroke.setStrokeJoin(Paint.Join.ROUND);
         stroke.setStrokeWidth(dp(1.7f));
         stroke.setColor(0xF2FFFFFF);
+        // 玻璃变清透之后（2026-10-23 改成球那套折射），白字/白线在亮桌面上会"糊"掉 ——
+        // 统一加一层柔和投影，等于给它们各自垫了一圈玻璃边，不再依赖把整块玻璃压黑。
+        stroke.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
         fill.setStyle(Paint.Style.FILL);
         fill.setColor(0xFFFFFFFF);
         text.setColor(0xD9FFFFFF);
+        text.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
         text.setTextSize(dp(12f));
         text.setTextAlign(Paint.Align.CENTER);
         setClickable(false);

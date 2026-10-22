@@ -54,6 +54,8 @@
 | `bar-open` / `bar-search` | 状态 2：发消息 / 搜会话（`bar-search` 内容 = 初始文字） |
 | `bar-type` | 只把字填进状态 2 的输入框（不发送） |
 | `menu-dirs` / `menu-settings` / `menu-search` | 直接叫出对应玻璃菜单（`menu-search` 内容 = 关键词） |
+| `convo-latest` | 直接打开最近一条会话（切回对话卡，脚本里不用真去点列表） |
+| `ballshot` | 让球/玻璃窗自己存一帧到 `files/ball-capture.png`（状态 3、菜单、对话卡都能拍） |
 | `debug_show_glass_in_shot`（prefs） | true = 玻璃留在抓屏里，方便一次看清合成效果；**生产必须 false** |
 
 > 语音：系统 `SpeechRecognizer`（带 partial，离线优先）为主，失败退回"录音 + DSH `speech/transcribe`"。

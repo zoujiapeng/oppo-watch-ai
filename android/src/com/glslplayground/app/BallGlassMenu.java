@@ -71,6 +71,11 @@ final class BallGlassMenu extends View {
         rowLabel.setColor(0xF2FFFFFF);
         rowSub.setTextSize(dp(10f));
         rowSub.setColor(0x99FFFFFF);
+        // 同一套"玻璃上的字"：投影垫底，亮桌面上也读得出来
+        title.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
+        sub.setShadowLayer(dp(1.6f), 0f, dp(0.7f), 0xB0000000);
+        rowLabel.setShadowLayer(dp(1.8f), 0f, dp(0.8f), 0xC8000000);
+        rowSub.setShadowLayer(dp(1.6f), 0f, dp(0.7f), 0xA0000000);
         hair.setColor(0x26FFFFFF);
         hair.setStrokeWidth(Math.max(1f, dp(0.7f)));
         chip.setColor(0x1FFFFFFF);

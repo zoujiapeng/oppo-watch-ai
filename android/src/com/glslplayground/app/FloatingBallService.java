@@ -3393,22 +3393,40 @@ public class FloatingBallService extends Service {
         return top;
     }
 
-    /** 悬浮窗「请求 y → 实际屏幕 y」的系统 inset（本机 96px 状态栏）。 */
+    /**
+     * 悬浮窗「请求 y → 实际屏幕 y」的系统 inset（本机 90px 状态栏）。
+     *
+     * ★ 2026-10-23 修：**必须缓存**。
+     * 原来这里每次现算 `loc[1] - params.y`，但调用点（菜单/文字层/输入行）几乎都在
+     * `updateViewLayout()` 改完 params **之后**立刻调用 —— 那一刻 `getLocationOnScreen()`
+     * 还是旧位置，算出来是个离谱的大数，被 `d < screenH/4` 挡掉 → 返回 0 →
+     * 文字层整块**少抬一个状态栏**。实测菜单玻璃在 y=856、文字在 y=947（差 90px），
+     * 于是标题上面空一大块、最后两行被面板下沿切掉（用户报的「文字超出界面」）。
+     *
+     * 现在只把"看起来合理"的测量写进缓存，之后一律用缓存值；窗口尺寸/位置怎么变都不影响。
+     */
+    private float winInsetY = -1f;
+
     private float winY0() {
-        // ★ 先问 glView 自己的真实屏幕位置 —— 这是唯一在"窗口贴在屏幕最上沿"时也算得对的来源。
-        // 踩过的坑：搜索层会把窗口顶到 y=0（整屏），那时 renderer.winY 正好是 0，
-        // 而老实现要求 `renderer.winY > 0` 才算数 → inset 被当成 0 → 胶囊里那行输入框
-        // 整体下移一个状态栏（实测行在 347、胶囊在 253，差 94px）。
         if (glView != null && params != null) {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             float d = loc[1] - params.y;
-            if (d >= 0 && d < screenH / 4f) return d;
+            if (d >= 0 && d < screenH / 4f) { winInsetY = d; return d; }
         }
-        if (renderer != null && winH > 0 && renderer.winY > 0) {
+        if (winInsetY >= 0f) return winInsetY;          // 刚改过 params：用上次测到的真值
+        if (renderer != null && winH > 0 && renderer.winY > 0 && params != null) {
             float d = renderer.winY - params.y;
-            if (d >= 0 && d < screenH / 4f) return d;
+            if (d >= 0 && d < screenH / 4f) { winInsetY = d; return d; }
         }
+        // 最后兜底：直接问系统状态栏高度（悬浮窗 TYPE_APPLICATION_OVERLAY 的父容器顶边就是它）
+        try {
+            int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (id > 0) {
+                float h = getResources().getDimensionPixelSize(id);
+                if (h >= 0 && h < screenH / 4f) { winInsetY = h; return h; }
+            }
+        } catch (Throwable ignored) { }
         return 0f;
     }
 
@@ -4510,8 +4528,40 @@ public class FloatingBallService extends Service {
         }
         s[16] = 0; s[17] = 0; s[18] = 1; s[19] = 1;
         m[16] = 0; m[17] = 0; m[18] = 1; m[19] = 0;      // 第 5 个形状关掉
+        // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射
+        zGlassMaterial(zoneR, 1.15f, 0.20f);
+        renderer.zRefract = Math.max(dp(14), zoneR * 0.82f);
+        renderer.zAb = 0.34f;
+        renderer.zGlow = 1.0f;                       // 球顶那两团柔光（只给圆区，面板上会糊字）
+        renderer.zFrost = 0.55f;                     // 圆区：透镜为主，只加一点雾
+        renderer.zTopDarken = 0.86f;
+        renderer.zCap0 = -1.0f;
+        renderer.zCap1 = 0.18f;
         renderer.zShape = s;
         renderer.zMeta = m;
+    }
+
+    /**
+     * 状态 3 / 菜单面板的**材质**统一在这里给（2026-10-23：用户要"和球一样的液态玻璃"）。
+     *
+     * 球那条链路（GlassRenderer.FS_COMP）的光学参数是 refraction 200px / band 170px /
+     * dome 0.4 —— 折射带宽比形状本身还大，所以整颗球都在"被掰弯"。上一版区域层只给了
+     * 14px / 18px，等于一块平的半透明塑料（用户看到的就是那个）。
+     * 这里按**形状短半轴**换算，圆区和面板都拿到和球同比例的透镜：
+     *   band    = 短半轴 × bandRatio（≈1 → 整个形状都在折射带里）
+     *   refract = 短半轴 × 0.34（球是 200/170 ≈ 1.18×band；UI 上取温和一点，
+     *             太猛会把菜单文字后面的桌面撕成碎条）
+     */
+    private void zGlassMaterial(float shortHalf, float bandRatio, float dark) {
+        if (renderer == null) return;
+        renderer.zoneMode = true;
+        renderer.zBandRatio = bandRatio;
+        renderer.zRefract = Math.max(dp(10), shortHalf * 0.34f);
+        renderer.zDome = 0.55f;
+        renderer.zAb = 0.18f;
+        renderer.zScrim = 0.14f + 0.10f * dark;
+        renderer.zEdgeBleed = 0.13f;
+        renderer.zGlow = 0.5f;
     }
 
     private void showZonesOverlay() {
@@ -4526,7 +4576,9 @@ public class FloatingBallService extends Service {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             zonesParams.x = loc[0];
-            zonesParams.y = loc[1];
+            // ⚠ params 是**父容器内**坐标（父容器顶边 = 状态栏下沿），loc 是屏幕坐标 → 要减 inset，
+            //   否则整层文字/图标比玻璃低一个状态栏（2026-10-23 修）
+            zonesParams.y = loc[1] - Math.round(winY0());
             try {
                 wm.addView(v, zonesParams);
                 zonesView = v;
@@ -4542,7 +4594,7 @@ public class FloatingBallService extends Service {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             zonesParams.x = loc[0];
-            zonesParams.y = loc[1];
+            zonesParams.y = loc[1] - Math.round(winY0());
             zonesParams.width = winW;
             zonesParams.height = winH;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
@@ -4810,7 +4862,15 @@ public class FloatingBallService extends Service {
         holdPointers = 1;
         holdTitle = title;
         holdItems.clear();
-        holdItems.addAll(items);
+        // 玻璃只有 5 个行位（holdRects / zone 着色器的 5 个形状）：菜单一多就会画到窗口外面
+        // （用户看到的「文字超出界面」）。多出来的截掉，最后一行换成"还有 N 个…"。
+        int maxRows = holdRects.length / 4;
+        if (items.size() > maxRows) {
+            for (int i = 0; i < maxRows - 1; i++) holdItems.add(items.get(i));
+            holdItems.add(new HoldItem("还有 " + (items.size() - (maxRows - 1)) + " 个…", "", -1, null));
+        } else {
+            holdItems.addAll(items);
+        }
         holdFocus = -1;
         computeCardRects();
         if (zonesView != null) {
@@ -4856,9 +4916,12 @@ public class FloatingBallService extends Service {
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
         float bw = Math.min(dp(260), winW - dp(36));
-        float th = dp(28);                 // 标题行
-        float rh = dp(36);                 // 每个条目
-        float pad = dp(8);
+        float th = dp(26);                 // 标题行
+        float pad = dp(6);
+        // 行高自适应：**整块面板必须落在 GL 窗口里**（窗口 = 球窗，画到窗外就被裁掉，
+        // 这就是"最后一行被切一半"的根因）；窗口再矮也不会溢出屏幕。
+        float avail = Math.max(dp(80), winH - dp(20));
+        float rh = Math.max(dp(26), Math.min(dp(36), (avail - th - pad) / n));
         float total = th + n * rh + pad;
         float cx = loc[0] + winW * 0.5f;
         float cy = loc[1] + winH * 0.5f;
@@ -4909,14 +4972,22 @@ public class FloatingBallService extends Service {
         s[1] = holdListRect[1] + holdListRect[3] * 0.5f;
         s[2] = holdListRect[2] * 0.5f;
         s[3] = holdListRect[3] * 0.5f;
-        m[0] = 0f; m[1] = 0.72f; m[2] = 0.14f; m[3] = 1f;   // 圆角 ≈ 20dp
+        m[0] = 0f; m[1] = 0.45f; m[2] = 0.14f; m[3] = 1f;   // 圆角 ≈ 20dp
         for (int i = 1; i < 5; i++) {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
         }
+        // 卡片面板：和菜单同一套烟熏玻璃（黑顶往下渐隐，底部留出真折射）
+        zGlassMaterial(Math.min(holdListRect[2], holdListRect[3]) * 0.5f, 0.62f, 0.45f);
+        renderer.zGlow = 0f;
+        renderer.zFrost = 0.82f;
+        renderer.zRefract = Math.max(dp(14), Math.min(holdListRect[2], holdListRect[3]) * 0.34f);
+        renderer.zTopDarken = 0.92f;
+        renderer.zScrim = 0.26f;
+        renderer.zCap0 = -1.0f;
+        renderer.zCap1 = 0.72f;
         renderer.zShape = s;
         renderer.zMeta = m;
-        renderer.zoneMode = true;
     }
 
     /** 松手：不管在哪一级，都回初始状态（"松手则恢复初始状态"）。 */
@@ -5480,20 +5551,26 @@ public class FloatingBallService extends Service {
         s[1] = menuRect[1] + menuRect[3] * 0.5f;
         s[2] = menuRect[2] * 0.5f;
         s[3] = menuRect[3] * 0.5f;
-        m[0] = 0f; m[1] = 0.12f; m[2] = 0.22f;   // 面板圆角 = 0.22 × 半高（≈22dp），不是椭圆
+        m[0] = 0f; m[1] = 0.30f; m[2] = 0.22f;   // 面板圆角 = 0.22 × 半高（≈22dp），不是椭圆
         m[3] = 1f;
         for (int i = 1; i < 5; i++) {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
         }
+        // 菜单面板：和球同一套透镜；黑顶从顶边压到 55% 处渐隐，底部留给真折射
+        // 菜单面板：黑顶一路压到 78% 处（白字才有底），最后 20% 留给"真玻璃"——
+        // 底缘那条亮弧 + 折射就是从这里露出来的（球的黑区也是这么收的）
+        zGlassMaterial(Math.min(menuRect[2], menuRect[3]) * 0.5f, 0.55f, 0.30f);
+        renderer.zGlow = 0f;
+        renderer.zFrost = 0.82f;
+        renderer.zRefract = Math.max(dp(16), Math.min(menuRect[2], menuRect[3]) * 0.34f);
+        renderer.zTopDarken = 0.93f;
+        renderer.zScrim = 0.26f;
+        renderer.zCap0 = -1.0f;
+        renderer.zCap1 = 0.78f;
         renderer.zShape = s;
         renderer.zMeta = m;
-        renderer.zoneMode = true;
         renderer.sHlAmt = 1.5f;
-        renderer.sAb = 0.12f;
-        renderer.sDensity = sqDensity();
-        renderer.zCont = 0.82f;
-        renderer.zRefract = 14f;
     }
 
     void hideMenu(String why) {
@@ -6697,6 +6774,27 @@ public class FloatingBallService extends Service {
         if (fSet.exists()) {
             fSet.delete();
             openSettingsMenu();
+        }
+        // convo-latest → 直接打开最近一条会话（验证"切回对话"那张卡的玻璃/排版用；
+        // 真机上切回对话只能靠长按卡片选，纯脚本很难卡准）
+        File fConvoLatest = new File(dir, "convo-latest");
+        if (fConvoLatest.exists()) {
+            fConvoLatest.delete();
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        DshApi api = DshApi.get(FloatingBallService.this);
+                        final DshApi.SessionRow r = api.sessions().isEmpty() ? null : api.sessions().get(0);
+                        if (r == null) { Log.w("FloatingBall", "convo-latest: 没有会话"); return; }
+                        main.post(new Runnable() {
+                            @Override public void run() { openConversation(r.id, r.title); }
+                        });
+                        Log.i("FloatingBall", "convo-latest: 打开「" + r.title + "」" + r.id);
+                    } catch (Throwable t) {
+                        Log.w("FloatingBall", "convo-latest 失败 " + message(t));
+                    }
+                }
+            }, "convo-latest").start();
         }
         File fSearchMenu = new File(dir, "menu-search");
         if (fSearchMenu.exists()) {

@@ -1262,3 +1262,48 @@ printf '' > $D/ballshot && su -c "cp /data/user/0/com.glslplayground.app/files/b
 - ⚠️ **没验到的**：浅色桌面下胶囊底部的折射观感
   （设置页/桌面偏暗，看不透）；胶囊里那行字在**极亮背景**下的可读性。
 - ⚠️ 双指长按的 520ms 阈值、SQ_DROP_MS=260（小黑球单独待多久）只有用户能定。
+
+## 状态 3 / 菜单 / 卡片的玻璃：**就是球那套材质**（2026-10-23 重做）
+
+> 用户原话：「给你看球长按的样子和切换回话的样子，这个样式太丑了并且文字也超出界面了，
+> 我原本要求是要弄成跟球一样的液态玻璃的实时折射的」。
+
+### 之前为什么丑（两个独立病灶）
+
+1. **材质不对**：`ZoneLayerShader` 只抄了球的 uniform 名字，折射那一段其实还是
+   metaball-search 胶囊的圆柱公式（`uHeight=18px`）。18 像素的折射带铺在 200~250px 的
+   圆/面板上 = 只有最外一圈被掰了一下，里面是**一块平的半透明塑料**。
+   再加 `cap`/`crush` 把整块压成近黑 → 观感就是「一个黑色圆贴纸」。
+2. **文字真的画到玻璃外面**：`winY0()`（请求 y → 屏幕 y 的 inset）是**每次现算**
+   `getLocationOnScreen()[1] - params.y`。而调用点几乎都在 `updateViewLayout()` 之后立刻调用，
+   那一刻 location 还是旧的 → 差值离谱 → 被 `< screenH/4` 挡掉 → 返回 0 →
+   文字层少抬一个状态栏。实测同一时刻：**玻璃面板顶 = 856，文字窗口 = 947（差 90px）**，
+   于是标题上面空一大块、最后两行被面板下沿切掉。
+   另外长按卡片的行数没上限（`holdRects` 只有 5 位），面板高度按 `holdItems.size()` 算，
+   >5 个目录时整块面板比球窗还高 → 直接被窗口裁掉。
+
+### 现在的做法
+
+| 位置 | 改动 |
+|---|---|
+| `ZoneLayerShader.java` | 折射换成**球那条曲线**：`amp = circleMap(1 + sd/band) * refract`（边缘最强、往里按 band 衰减），色散按 `lp.x*lp.y/(hx*hy)` 加权；黑顶 `uCap0→uCap1` 渐隐；球顶两团柔光；底缘亮弧 + 赤道线 + 壳边；`uFrost` 把背景换成磨砂（面板 0.82 / 圆区 0.55） |
+| `GlassRenderer.java` | 新增 `zBandRatio / zDome / zAb / zTopDarken / zCap0 / zCap1 / zEdgeBleed / zScrim / zGlow / zFrost / zoneBlur`；`buildBlur()` 里 `zoneMode ? zoneBlur : blur` —— **面板的磨砂力度独立于球的 `float_params.blur`**，退出即恢复 |
+| `FloatingBallService.zGlassMaterial()` | 统一按**形状短半轴**换算 `band / refract`，圆区、长按卡片、菜单三处只改黑顶与磨砂 |
+| `winY0()` | 改成**缓存**（只有合理测量才写缓存，否则用上次真值，最后兜底问 `status_bar_height`）；`zonesParams.y` 也补上 `- winY0()`（之前整层图标比玻璃低一个状态栏） |
+| `showCards()` / `computeCardRects()` | 行数封顶 5（多了显示「还有 N 个…」），行高按窗口高度自适应 —— 面板永远落在 GL 窗口里 |
+| `BallZonesView` / `BallGlassMenu` | 白字统一加投影：玻璃变清透之后不再靠"把玻璃压黑"来垫字 |
+
+### 怎么验（真机，全部脚本可跑）
+
+```bash
+bash tools/deploy-and-shot.sh menu-after menu-dirs     # 装 + 重启 + 开菜单 + 存一帧玻璃
+bash tools/deploy-and-shot.sh zones-after zone-open    # 四个圆区
+bash tools/deploy-and-shot.sh card-after zone-open zone-move:tl   # 长按卡片
+bash tools/deploy-and-shot.sh convo-after convo-latest # 切回对话卡
+# 对位（文字 vs 玻璃）：两者窗口 frame 必须重合
+su -c 'dumpsys window windows' | grep -A2 glslplayground | grep 'frame=\['
+```
+
+实测对位（2026-10-23，菜单）：文字窗口 `205,857 670x627`；玻璃窗 `166,818 748x705`，
+面板 inset 14dp=38.5 → 面板 `204.5,856.5 669x627` —— **重合**（修之前差 90px）。
+状态 3：`zones` 覆盖层与 GL 窗同在 `144,180 793x579`。

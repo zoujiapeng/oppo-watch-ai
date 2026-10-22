@@ -1,20 +1,25 @@
 package com.glslplayground.app;
 
 /**
- * 状态 3 / 玻璃菜单层的着色器 —— **材质与球、搜索胶囊完全同一套**。
+ * 状态 3 / 玻璃菜单层的着色器 —— **就是球那颗玻璃本身**。
  *
- * 为什么单独一份而不是改 SearchLayerShader：那一份是 metaball-search 演示页的逐行移植
- * （用户明确要求"原样搬"，别动公式）。状态 3 要画的是 **N 个分离的圆角形状**
- * （2×2 四个圆区 + 一格列表面板），SDF 从"单个 blob"换成"取最小距离的那个形状"，
- * 但折射 / 色差 / edge_bleed / 双光高光 / 压暗 这些公式一个字没改 ——
- * 所以四个圆区、工作目录面板、会话列表**看起来就是同一颗球被切开**，
- * 而不是另一套 UI 风格（用户原话：「实际上我要的是全部都是和原本的球一样的液态玻璃」）。
+ * 2026-10-23 第二次重做：上一版只是"抄了球的几个 uniform"，折射那一段其实是
+ * metaball-search 胶囊的圆柱公式（`mag = 1-sqrt(1-(1-t)^2)`，`uHeight=18px`）——
+ * 18px 的折射带放在 200px 的圆/面板上，等于只有最外面一圈 18 像素被掰了一下，
+ * 里面是**一块平的半透明塑料**（用户原话：「太丑了，我要的是跟球一样的液态玻璃的实时折射」）。
  *
- * 差异只有三处：
- *   ★1 形状：5 个圆角矩形（unrolled，GLES2 不赌动态数组下标），取最近的那个画材质；
- *   ★2 每个形状自带 (act, dark, radius)：act = 手指悬停/选中的高亮，dark = 玻璃深浅，
- *      radius = 圆角（圆区传 half，面板传自己的圆角）；
- *   ★3 激活态多一圈内侧亮边 + 少量提亮，用来表达"松手就会进这个区"。
+ * 这一版把 {@link GlassRenderer} 里画球那段（FS_COMP）的**光学公式原样搬过来**：
+ *   ★1 透镜位移：`circleMap(1 + sd/band) * refract` —— 边缘最强、往里按 band 衰减，
+ *      就是球"边缘把桌面掰弯、中心基本是清晰玻璃"的那条曲线；
+ *   ★2 色散：位移量本身带上 `lp.x*lp.y/(hx*hy)` 的权重，边缘出现球上那圈彩边；
+ *   ★3 黑顶：从球顶往下按 `uCap0 → uCap1` 渐隐（球的黑区同一套 smoothstep），
+ *      面板用它垫住白字，圆区只垫上半圈；
+ *   ★4 赤道线 / 玻璃壳：黑顶结束那一条亮线 + 贴边的壳光，都是球上那两条；
+ *   ★5 每个形状自带 (act, dark, corner)：act = 手指悬停高亮，dark = 玻璃里的烟熏浓度。
+ *
+ * 坐标约定：`p = (gl_FragCoord.x, uRes.y - gl_FragCoord.y)` = 窗口内**画布像素、y 向下**；
+ * 形状数组由服务侧给**屏幕像素**，渲染器先减窗口位置再乘 k（见 GlassRenderer.drawZoneLayer）。
+ * 采样屏幕 UV 用 `uPxToScreen` 换回屏幕像素，和球那条 `screenUv()` 完全一致。
  */
 final class ZoneLayerShader {
 
@@ -27,14 +32,18 @@ final class ZoneLayerShader {
         "uniform sampler2D iBlur;\n" +
         "uniform float uPxToScreen;\n" +
         "uniform float uK;\n" +
-        "uniform float uHeight, uRefract, uHlAmt, uAb, uDpr, uCont, uValid;\n" +
+        // 材质：折射强度(px) / 折射带（占形状短半轴的比例） / 球面感 / 色散 / 高光 / 烟熏
+        "uniform float uRefract, uBandRatio, uDome, uAb, uHlAmt, uCont, uValid, uDpr;\n" +
+        // 黑顶：ny 从 -1(顶) 到 +1(底)，cap0 处最黑、cap1 处完全透明
+        "uniform float uTopDarken, uCap0, uCap1, uEdgeBleed, uScrim, uGlow, uFrost;\n" +
         "uniform vec4  uS0, uS1, uS2, uS3, uS4;   // cx,cy,halfX,halfY\n" +
-        "uniform vec4  uM0, uM1, uM2, uM3, uM4;   // act, dark, radius, enabled\n" +
+        "uniform vec4  uM0, uM1, uM2, uM3, uM4;   // act, dark, cornerRadius, enabled\n" +
         "\n" +
-        "vec3 bgcol(vec2 p, float blurR){\n" +
-        "  vec2 uv = (uWinPos + p * uPxToScreen) / uScreen;\n" +
-        "  return (blurR < 8.0 ? texture2D(iBg, uv) : texture2D(iBlur, uv)).rgb;\n" +
-        "}\n" +
+        "vec2 bgUv(vec2 q){ return (uWinPos + q * uPxToScreen) / uScreen; }\n" +
+        "vec3 bg(vec2 q){ return texture2D(iBg, bgUv(q)).rgb; }\n" +
+        "vec3 bgFrost(vec2 q){ return texture2D(iBlur, bgUv(q)).rgb; }\n" +
+        "\n" +
+        "float circleMap(float x){ return 1.0 - sqrt(max(1.0 - x * x, 0.0)); }\n" +
         "\n" +
         "vec4 sdRoundBox(vec2 p, vec2 c, vec2 b, float r){\n" +
         "  vec2 lp = p - c;\n" +
@@ -63,7 +72,7 @@ final class ZoneLayerShader {
         "\n" +
         "  float dBest = 1e9;\n" +
         "  vec2  gBest = vec2(0.0);\n" +
-        "  float actBest = 0.0, darkBest = 1.0;\n" +
+        "  float actBest = 0.0, darkBest = 0.0;\n" +
         "  vec2  cBest = vec2(0.0), bBest = vec2(1.0);\n" +
         "  consider(p, uS0, uM0, dBest, gBest, actBest, darkBest, cBest, bBest);\n" +
         "  consider(p, uS1, uM1, dBest, gBest, actBest, darkBest, cBest, bBest);\n" +
@@ -74,70 +83,77 @@ final class ZoneLayerShader {
         "  if (dBest > 96.0 * uDpr) { gl_FragColor = vec4(0.0); return; }\n" +
         "\n" +
         "  float d = dBest;\n" +
-        "  vec2  g = gBest;\n" +
-        "  vec3  col;\n" +
-        "  float sh = (d > 0.0) ? exp(-d / 30.0) * 0.22 : 0.0;\n" +
-        "  col = bgcol(p, 0.0) * (1.0 - sh);\n" +
+        "  vec2  lp = p - cBest;\n" +
         "\n" +
-        "  float wb = uValid;\n" +
-        "  float darkAmt = mix(1.0, clamp(darkBest, 0.0, 1.0), wb);\n" +
-        "\n" +
-        "  vec2 lp = p - cBest;\n" +
+        // ── ★1 透镜位移：和球同一条曲线（边缘最强、往里衰减 band）──────────────
+        "  float band = max(min(bBest.x, bBest.y) * max(uBandRatio, 0.05), 1.0);\n" +
+        "  float sd   = min(d, 0.0);\n" +
+        "  float xr   = clamp(1.0 + sd / band, 0.0, 1.0);\n" +
+        "  float amp  = circleMap(xr) * uRefract;\n" +
+        // 方向：SDF 梯度 + 一点"球面径向"，扁形状也不会出现两侧对称的假折射
         "  vec2 radial = normalize(vec2(lp.x, bBest.x * lp.y / max(bBest.y, 0.001)) + 1e-5);\n" +
-        "  vec2 gr = normalize(mix(g, radial, 0.08 * wb));\n" +
+        "  vec2 gr = normalize(mix(gBest, radial, clamp(uDome, 0.0, 1.0) * 0.35));\n" +
+        "  vec2 base = (uWinPos + p * uPxToScreen) / uScreen;\n" +
+        "  vec2 off  = gr * amp / uScreen;\n" +
+        // ★2 色散：越靠边越强（球上那圈彩虹边）
+        "  float rimness = clamp(amp / max(uRefract, 1.0), 0.0, 1.0);\n" +
+        "  float ab = uAb * rimness * clamp(lp.x * lp.y / max(bBest.x * bBest.y, 1.0), -1.0, 1.0);\n" +
+        "  vec3 refr;\n" +
+        "  refr.r = bg(p + gr * amp * (1.0 + ab)).r;\n" +
+        "  refr.g = bg(p + gr * amp).g;\n" +
+        "  refr.b = bg(p + gr * amp * (1.0 - ab * 1.4)).b;\n" +
+        // 磨砂：面板/圆区是"一片玻璃"，底下必须糊掉（否则桌面上的字和面板上的字叠在一起），
+        // 但留一点清晰度，才不会变成一块死板的毛玻璃 —— 折射位移仍然照做，玻璃才有厚度。
+        "  refr = mix(refr, bgFrost(p + gr * amp), clamp(uFrost, 0.0, 1.0));\n" +
+        // 和球同一句冷调（玻璃对背景的"轻微染色"）
+        "  refr = mix(refr, refr * vec3(0.94, 0.96, 1.0) + vec3(0.010, 0.012, 0.020), 0.22);\n" +
+        // 贴边处再压一点，玻璃的"厚度"感（球上 innerEdge 那句）
+        "  float innerEdge = smoothstep(0.0, -18.0 * uDpr, d);\n" +
+        "  refr *= mix(0.72, 1.0, innerEdge);\n" +
         "\n" +
-        "  float t   = clamp(-d / uHeight, 0.0, 1.0);\n" +
-        "  float mag = 1.0 - sqrt(max(1.0 - (1.0 - t) * (1.0 - t), 0.0));\n" +
-        "  vec2  dsp = -uRefract * mag * gr;\n" +
+        // ── ★3 黑顶：ny -1(顶) → +1(底)，cap0 最黑，cap1 完全透 ───────────────
+        "  float ny = clamp(lp.y / max(bBest.y, 1.0), -1.0, 1.0);\n" +
+        "  float cap = 1.0 - smoothstep(uCap0, uCap1, ny);\n" +
+        "  cap = cap * cap * (3.0 - 2.0 * cap);\n" +
+        "  vec3 glass = mix(refr, vec3(0.010, 0.012, 0.020), cap * uTopDarken);\n" +
+        // 面板/圆区通用的一点烟熏：保证白字永远有底（亮桌面上也不会"字浮在空气里"）
+        "  glass = mix(glass, glass * 0.18 + vec3(0.006), clamp(uScrim + darkBest * 0.30, 0.0, 1.0));\n" +
         "\n" +
-        "  vec3 sharp;\n" +
-        "  sharp.r = bgcol(p + dsp * (1.0 - uAb), 3.0).r;\n" +
-        "  sharp.g = bgcol(p + dsp, 3.0).g;\n" +
-        "  sharp.b = bgcol(p + dsp * (1.0 + uAb), 3.0).b;\n" +
-        "  float br = mix(14.0, 60.0, clamp(-d / (50.0 * uDpr), 0.0, 1.0)) * uDpr;\n" +
-        "  vec3 soft = bgcol(p + dsp, br * 0.4) * 0.2;\n" +
-        "  for (int i = 0; i < 8; i++) {\n" +
-        "    float a = 0.7854 * float(i);\n" +
-        "    soft += bgcol(p + dsp + vec2(cos(a), sin(a)) * br * 0.7, br * 0.4) * 0.1;\n" +
-        "  }\n" +
-        "  float deep = clamp(-d / (40.0 * uDpr), 0.0, 1.0);\n" +
-        "  vec3 refr = mix(sharp, soft, deep);\n" +
+        // ── ★4a 球顶两团柔光（球上那两块反光板，液态玻璃最像球的一笔）─────────
+        "  vec2 gq = vec2(lp.x / max(bBest.x, 1.0), lp.y / max(bBest.y, 1.0));\n" +
+        "  vec2 s1 = gq - vec2(-0.40, -0.58);\n" +
+        "  vec2 s2 = gq - vec2( 0.30, -0.50);\n" +
+        "  float spec = exp(-dot(s1, s1) * 30.0) * 0.55 + exp(-dot(s2, s2) * 55.0) * 0.30;\n" +
+        "  glass += vec3(0.88, 0.91, 1.0) * spec * uGlow * (1.0 - 0.35 * darkBest);\n" +
+        // ── ★4b 底缘亮弧：球底的"厚玻璃边"（折射在这里最强，也是最亮的一圈）────
+        "  float botRim = smoothstep(-18.0 * uDpr, -3.0 * uDpr, d) * smoothstep(0.10, 0.80, ny);\n" +
+        "  glass += vec3(0.85, 0.90, 1.0) * botRim * (0.10 + 0.55 * uEdgeBleed) * (1.0 + 0.6 * actBest);\n" +
+        // ── ★4c 赤道线：黑顶结束的那一条亮线（球上 eqLine）─────────────────────
+        "  float eq = exp(-pow((ny - uCap1) / 0.10, 2.0));\n" +
+        "  float horiz = 1.0 - abs(lp.x) / max(bBest.x, 1.0) * 0.35;\n" +
+        "  glass += vec3(0.95, 0.97, 1.0) * eq * horiz * uEdgeBleed * (1.0 + 1.4 * actBest);\n" +
         "\n" +
-        // 压暗：圆区沿用球/胶囊那条"上黑下透"，面板按 dark 抬一点底（保证字能读）
-        // 和球一致的"黑顶 + 清透下半"：整块只轻微压暗，顶盖单独压成近黑
-        "  float ny = (p.y - cBest.y) / max(bBest.y, 1.0);\n" +
-        "  float m  = clamp(0.72 + 0.16 * ny, 0.0, 1.0);\n" +
-        "  float crush = mix(1.0, m, clamp(uCont, 0.0, 1.0) * 0.55 * wb);\n" +
-        "  refr = refr * crush;\n" +
-        "  float cap = smoothstep(-0.10, -0.80, ny);\n" +
-        "  refr = mix(refr, vec3(0.012, 0.014, 0.020), cap * (0.35 + 0.5 * uCont));\n" +
-        "\n" +
-        "  float xb  = clamp(-d / (10.0 * uDpr), 0.0, 1.0);\n" +
-        "  float dbl = 24.0 * uDpr * (1.0 - sqrt(xb * (2.0 - xb)));\n" +
-        "  vec3 bleed = bgcol(p + gr * dbl, 22.0);\n" +
-        "  float wbd  = clamp((d + 26.0 * uDpr) / (20.0 * uDpr), 0.0, 1.0);\n" +
-        "  float blum = dot(bleed, vec3(0.2125, 0.7154, 0.0721));\n" +
-        "  float bm   = pow(clamp(blum * 1.2, 0.0, 1.0), 2.0) * wbd;\n" +
-        "  refr = mix(refr, bleed, bm * bm * 0.85);\n" +
-        "\n" +
-        "  vec3 glass = mix(refr, refr * 0.10 + vec3(0.016), darkAmt);\n" +
-        "\n" +
+        // ── 边缘高光：贴边的窄亮带（左下暖、右上冷，和球同一个 kdir）──────────
         "  float qd  = -d;\n" +
-        "  float hw  = 2.2 * uDpr + 1.6 * uDpr * actBest;      // ★3 选中区亮边更宽\n" +
+        "  float hw  = (2.0 + 1.6 * actBest) * uDpr;\n" +
         "  float aaq = 1.0;\n" +
-        "  float band = (1.0 - clamp(qd / hw, 0.0, 1.0))\n" +
-        "             * clamp(qd / aaq + 0.5, 0.0, 1.0)\n" +
-        "             * clamp((hw - qd) / aaq + 0.5, 0.0, 1.0);\n" +
+        "  float band2 = (1.0 - clamp(qd / hw, 0.0, 1.0))\n" +
+        "              * clamp(qd / aaq + 0.5, 0.0, 1.0)\n" +
+        "              * clamp((hw - qd) / aaq + 0.5, 0.0, 1.0);\n" +
         "  vec2 kdir = vec2(0.7071, 0.7071);\n" +
-        "  float key  = band * clamp((dot(kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
-        "  float fill = band * clamp((dot(-kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
+        "  float key  = band2 * clamp((dot(kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
+        "  float fill = band2 * clamp((dot(-kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
         "  key  = key  / (1.0 + (1.0 - key)  * 8.0);\n" +
         "  fill = fill / (1.0 + (1.0 - fill) * 8.0);\n" +
-        "  glass += (key + fill) * uHlAmt * mix(1.0, 0.4, darkAmt) * (1.0 + 0.9 * actBest);\n" +
-        // ★3 激活区的内侧整圈微光：整块玻璃提亮一点点，远看就是"这个格子在回应手指"
+        "  glass += (key + fill) * uHlAmt * (1.0 + 0.9 * actBest);\n" +
+        // 选中：内侧整圈微光（"这个格子在回应手指"）
         "  float inner = clamp(1.0 + d / (26.0 * uDpr), 0.0, 1.0);\n" +
-        "  glass += actBest * inner * 0.05;\n" +
+        "  glass += actBest * inner * (0.05 + 0.10 * uGlow);\n" +
+        // ★5 壳：贴边最外 1.5px 的细亮线（球的 shell）
+        "  float shell = smoothstep(2.2 * uDpr, 0.0, qd);\n" +
+        "  glass += vec3(0.10, 0.11, 0.13) * shell * 0.6;\n" +
         "\n" +
+        "  float sh = (d > 0.0) ? exp(-d / (26.0 * uDpr)) * 0.20 : 0.0;\n" +
         "  float aa = smoothstep(1.5, -1.5, d);\n" +
         "  float alpha = aa + sh * (1.0 - aa);\n" +
         "  gl_FragColor = vec4(glass * aa, alpha);\n" +

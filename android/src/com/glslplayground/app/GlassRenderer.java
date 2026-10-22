@@ -65,10 +65,25 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float[] zShape = new float[20];
     /** 5 × vec4(act, dark, cornerRadius, enabled)。 */
     public volatile float[] zMeta = new float[20];
-    public volatile float zCont = 0.55f;
-    public volatile float zRefract = 14f;
-    public volatile float zHeight = 18f;
+    // 材质（2026-10-23 改成球那套）：折射强度 / 折射带宽（占短半轴比例）/ 球面感 /
+    // 色散 / 烟熏 / 黑顶（cap0 最黑处、cap1 完全透处，ny 单位）/ 赤道线亮度
+    public volatile float zCont = 0.55f;        // 保留字段（旧参数，已不参与绘制）
+    public volatile float zRefract = 64f;       // 屏幕像素
+    public volatile float zBandRatio = 1.0f;    // band = min(halfX,halfY) × 该值
+    public volatile float zDome = 0.55f;
+    public volatile float zAb = 0.16f;
+    public volatile float zTopDarken = 0.92f;
+    public volatile float zCap0 = -1.0f;
+    public volatile float zCap1 = 0.35f;
+    public volatile float zEdgeBleed = 0.12f;
+    public volatile float zScrim = 0.10f;
+    public volatile float zGlow = 0.5f;
+    /** 磨砂占比：0 = 纯透镜（和球一样清晰）、1 = 全糊（毛玻璃）。面板给 0.8，圆区 0.55。 */
+    public volatile float zFrost = 0.8f;
+    public volatile float zHeight = 18f;        // 保留字段（旧参数，已不参与绘制）
     public volatile float zDensity = 2.75f;
+    /** 玻璃面板的磨砂力度（只作用于 zoneMode；球仍然用 {@link #blur}）。 */
+    public volatile float zoneBlur = 1.25f;
     private int zoneProg = 0;
 
     private OnSurfaceReady readyCb;
@@ -571,8 +586,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uK"), 10f * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uHeight"), zHeight * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uRefract"), zRefract * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uBandRatio"), zBandRatio);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uDome"), zDome);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uAb"), zAb);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uTopDarken"), zTopDarken);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap0"), zCap0);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCap1"), zCap1);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uEdgeBleed"), zEdgeBleed);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uScrim"), zScrim);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uGlow"), zGlow);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uFrost"), zFrost);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uHlAmt"), sHlAmt);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uAb"), sAb);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uDpr"), dpr);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(zoneProg, "uCont"),
                 Math.max(0f, Math.min(1f, zCont)));
@@ -864,6 +888,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         bindFullscreen(blurProg);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(blurProg, "iTex"), 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+
+        // 玻璃面板（菜单 / 四区 / 卡片）走自己的磨砂力度：球是 0.3（几乎不糊，靠透镜）
+        // 但一块 260dp 的面板要是不糊，底下的桌面文字会和面板文字叠在一起（用户：太丑）。
+        // ★ 只影响 zoneMode 这一趟，退出后球还是用户自己那个 float_params.blur。
+        float blur = zoneMode ? zoneBlur : this.blur;
 
         if (blur < 0.5f) {
             // 不模糊：直接用全分辨率背景，和网页版（fboB 全分辨率）一致
