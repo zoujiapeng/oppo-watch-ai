@@ -3000,6 +3000,8 @@ public class FloatingBallService extends Service {
                         // 若此刻正在听：顺手停麦，转写结果回来再填进这个框（不改变"先弹框"这件事）。
                         boolean listeningNow = voice != null && voice.listening();
                         Log.i("FloatingBall", "单击 → 弹出状态 2 输入框（listening=" + listeningNow + "）");
+                        targetSessionId = null;     // 单击弹框 = 发到新会话（选中会话有专门的入口）
+                        targetSessionTitle = null;
                         enterSearchMode("单击", "", false, BAR_SEND);
                         if (listeningNow) voice.tapStop();
                         return true;
@@ -4917,11 +4919,45 @@ public class FloatingBallService extends Service {
             }, 60);
             return;
         }
+        // 二级里最底下那行「在此新建会话」：真的建一条新会话并进对话卡（不是无效操作）
+        if (!cancelled && holdLevel >= 2 && holdFocus >= 0 && holdFocus < holdItems.size()
+                && holdItems.get(holdFocus).kind == 2) {
+            final String dir = holdItems.get(holdFocus).data;
+            Log.i("FloatingBall", "zones: 松手选中「在此新建会话」dir=" + dir);
+            exitZones();
+            main.postDelayed(new Runnable() {
+                @Override public void run() { createAndOpenConversation(dir); }
+            }, 60);
+            return;
+        }
         if (!cancelled && holdLevel == 1) {
             Log.i("FloatingBall", "zones: 只选到工作目录，视为无效操作");
         }
         Log.i("FloatingBall", "zones: 松手 → 回初始状态（level=" + holdLevel + "）");
         exitZones();
+    }
+
+    /** 在指定目录新建一条会话，然后直接进对话卡。 */
+    private void createAndOpenConversation(final String dir) {
+        prefs().edit().putString("send_cwd", dir).apply();
+        final String preset = prefs().getString("send_preset", "");
+        final DshApi api = DshApi.get(this);
+        Log.i("FloatingBall", "convo: 新建会话 dir=" + dir + " preset=" + preset);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final String sid = api.createSession(dir, preset);
+                    main.post(new Runnable() {
+                        @Override public void run() { openConversation(sid, "新会话"); }
+                    });
+                } catch (Throwable t) {
+                    final String m = message(t);
+                    main.post(new Runnable() {
+                        @Override public void run() { toast("新建会话失败：" + m); }
+                    });
+                }
+            }
+        }, "dsh-new-convo").start();
     }
 
     private void openDshSettings(String why) {
@@ -5166,6 +5202,8 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
         convoSideBtn = null;
         convoSessionId = null;
+        targetSessionId = null;                 // 关掉对话卡 = 回到"默认新会话"的语义
+        targetSessionTitle = null;
         setSiriText("");
     }
 
