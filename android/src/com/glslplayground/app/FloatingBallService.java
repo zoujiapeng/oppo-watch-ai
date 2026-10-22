@@ -4971,6 +4971,18 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 每次回到初始状态都把球摆回屏幕正中（用户要求）。 */
+    private void centerBallOnScreen() {
+        if (params == null || wm == null || glView == null) return;
+        if (searchActive || zonesActive || menuShown || glassFullscreen || convoOpen) return;
+        params.x = Math.round((screenW - winW) / 2f);
+        params.y = Math.round((screenH - winH) / 2f);
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        homeCx = params.x + winW * 0.5f;
+        homeCy = params.y + winH * 0.5f;
+        Log.i("FloatingBall", "球回到初始状态 → 居中 (" + params.x + "," + params.y + ")");
+    }
+
     private void exitZones() {
         zonesActive = false;
         zoneActive = -1;
@@ -4993,6 +5005,7 @@ public class FloatingBallService extends Service {
             clampBallOnScreen();
         }
         applyBallTouchability();
+        centerBallOnScreen();
     }
 
     // ── 玻璃面板 = **一个小悬浮窗**（不是全屏层）────────────────────────────
@@ -5041,6 +5054,7 @@ public class FloatingBallService extends Service {
             clampBallOnScreen();
         }
         applyBallTouchability();
+        centerBallOnScreen();
     }
 
     // ══════ 对话卡（状态 3 选完目录/会话、状态 2 的搜索选完都进这里）══════
@@ -5114,46 +5128,18 @@ public class FloatingBallService extends Service {
             try { wm.addView(bar, convoBarParams); convoBar = bar; }
             catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
         }
-        if (convoSideBtn == null) {
-            android.widget.TextView b = new android.widget.TextView(this);
-            b.setText("侧栏");
-            b.setTextColor(0xF2FFFFFF);
-            b.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, dp(11));
-            b.setGravity(Gravity.CENTER);
-            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setColor(0x33000000);
-            bg.setCornerRadius(dp(18));
-            bg.setStroke(Math.round(dp(0.8f)), 0x40FFFFFF);
-            b.setBackground(bg);
-            b.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    Log.i("FloatingBall", "convo: 打开侧栏（会话列表）");
-                    runSessionSearch("");       // 复用会话列表面板
-                }
-            });
-            convoSideParams = overlayParams(Math.round(dp(52)), Math.round(dp(36)),
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
-            try { wm.addView(b, convoSideParams); convoSideBtn = b; }
-            catch (Throwable t) { Log.w("FloatingBall", "convo side failed: " + t); }
-        }
-        int side = Math.round(dp(52));
-        int w = Math.min(screenW - 2 * side - Math.round(dp(36)), Math.round(dp(520)));
+        int w = Math.min(screenW - Math.round(dp(36)), Math.round(dp(560)));
         int h = Math.round(dp(48));
-        int x = (screenW - w) / 2 + side / 2;
+        int x = (screenW - w) / 2;                 // 输入框居中（侧栏按钮已删除）
         int y = convoChromeY(h);
         convoBarParams.width = w;
         convoBarParams.height = h;
         convoBarParams.x = x;
         convoBarParams.y = y - Math.round(winY0());
         try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
-        convoSideParams.x = Math.max(Math.round(dp(8)), x - side - Math.round(dp(8)));
-        convoSideParams.y = y + (h - Math.round(dp(36))) / 2 - Math.round(winY0());
-        try { wm.updateViewLayout(convoSideBtn, convoSideParams); } catch (Throwable ignored) { }
         convoBar.setVisibility(View.VISIBLE);
         convoBar.resetMaterial();
         convoBar.materialize(true, 0);      // 凝聚出现（构造时 alpha=0，不调这个就永远看不见）
-        convoSideBtn.setVisibility(View.VISIBLE);
     }
 
     /** 输入行贴着方形球的下沿（球被上下拖动后也要跟着走）。 */
@@ -5175,10 +5161,6 @@ public class FloatingBallService extends Service {
         if (Math.abs(convoBarParams.y - (y - Math.round(winY0()))) < 2) return;
         convoBarParams.y = y - Math.round(winY0());
         try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
-        if (convoSideBtn != null && convoSideParams != null) {
-            convoSideParams.y = y + (h - convoSideParams.height) / 2 - Math.round(winY0());
-            try { wm.updateViewLayout(convoSideBtn, convoSideParams); } catch (Throwable ignored) { }
-        }
     }
 
     private void showConvoIme() {
@@ -5197,14 +5179,11 @@ public class FloatingBallService extends Service {
             if (convoBar != null && wm != null) wm.removeView(convoBar);
         } catch (Throwable ignored) { }
         convoBar = null;
-        try {
-            if (convoSideBtn != null && wm != null) wm.removeView(convoSideBtn);
-        } catch (Throwable ignored) { }
-        convoSideBtn = null;
         convoSessionId = null;
         targetSessionId = null;                 // 关掉对话卡 = 回到"默认新会话"的语义
         targetSessionTitle = null;
         setSiriText("");
+        centerBallOnScreen();
     }
 
     // ── 状态 2 暂存：菜单是小窗，胶囊那层收不起来 → 开菜单时先收起胶囊，关掉再放回来 ──
@@ -5395,7 +5374,6 @@ public class FloatingBallService extends Service {
             if (convoSessionId != null) {
                 setSiriText(convoStashText == null ? "" : convoStashText);
                 if (convoBar != null) convoBar.setVisibility(View.VISIBLE);
-                if (convoSideBtn != null) convoSideBtn.setVisibility(View.VISIBLE);
                 updateConvoChrome();
                 Log.i("FloatingBall", "convo: 参数面板关闭，恢复对话内容");
             }
@@ -5567,7 +5545,6 @@ public class FloatingBallService extends Service {
             setSiriText("");
             suppressConvoAutoClose = false;
             if (convoBar != null) convoBar.setVisibility(View.GONE);
-            if (convoSideBtn != null) convoSideBtn.setVisibility(View.GONE);
             Log.i("FloatingBall", "convo: 打开参数面板，先收起对话内容");
         }
         List<BallGlassMenu.Row> rows = new ArrayList<>();
@@ -6239,6 +6216,7 @@ public class FloatingBallService extends Service {
         updateSiriWindow(base * minHalfX, base * minHalfY);   // 窗口从整屏收回球窗
         measureSiriTargets(siriStr);                         // 有字就按字重排（方形态），没字就是圆球
         clampBallOnScreen();
+        centerBallOnScreen();
         // 代理触摸窗口这时可能还是"整屏大小"：先别让它接手，等窗口真的收完再放行
         main.postDelayed(new Runnable() {
             @Override public void run() {
