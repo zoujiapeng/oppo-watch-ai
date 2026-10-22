@@ -4551,15 +4551,18 @@ public class FloatingBallService extends Service {
         s[16] = 0; s[17] = 0; s[18] = 1; s[19] = 1;
         m[16] = 0; m[17] = 0; m[18] = 1; m[19] = 0;      // 第 5 个形状关掉
         // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射
-        zGlassMaterial(zoneR, 1.15f, 0.20f);
-        renderer.zRefract = Math.max(dp(14), zoneR * 0.82f);
+        zGlassMaterial(zoneR, 1.00f, 0.20f);
+        renderer.zRefract = Math.max(dp(16), zoneR * 0.62f);
         renderer.zAb = 0.34f;
-        renderer.zGlow = 1.0f;                       // 球顶那两团柔光（只给圆区，面板上会糊字）
-        renderer.zFrost = 0.55f;                     // 圆区：透镜为主，只加一点雾
+        renderer.zGlow = 1.0f;                       // 球顶两团柔光（只给圆区）
+        renderer.zFrost = 0.45f;                     // 圆区：透镜为主，只加一点雾
+        renderer.zScrim = 0.14f;
         renderer.zTopDarken = 0.80f;
         renderer.zCapPow = 1.35f;
-        renderer.zEdgeShade = 0.65f;
-        renderer.zShadow = 0.0f;         // 圆区也不要外阴影（悬浮感交给亮边/折射）                    // 黑顶从上往下连续衰减（没有台阶）
+        renderer.zEdgeShade = 0.45f;
+        renderer.zEdgeShade2 = 0.90f;
+        renderer.zDesat = 0.15f;
+        renderer.zDome = 0.75f;
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5167,14 +5170,19 @@ public class FloatingBallService extends Service {
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;
         }
         // 卡片面板：**整块均匀烟熏**（不要竖向黑顶 —— 那正是"直边黑块"的唯一来源）
-        zGlassMaterial(Math.min(holdListRect[2], holdListRect[3]) * 0.5f, 0.62f, 0.45f);
+        zGlassMaterial(Math.min(holdListRect[2], holdListRect[3]) * 0.5f, 0.55f, 0.35f);
         renderer.zGlow = 0f;
-        renderer.zFrost = 0.85f;
-        renderer.zRefract = Math.max(dp(14), Math.min(holdListRect[2], holdListRect[3]) * 0.34f);
+        renderer.zFrost = 0.38f;         // 别糊太狠：糊死了折射就看不见，玻璃感全靠它
+        renderer.zBandRatio = 0.55f;     // 厚边只占 55% 短半轴：一圈厚玻璃边 + 中间平
+        renderer.zRefract = Math.max(dp(12), Math.min(holdListRect[2], holdListRect[3]) * 0.26f);
+        renderer.zAb = 0.10f;            // 色散收一点：太多彩边像故障艺术，不像玻璃
         renderer.zTopDarken = 0.0f;
-        renderer.zScrim = 0.46f;
-        renderer.zEdgeShade = 0.0f;      // 面板不要那圈"薄黑边"
-        renderer.zShadow = 0.0f;         // 外阴影也全部去掉（它就是"外围压暗"）
+        renderer.zScrim = 0.34f;
+        renderer.zEdgeShade = 0.0f;      // 不要整圈压暗
+        renderer.zEdgeShade2 = 1.0f;     // 只要"朝上的边"的内阴影 = 厚度
+        renderer.zDesat = 0.45f;
+        renderer.zDome = 1.0f;
+        renderer.zShadow = 0.0f;
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5770,15 +5778,20 @@ public class FloatingBallService extends Service {
         // 现在改成：uTopDarken=0 + 均匀 scrim（0.46）→ 没有台阶、没有任何"边"。
         zGlassMaterial(Math.min(menuRect[2], menuRect[3]) * 0.5f, 0.55f, 0.30f);
         renderer.zGlow = 0f;
-        renderer.zFrost = 0.85f;
-        renderer.zRefract = Math.max(dp(16), Math.min(menuRect[2], menuRect[3]) * 0.34f);
+        renderer.zFrost = 0.55f;
+        renderer.zBandRatio = 1.25f;
+        renderer.zRefract = Math.max(dp(14), Math.min(menuRect[2], menuRect[3]) * 0.26f);
+        renderer.zAb = 0.10f;
         renderer.zTopDarken = 0.0f;
-        renderer.zScrim = 0.46f;
-        renderer.zEdgeShade = 0.0f;      // 面板不要那圈"薄黑边"
-        renderer.zShadow = 0.0f;         // 外阴影也全部去掉（它就是"外围压暗"）
+        renderer.zScrim = 0.34f;
+        renderer.zEdgeShade = 0.0f;
+        renderer.zEdgeShade2 = 1.0f;
+        renderer.zDesat = 0.45f;
+        renderer.zDome = 1.0f;
+        renderer.zShadow = 0.0f;
         renderer.zShape = s;
         renderer.zMeta = m;
-        renderer.sHlAmt = 0.9f;          // 面板的贴边高光收一点（太亮也会被看成"一圈边"）
+        renderer.sHlAmt = 1.1f;          // 面板的贴边高光
     }
 
     void hideMenu(String why) {

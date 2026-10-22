@@ -36,7 +36,9 @@ final class ZoneLayerShader {
         "uniform float uRefract, uBandRatio, uDome, uAb, uHlAmt, uCont, uValid, uDpr;\n" +
         // 黑顶：ny 从 -1(顶) 到 +1(底)，cap0 处最黑、cap1 处完全透明
         "uniform float uTopDarken, uCap0, uCap1, uEdgeBleed, uScrim, uGlow, uFrost;\n" +
-        "uniform float uEdgeShade, uShadow;   // 贴边压暗强度(0=完全不要) / 外阴影强度\n" +
+        "uniform float uEdgeShade, uShadow;   // 贴边压暗(圆区用) / 外阴影\n" +
+        "uniform float uEdgeShade2;           // 上缘内阴影强度（面板 1.0）\n" +
+        "uniform float uDesat;                // 背景去饱和（磨砂玻璃把颜色洗淡）\n" +
         "uniform float uCapPow;   // 黑顶衰减指数（越大越只在最顶上黑）\n" +
         "uniform vec4  uS0, uS1, uS2, uS3, uS4;   // cx,cy,halfX,halfY\n" +
         "uniform vec4  uM0, uM1, uM2, uM3, uM4;   // act, dark, cornerRadius, enabled\n" +
@@ -87,88 +89,77 @@ final class ZoneLayerShader {
         "  float d = dBest;\n" +
         "  vec2  lp = p - cBest;\n" +
         "\n" +
-        // ── ★1 透镜位移：和球同一条曲线（边缘最强、往里衰减 band）──────────────
+        // ── ★1 透镜：**弯月面剖面**（边缘处位移为 0 → 不会出现"贴边一圈"的暗/亮环）──
+        //   amp(u) = refract · sin(π·u^0.6)^1.15，u = 深度/band：
+        //     u=0（贴边）   → 0     ← 和玻璃外面的画面对齐，边界不跳变
+        //     u≈0.35        → 峰值  ← 玻璃"最厚"的那一圈，背景被明显放大/拖弯
+        //     u=1（更里面） → 0     ← 中心是平的、清晰的
+        //   这就是真实玻璃片边缘的样子：一圈厚边 + 中间平的。
         "  float band = max(min(bBest.x, bBest.y) * max(uBandRatio, 0.05), 1.0);\n" +
         "  float sd   = min(d, 0.0);\n" +
-        "  float xr   = clamp(1.0 + sd / band, 0.0, 1.0);\n" +
-        "  float amp  = circleMap(xr) * uRefract;\n" +
-        // ★ 2026-10-23 五修：最外 14dp 不做位移。否则边缘那一圈采的是**玻璃外面**的画面
-        //   （深色桌面上就是一圈黑、亮桌面上就是一圈白），看过去正好像"贴了一圈边框"。
-        //   把位移在贴边处收回 0，边界两侧采到的是同一块背景，边就只剩亮线，没有暗圈。
-        "  amp *= smoothstep(0.0, 14.0 * uDpr, -d);\n" +
-        // 方向：SDF 梯度 + 一点"球面径向"，扁形状也不会出现两侧对称的假折射
+        "  float u    = clamp(-sd / band, 0.0, 1.0);\n" +
+        // sin²：两端导数为 0 → 边缘和"平的中心"之间没有折痕（用 sin 会有可见的棱线）
+        "  float s1p  = sin(3.14159265 * pow(u, 0.70));\n" +
+        "  float amp  = uRefract * s1p * s1p;\n" +
+        // 方向：SDF 梯度 + 一点"球面径向"
         "  vec2 radial = normalize(vec2(lp.x, bBest.x * lp.y / max(bBest.y, 0.001)) + 1e-5);\n" +
-        "  vec2 gr = normalize(mix(gBest, radial, clamp(uDome, 0.0, 1.0) * 0.35));\n" +
+        "  vec2 gr = normalize(mix(gBest, radial, clamp(uDome, 0.0, 1.0) * 0.75));\n" +
         "  vec2 base = (uWinPos + p * uPxToScreen) / uScreen;\n" +
-        "  vec2 off  = gr * amp / uScreen;\n" +
-        // ★2 色散：越靠边越强（球上那圈彩虹边）
-        "  float rimness = clamp(amp / max(uRefract, 1.0), 0.0, 1.0);\n" +
-        "  float ab = uAb * rimness * clamp(lp.x * lp.y / max(bBest.x * bBest.y, 1.0), -1.0, 1.0);\n" +
+        // 折射：色散强度跟着"坡度"走（越靠近最厚那圈，彩边越明显）
+        "  float abAmt = uAb * clamp(abs(s1p * cos(3.14159265 * pow(u, 0.70))) * 2.2, 0.0, 1.0);\n" +
         "  vec3 refr;\n" +
-        "  refr.r = bg(p + gr * amp * (1.0 + ab)).r;\n" +
+        "  refr.r = bg(p + gr * amp * (1.0 + abAmt)).r;\n" +
         "  refr.g = bg(p + gr * amp).g;\n" +
-        "  refr.b = bg(p + gr * amp * (1.0 - ab * 1.4)).b;\n" +
-        // 磨砂：面板/圆区是"一片玻璃"，底下必须糊掉（否则桌面上的字和面板上的字叠在一起），
-        // 但留一点清晰度，才不会变成一块死板的毛玻璃 —— 折射位移仍然照做，玻璃才有厚度。
+        "  refr.b = bg(p + gr * amp * (1.0 - abAmt * 1.25)).b;\n" +
+        // 磨砂：面板是"一片玻璃"，底下要糊；但位移仍然照做 → 有厚度、不是死板毛玻璃
         "  refr = mix(refr, bgFrost(p + gr * amp), clamp(uFrost, 0.0, 1.0));\n" +
-        // 和球同一句冷调（玻璃对背景的"轻微染色"）
-        "  refr = mix(refr, refr * vec3(0.94, 0.96, 1.0) + vec3(0.010, 0.012, 0.020), 0.22);\n" +
-        // 贴边压暗（球上的 innerEdge）—— ★ 2026-10-23 五修：这一圈就是用户说的
-        // "外围一层棱角分明的薄薄一层黑"。面板默认**完全关掉**（uEdgeShade=0），
-        // 只有圆区留一点点，用来表达玻璃的厚度。
-        "  float innerEdge = smoothstep(0.0, -60.0 * uDpr, d);\n" +
-        "  refr *= mix(1.0, mix(0.72, 1.0, innerEdge), uEdgeShade);\n" +
+        // 玻璃的冷调 + **去饱和**：真实磨砂玻璃会把背景的颜色洗淡、提一点亮，
+        // 不去饱和的话，桌面偏绿的壁纸会直接把面板染成脏绿色（看着像塑料不像玻璃）
+        "  float lumr = dot(refr, vec3(0.2126, 0.7152, 0.0722));\n" +
+        "  refr = mix(refr, vec3(lumr), clamp(uDesat, 0.0, 1.0));\n" +
+        "  refr = mix(refr, refr * vec3(0.96, 0.98, 1.0) + vec3(0.035, 0.038, 0.048), 0.34);\n" +
+        "  refr *= mix(1.0, mix(0.72, 1.0, smoothstep(0.0, -60.0 * uDpr, d)), uEdgeShade);\n" +
         "\n" +
-        // ── ★3 黑顶 ────────────────────────────────────────────────────────────
-        // ★ 2026-10-23 二修：用户看到"一层锋利的黑色长方形"。原因不是形状，是这条曲线：
-        //   smoothstep(cap0=-1, cap1=0.78) 在顶部 15% 里就烧掉了 90% 的暗度 ——
-        //   于是面板顶上出现一条**边是直的**（还盖住了圆角）、下沿有明显台阶的黑色带。
-        //   现在改成：cap = pow(1 - top, 1.7)，从上往下**连续**衰减；再乘
-        //   smoothstep(0, 26dp, -d) 让贴边的那一圈变薄（玻璃边缘本来就薄，不该压黑），
-        //   圆角处自然跟着形状收，不再有"长方形"的直边。
+        // ── ★2 黑顶（面板为 0）：保留给圆区，面板不压任何整块暗度 ──────────────
         "  float ny = clamp(lp.y / max(bBest.y, 1.0), -1.0, 1.0);\n" +
         "  float topN = clamp((ny + 1.0) * 0.5, 0.0, 1.0);\n" +
         "  float cap = pow(1.0 - topN, uCapPow);\n" +
         "  cap *= smoothstep(0.0, 26.0 * uDpr, -d);\n" +
-
         "  vec3 glass = mix(refr, vec3(0.010, 0.012, 0.020), cap * uTopDarken);\n" +
-        // 面板/圆区通用的一点烟熏：保证白字永远有底（亮桌面上也不会"字浮在空气里"）
-        "  glass = mix(glass, glass * 0.18 + vec3(0.006), clamp(uScrim + darkBest * 0.30, 0.0, 1.0));\n" +
+        // 均匀烟熏（不是渐变）：给白字一个稳定的底
+        "  glass = mix(glass, glass * 0.20 + vec3(0.006), clamp(uScrim + darkBest * 0.26, 0.0, 1.0));\n" +
         "\n" +
-        // ── ★4a 球顶两团柔光（球上那两块反光板，液态玻璃最像球的一笔）─────────
+        // ── ★3 真实玻璃的四道光（全部**贴着边**、跟着形状走，不是横向色块）────
+        "  vec2 kdir = vec2(0.62, 0.78);          // 光从左上来（屏幕 y 向下）\n" +
+        "  float qd  = -d;                        // 离边多远（内为正）\n" +
+        "  float nearEdge = smoothstep(0.0, 9.0 * uDpr, qd);   // 贴边 9dp 内\n" +
+        // 3a 亮边：最外 1.6dp 的一条细亮线，朝光那侧最亮
+        "  float rim   = smoothstep(1.6 * uDpr, 0.0, qd);\n" +
+        "  float lit   = clamp(0.35 + 0.65 * dot(-gr, kdir), 0.0, 1.0);\n" +
+        "  glass += vec3(0.96, 0.98, 1.0) * rim * lit * (0.55 + 0.55 * uHlAmt);\n" +
+        // 3b 内侧高光雾：贴边一圈柔光，让边看起来是"圆过去的"而不是刀切
+        "  float halo  = (1.0 - nearEdge) * (0.55 + 0.45 * lit);\n" +
+        "  glass += vec3(0.80, 0.86, 0.95) * halo * 0.10 * uHlAmt;\n" +
+        // 3c 上缘内阴影：只在"朝上"的边（gr.y < 0）出现，厚度感就靠它
+        "  float upness = clamp(-gr.y, 0.0, 1.0);\n" +
+        "  glass *= 1.0 - nearEdge * upness * 0.30 * uEdgeShade2;\n" +
+        // 3d 下缘反光：玻璃底部那一条"接光"的亮弧（默认很淡，面板给 1.0）
+        "  float downness = clamp(gr.y, 0.0, 1.0);\n" +
+        "  glass += vec3(0.88, 0.92, 1.0) * nearEdge * downness * 0.16 * uEdgeBleed;\n" +
+        // 选中：内侧整圈微光
+        "  float inner = clamp(1.0 + d / (26.0 * uDpr), 0.0, 1.0);\n" +
+        "  glass += actBest * inner * (0.05 + 0.10 * uGlow);\n" +
+        // 球顶两团柔光（只给圆区用，uGlow=0 时没有）
         "  vec2 gq = vec2(lp.x / max(bBest.x, 1.0), lp.y / max(bBest.y, 1.0));\n" +
         "  vec2 s1 = gq - vec2(-0.40, -0.58);\n" +
         "  vec2 s2 = gq - vec2( 0.30, -0.50);\n" +
         "  float spec = exp(-dot(s1, s1) * 30.0) * 0.55 + exp(-dot(s2, s2) * 55.0) * 0.30;\n" +
         "  glass += vec3(0.88, 0.91, 1.0) * spec * uGlow * (1.0 - 0.35 * darkBest);\n" +
-        // ── ★4b 底缘亮弧：球底的"厚玻璃边"（折射在这里最强，也是最亮的一圈）────
-        "  float botRim = smoothstep(-18.0 * uDpr, -3.0 * uDpr, d) * smoothstep(0.10, 0.80, ny);\n" +
-        "  glass += vec3(0.85, 0.90, 1.0) * botRim * (0.10 + 0.55 * uEdgeBleed) * (1.0 + 0.6 * actBest);\n" +
-        // ── ★4c 赤道线：黑顶结束的那一条亮线（球上 eqLine）─────────────────────
+        // 赤道线（只在有黑顶时）
         "  float eq = exp(-pow((ny - uCap1) / 0.10, 2.0));\n" +
         "  float horiz = 1.0 - abs(lp.x) / max(bBest.x, 1.0) * 0.35;\n" +
-        "  glass += vec3(0.95, 0.97, 1.0) * eq * horiz * uEdgeBleed * (1.0 + 1.4 * actBest)\n" +
-        "         * clamp(uTopDarken * 2.0, 0.0, 1.0);   // 没有黑顶就没有赤道线（否则是条横线）\n" +
-        "\n" +
-        // ── 边缘高光：贴边的窄亮带（左下暖、右上冷，和球同一个 kdir）──────────
-        "  float qd  = -d;\n" +
-        "  float hw  = (2.0 + 1.6 * actBest) * uDpr;\n" +
-        "  float aaq = 1.0;\n" +
-        "  float band2 = (1.0 - clamp(qd / hw, 0.0, 1.0))\n" +
-        "              * clamp(qd / aaq + 0.5, 0.0, 1.0)\n" +
-        "              * clamp((hw - qd) / aaq + 0.5, 0.0, 1.0);\n" +
-        "  vec2 kdir = vec2(0.7071, 0.7071);\n" +
-        "  float key  = band2 * clamp((dot(kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
-        "  float fill = band2 * clamp((dot(-kdir, gr) - 0.52) / 0.48, 0.0, 1.0);\n" +
-        "  key  = key  / (1.0 + (1.0 - key)  * 8.0);\n" +
-        "  fill = fill / (1.0 + (1.0 - fill) * 8.0);\n" +
-        "  glass += (key + fill) * uHlAmt * (1.0 + 0.9 * actBest);\n" +
-        // 选中：内侧整圈微光（"这个格子在回应手指"）
-        "  float inner = clamp(1.0 + d / (26.0 * uDpr), 0.0, 1.0);\n" +
-        "  glass += actBest * inner * (0.05 + 0.10 * uGlow);\n" +
-        // ★5 壳：球上那条贴边细线（**面板关掉**，它就是"黑边"的来源之一）
-        "  float shell = smoothstep(2.2 * uDpr, 0.0, qd);\n" +
-        "  glass += vec3(0.10, 0.11, 0.13) * shell * 0.6 * uEdgeShade;\n" +
+        "  glass += vec3(0.95, 0.97, 1.0) * eq * horiz * uEdgeBleed * 0.8\n" +
+        "         * clamp(uTopDarken * 2.0, 0.0, 1.0);\n" +
         "\n" +
         "  float sh = (d > 0.0) ? exp(-d / (46.0 * uDpr)) * 0.20 * uShadow : 0.0;\n" +
         "  float aa = smoothstep(1.5, -1.5, d);\n" +
