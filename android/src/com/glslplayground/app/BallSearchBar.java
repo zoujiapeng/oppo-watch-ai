@@ -191,6 +191,20 @@ public class BallSearchBar extends LinearLayout {
         if (s != null && !s.isEmpty()) input.setSelection(input.getText().length());
     }
 
+    /**
+     * 自带一层"胶囊玻璃底"：对话卡的输入行是独立小窗、底下没有球的玻璃，
+     * 只画字会像"字浮在屏幕上"。这里给一个深色半透明圆角底 + 发丝描边，
+     * 和球的黑玻璃是同一档色温（不是另起一套 UI 风格）。
+     */
+    public void setBackdrop(boolean on) {
+        if (!on) { setBackground(null); return; }
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xB3080A0E);
+        bg.setCornerRadius(dp(26));
+        bg.setStroke(Math.round(dp(0.8f)), 0x40FFFFFF);
+        setBackground(bg);
+    }
+
     public void setHint(String hint) {
         input.setHint(hint == null ? "" : hint);
     }

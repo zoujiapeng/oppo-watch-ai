@@ -2226,6 +2226,11 @@ public class FloatingBallService extends Service {
 
     public static void setSiriText(String text) {
         FloatingBallService s = INSTANCE;
+        if (s != null && s.convoOpen && (text == null || text.isEmpty())) {
+            s.main.post(new Runnable() {
+                @Override public void run() { s.closeConversation("球回到初始态"); }
+            });
+        }
         if (s != null) s.main.post(() -> s.applySiriText(text));
     }
 
@@ -3121,7 +3126,14 @@ public class FloatingBallService extends Service {
     private void moveBallDrag(float wantX, float wantY) {
         // 状态 2/3、菜单、对话卡期间**球不可拖动**（用户：搜索框要弄成不可拖动，
         // 否则长按开框后手指没松，整块窗口会被拖着走、输入框像被手吸住）
-        if (searchActive || zonesActive || menuShown || glassFullscreen || convoOpen) return;
+        if (searchActive || zonesActive || menuShown || glassFullscreen) return;
+        if (convoOpen) {
+            // 对话卡：不左右拖（保持居中），只允许上下挪
+            params.x = Math.round((screenW - winW) / 2f);
+            params.y = Math.round(wantY);
+            if (siriEnabled) clampBallOnScreen();
+            return;
+        }
         params.x = Math.round(wantX);
         params.y = Math.round(wantY);
         rememberHomeIfMinimal();   // 拖动 = 搬家（只在最小形态时才算家）
@@ -4639,8 +4651,10 @@ public class FloatingBallService extends Service {
         }
         // 二级（会话）：往左移动 → 退回上一级（选工作目录）
         if (holdLevel >= 2 && rawX < holdLevelX - dp(36)) {
-            Log.i("FloatingBall", "zones: 左移 → 回到工作目录");
-            closeCards();
+            Log.i("FloatingBall", "zones: 左移 → 退回工作目录列表");
+            holdLevel = 1;
+            holdLevelX = rawX;
+            openHoldDirs();
             return;
         }
         if (i != holdFocus) {
@@ -5025,6 +5039,7 @@ public class FloatingBallService extends Service {
         if (wm == null) return;
         if (convoBar == null) {
             BallSearchBar bar = new BallSearchBar(this);
+            bar.setBackdrop(true);          // 对话卡的输入行不在球里，需要自带一层胶囊玻璃底
             bar.setHint("发消息给「" + (title == null ? "对话" : title) + "」");
             bar.setListener(new BallSearchBar.Listener() {
                 @Override public void onSubmit(String text) {
