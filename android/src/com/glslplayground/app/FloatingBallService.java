@@ -4161,6 +4161,10 @@ public class FloatingBallService extends Service {
         main.postDelayed(new Runnable() {
             @Override public void run() { prefetchZonesData(); }
         }, 2500);
+        // 启动后把球摆到"水平居中、贴近屏幕顶端"——方形长高时只会往下长
+        main.postDelayed(new Runnable() {
+            @Override public void run() { centerBallOnScreen(); }
+        }, 800);
         return START_NOT_STICKY;
     }
 
@@ -4972,16 +4976,24 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 每次回到初始状态都把球摆回屏幕正中（用户要求）。 */
+    /**
+     * 每次回到初始状态：**水平居中、竖直贴近屏幕顶端**（用户 2026-10-23 要求）。
+     *
+     * 为什么不是屏幕正中：方形会长高，而"球顶钉住、往下长"的锚点就是这里设的 home。
+     * home 在中间时，一长高就只能往上/往下被夹，观感就是"刚发出去就突然往下移"。
+     * 把 home 放到接近顶端后，长高只有"往下长"这一个方向。
+     */
     private void centerBallOnScreen() {
         if (params == null || wm == null || glView == null) return;
         if (searchActive || zonesActive || menuShown || glassFullscreen || convoOpen) return;
         params.x = Math.round((screenW - winW) / 2f);
-        params.y = Math.round((screenH - winH) / 2f);
+        int topMargin = Math.round(winY0() + dp(10));          // 玻璃顶 ≈ 状态栏下沿
+        params.y = Math.max(Math.round(winY0()), topMargin - Math.round(dp(24)));  // 窗口比玻璃多 24dp 留白
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         homeCx = params.x + winW * 0.5f;
-        homeCy = params.y + winH * 0.5f;
-        Log.i("FloatingBall", "球回到初始状态 → 居中 (" + params.x + "," + params.y + ")");
+        homeCy = params.y + winH * 0.5f + winY0();              // home 用屏幕坐标
+        Log.i("FloatingBall", "球回到初始状态 → 居中靠顶 (" + params.x + "," + params.y
+                + ") home=(" + Math.round(homeCx) + "," + Math.round(homeCy) + ")");
     }
 
     private void exitZones() {
@@ -6788,15 +6800,16 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
+        // 启动位置就是"水平居中、贴近屏幕顶端"（用户要求）：不要先放中间再跳上去
         params.x = (screenW - winW) / 2;
-        params.y = (screenH - winH) / 2;
+        params.y = Math.max(Math.round(winY0()), Math.round(winY0() + dp(10) - dp(24)));
         renderer.winX = params.x;
         renderer.winY = params.y;
 
         if (wm != null) {
             wm.addView(glView, params);
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
-            homeCy = params.y + winH * 0.5f;
+            homeCy = params.y + winH * 0.5f + winY0();
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
