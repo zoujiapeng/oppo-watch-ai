@@ -3129,11 +3129,16 @@ public class FloatingBallService extends Service {
         // 否则长按开框后手指没松，整块窗口会被拖着走、输入框像被手吸住）
         if (searchActive || zonesActive || menuShown || glassFullscreen) return;
         if (convoOpen) {
-            // 对话卡：不左右拖（保持居中），只允许上下挪
-            params.x = Math.round((screenW - winW) / 2f);
-            params.y = Math.round(wantY);
-            if (siriEnabled) clampBallOnScreen();
-            return;
+            // 对话卡：只允许上下挪，X 永远居中。
+            // ⚠️ 这里**不能 return**：下面还有 updateViewLayout(glView) 与文字层/代理窗同步，
+            //    提前返回会出现"玻璃不动、里面的字和输入框跟着手指跑"的怪象。
+            wantX = (screenW - winW) / 2f;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - convoDragLogAt > 400) {
+                convoDragLogAt = now;
+                Log.i("FloatingBall", "convo drag → params=(" + Math.round(wantX) + ","
+                        + Math.round(wantY) + ") win=" + winW + "x" + winH);
+            }
         }
         params.x = Math.round(wantX);
         params.y = Math.round(wantY);
@@ -4149,6 +4154,10 @@ public class FloatingBallService extends Service {
         main.postDelayed(new Runnable() {
             @Override public void run() { armVoice("服务启动/球弹出"); }
         }, 1200);
+        // 预热"工作目录 + 各目录会话"：第一次长按进状态 3 时列表已经是热的
+        main.postDelayed(new Runnable() {
+            @Override public void run() { prefetchZonesData(); }
+        }, 2500);
         return START_NOT_STICKY;
     }
 
@@ -5004,6 +5013,7 @@ public class FloatingBallService extends Service {
 
     private boolean convoOpen = false;
     private boolean convoStashed = false;
+    private long convoDragLogAt = 0;
     private String convoStashText = "";
     private boolean suppressConvoAutoClose = false;
     private String convoSessionId = null, convoTitle = null;
