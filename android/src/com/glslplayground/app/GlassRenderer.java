@@ -88,6 +88,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float zEdgeShade2 = 1f;
     /** 背景去饱和：面板 0.45（磨砂玻璃的"洗色"），圆区 0.15。 */
     public volatile float zDesat = 0.45f;
+    /** 水珠的缩小倍率（越大越"缩小镜"）。4 颗水珠都读这一个值。 */
+    public volatile float zDropZoom = 1.70f;
     /** 外阴影强度：面板 0.25（很淡），圆区 0.5。 */
     public volatile float zShadow = 0.25f;
     public volatile float zHeight = 18f;        // 保留字段（旧参数，已不参与绘制）
@@ -282,7 +284,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec3 uPanelAccent;\n" +
 
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
-        "uniform float uDropMode;   // 1 = 水珠模式（四区那四个圆）：加高光点 + 贴边聚光\n" +
+        "uniform float uDropMode;   // 1 = 水珠模式（四区那四个圆）\n" +
+        "uniform float uDropZoom;   // 水珠的缩小倍率（>1 = 缩小镜：把更大的范围压进圆里）\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
         "  vec2 cc = abs(c) - (h - vec2(r));\n" +
         "  float outside = length(max(cc,0.0)) - r;\n" +
@@ -432,12 +435,21 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float r2 = clamp(dot(q, q), 0.0, 0.999);\n" +
         "    float z  = sqrt(1.0 - r2);\n" +
         "    vec2 uv0 = screenUv(fc);\n" +
-        "    vec2 disp = q * (1.0 - z) * 1.0 * uRefraction / uScreen;\n" +
+        // 缩小镜：采样点相对片元**往外**推 → 圆里装的画面范围更大、东西看起来更小；
+        // 推到边缘时倍率回到 1.0，所以圆周上和外面的画面对得上（不留接缝）。
+        // 缩小镜的映射：采样半径 = r·(k − (k−1)r²)。
+        //   r=0 → 0、r=1 → 1（圆周上和外面的画面对齐）；
+        //   k≈1.9 时中心把 1.9 倍的视野压进圆里（东西变小），靠近边缘那一圈会轻微"翻过来"，
+        //   正是水珠边缘那种倒过来的像。之前用 smoothstep 版会把整个场景糊成放射条纹。
+        "    float r2q = clamp(dot(q, q), 0.0, 1.0);\n" +
+        "    float kz  = max(uDropZoom, 1.0);\n" +
+        "    vec2 qs   = q * (kz - (kz - 1.0) * r2q);\n" +
+        "    vec2 duv  = (qs - q) * uHalf * uPxToScreen / uScreen;\n" +
         "    float ab = uAberration * 0.004 * (1.0 - z);\n" +
         "    vec3 refr;\n" +
-        "    refr.r = texture2D(iBg, uv0 + disp * (1.0 + ab)).r;\n" +
-        "    refr.g = texture2D(iBg, uv0 + disp).g;\n" +
-        "    refr.b = texture2D(iBg, uv0 + disp * (1.0 - ab)).b;\n" +
+        "    refr.r = texture2D(iBg, uv0 + duv * (1.0 + ab)).r;\n" +
+        "    refr.g = texture2D(iBg, uv0 + duv).g;\n" +
+        "    refr.b = texture2D(iBg, uv0 + duv * (1.0 - ab)).b;\n" +
         "    vec2 rxy = 2.0 * z * q;\n" +                  // R.xy（V 朝屏幕里看）
         "    vec2 reflOff = rxy * (uHalf / uScreen) * 0.18;\n" +
         "    vec3 refl = texture2D(iBlur, uv0 + reflOff).rgb;\n" +
@@ -750,6 +762,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
                     panel ? 0.11f : 0.22f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panel ? 1f : 0f);
             GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), panel ? 0f : 1f);
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropZoom"), panel ? 1f : zDropZoom);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         }
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -976,6 +989,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panelMode);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropZoom"), 1f);
         GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uPanelAccent"),
                 panelAccentR, panelAccentG, panelAccentB);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);

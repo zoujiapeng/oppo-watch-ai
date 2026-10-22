@@ -1541,3 +1541,27 @@ col = mix(refr, refl, F);                                // 正面透明、边�
 > 或者关掉 show-glass 再看。
 
 截图：`docs/glass-droplets.png`。
+
+
+### 十二修：四区做成"缩小镜"（2026-10-23）
+
+用户：「相当于四个缩小镜，缩小的再夸张一点点」。
+
+水珠的采样映射换成**缩小镜公式**（`uDropZoom = zDropZoom`）：
+
+```glsl
+vec2  q  = c / uHalf;                                  // 归一化坐标
+float r2 = clamp(dot(q, q), 0.0, 1.0);
+float kz = max(uDropZoom, 1.0);                        // 1.0 = 不缩，1.7 = 当前
+vec2  qs = q * (kz - (kz - 1.0) * r2);                 // 采样半径 = r·(k − (k−1)r²)
+vec2  duv = (qs - q) * uHalf * uPxToScreen / uScreen;  // 往外采样 → 圆里装的画面更大、东西更小
+```
+
+- `r=0 → 0`、`r=1 → 1`：圆周上和外面的画面对齐，不留接缝；
+- `k>1.5` 时靠近边缘的采样半径会回落 = 边缘的像轻微**翻过来**，就是水珠边缘那种倒像；
+- 一轮试过 `smoothstep` 版（k=2.4）：那是把整个场景怼成放射条纹，已弃用。
+
+⚠️ 代价：如果背后的画面有明显纹理（比如岩石），缩小镜会在边缘拉出放射状纹路 —— 这是径向
+缩放的固有形态，不是实现 bug。想收就把 `zDropZoom` 调回 1.3~1.5。
+
+截图：`docs/glass-droplets-zoom.png`。
