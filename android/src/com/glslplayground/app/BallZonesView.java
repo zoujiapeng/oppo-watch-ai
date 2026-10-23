@@ -220,19 +220,28 @@ final class BallZonesView extends View {
             float a = (active == i) ? 1f : (i >= 4 ? 0.42f : 0.92f);   // 待定的两个淡一点
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
-            float rr = r * (active == i ? 1.06f : 1f);
-            // ── 圆自己画：**同一个 Canvas、同一个原点** → 图标永远在圆心上（用户：让圆把图标囊括起来）──
-            discRect.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
-            int a0 = (int) ((active == i ? 46 : 26) * appear);
-            int a1 = (int) ((active == i ? 12 : 6) * appear);
-            radial.setShader(new android.graphics.RadialGradient(cx[i], cy[i] - rr * 0.25f, rr * 1.35f,
-                    new int[]{0x00FFFFFF | (a0 << 24), 0x00FFFFFF | (a1 << 24), 0x00000000},
-                    new float[]{0f, 0.62f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            // ── 玻璃圆：**这里自己画**（和图标同一个 Canvas、同一个圆心）──
+            //   用户 2026-10-23：「圆是玻璃，要让图标被玻璃囊括起来」。
+            //   以前圆由 GL 层画：GL 的 surface 在窗口放大后不重建（k≠1），圆被缩放/裁切，
+            //   和图标永远对不上。现在两样都在同一个 Canvas 上 → 圆心就是图标中心。
+            float rr = r * (active == i ? 1.04f : 1f);
+            int aTop = (int) ((active == i ? 64 : 40) * appear);
+            int aMid = (int) ((active == i ? 30 : 18) * appear);
+            radial.setShader(new android.graphics.RadialGradient(cx[i], cy[i] - rr * 0.30f, rr * 1.28f,
+                    new int[]{0x00FFFFFF | (aTop << 24), 0x00FFFFFF | (aMid << 24), 0x00000000},
+                    new float[]{0f, 0.55f, 1f}, android.graphics.Shader.TileMode.CLAMP));
             disc.setShader(radial.getShader());
-            cv.drawCircle(cx[i], cy[i], rr, disc);              // 玻璃盘
+            cv.drawCircle(cx[i], cy[i], rr, disc);
             disc.setShader(null); radial.setShader(null);
-            rim.setColor(((int) ((active == i ? 0x7A : 0x4A) * appear) << 24) | 0x00FFFFFF);
-            cv.drawCircle(cx[i], cy[i], rr - dp(0.8f), rim);    // 一圈细边
+            // 一圈亮边 + 顶部高光弧：有了这两笔才像"玻璃"而不是"描边圆"
+            rim.setStyle(Paint.Style.STROKE);
+            rim.setStrokeWidth(dp(1.6f));
+            rim.setColor(((int) ((active == i ? 0x8A : 0x5E) * appear) << 24) | 0x00FFFFFF);
+            cv.drawCircle(cx[i], cy[i], rr - dp(0.8f), rim);
+            rim.setStrokeWidth(dp(1.2f));
+            rim.setColor(((int) ((active == i ? 0x9A : 0x66) * appear) << 24) | 0x00FFFFFF);
+            cv.drawArc(new RectF(cx[i] - rr + dp(0.6f), cy[i] - rr + dp(0.6f),
+                    cx[i] + rr - dp(0.6f), cy[i] + rr - dp(0.6f)), 208f, 124f, false, rim);
             // 用户 2026-10-23：圆区里**不要文字**，只留一个大一点的发光图标（居中）
             if (i >= 4) {
                 // 待定：只画一圈细环（占位，先说"这里还空着"）

@@ -4715,9 +4715,10 @@ public class FloatingBallService extends Service {
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
         computeZones();
-        // 2026-10-23：六区/卡片**全部由文字层（BallZonesView）自己画**，GL 层暂时隐藏。
-        // 为什么：GLSurfaceView 的 surface 在窗口从 787×573 撑到 846×846 后仍停在旧尺寸，
-        // shader 的 k=1.075 → 玻璃圆被缩放/裁切，和图标永远对不上（用户报的"一个都对不准"）。
+        // 2026-10-23 **最终**：六区（玻璃圆 + 图标）全部由文字层一个 Canvas 画，GL 层整趟让位。
+        // 反复验证过：GL 层的 surface 在窗口尺寸变化后不重建（846 窗口里 surface 还是 787×573，
+        // k=1.075），玻璃必被缩放/裁切，和图标永远对不齐。与其继续对两套坐标，不如只留一套：
+        // 圆和图标在同一个 Canvas 上画 → 圆天然把图标包在中心。
         renderer.zoneMode = false;
         if (glView != null) glView.setAlpha(0f);
         renderer.sHlAmt = 1.5f;
@@ -4726,6 +4727,9 @@ public class FloatingBallService extends Service {
         renderer.zCont = 0.80f;      // 和球同款"上黑下透"（球的黑顶就是这条曲线）
         renderer.zRefract = 16f;
         pushZoneScene();
+        Log.i("FloatingBall", "zones: glass alpha=" + (glView == null ? -1 : glView.getAlpha())
+                + " zoneMode=" + renderer.zoneMode + " win=" + winW + "x" + winH
+                + " z0=(" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0]) + ")");
         showZonesOverlay();
         applyBallTouchability();
         vibrate(22);
@@ -4752,7 +4756,8 @@ public class FloatingBallService extends Service {
         //   相邻圆心弦长 = ring × 2sin30° = ring = 2.35R，两个圆之间的空隙 ≈ 0.35R；
         //   命中判定半径是 1.15R —— 相邻两个命中圈的间距 (2.35R − 2×1.15R) = 0.05R > 0，
         //   所以**不会两个圆同时算命中**，这是"稍微再圆一点点、别选错"的关键。
-        // 环半径 = 2.35R，但必须能在"屏幕可用区域 - 两侧边距"里装下（否则最上/最下的圆会贴边/出屏）
+        // 环半径 = 2.35R（相邻圆心距 2.35R，命中圈 1.15R → 还留 0.05R 空隙，不会选错）；
+        // 但要在"屏幕可用区域 - 14dp 边距"里装得下。
         float margin = dp(14);
         float avail = Math.min(screenW, screenH - topInset) - 2 * margin;
         float maxRing = avail * 0.5f - zoneR;
@@ -4779,7 +4784,7 @@ public class FloatingBallService extends Service {
             zoneLocalX[i] = zoneCx[i] - loc[0];
             zoneLocalY[i] = zoneCy[i] - loc[1];
         }
-        ensureZoneWindow();            // 环比球窗大 —— 窗口得先长到能装下六个圆
+        ensureZoneWindow();            // 窗口放大到能装下六个圆（GL 已让位，不影响任何对齐）
     }
 
     private float[] zoneLocalX, zoneLocalY;
@@ -5556,7 +5561,7 @@ public class FloatingBallService extends Service {
             zonesView.setCardScroll(cardScrollMode());
             zonesView.setCardProgress(-1, 0f);
         }
-        pushCardScene();
+        if (glView != null) glView.setAlpha(0f);   // 卡片面板由文字层自绘 → GL 让位（窗口会长高，surface 会失配）
         cardTapMode = true;               // 卡片一出现就落定：手指可以抬起，之后靠点击
         syncBallTouchWindow();            // 代理窗口要盖住整张卡片，否则点不到
         startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
@@ -5588,8 +5593,10 @@ public class FloatingBallService extends Service {
         holdDir = null;
         if (zonesView != null) { zonesView.hideCards(); zonesView.setCardScroll(0); }
         restoreHoldWindow();
+        if (renderer != null) renderer.zoneMode = true;
+        if (glView != null) glView.setAlpha(1f);    // 回六区：玻璃回来
         pushZoneScene();
-        Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到四区");
+        Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到六区");
     }
 
     /** 当前**可见**的那一段（滚动窗口 [holdFirst, holdFirst+holdVisible)）。 */
