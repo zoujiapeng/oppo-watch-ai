@@ -233,6 +233,19 @@ public class WatchBridge {
         });
     }
 
+    /** 「DSH 操控时全部 UI 让位」开关（默认开）—— 见 MainActivity#getAgentYield。 */
+    @JavascriptInterface
+    public boolean getAgentYield() {
+        return act.getAgentYield();
+    }
+
+    @JavascriptInterface
+    public void setAgentYield(final boolean on) {
+        ui(new Runnable() {
+            public void run() { act.setAgentYield(on); }
+        });
+    }
+
     @JavascriptInterface
     public int getFloatCapScale() {
         return act.getFloatCapScale();

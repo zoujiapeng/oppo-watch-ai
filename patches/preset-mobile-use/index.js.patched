@@ -111,8 +111,25 @@ function resolveBallGuardDir() {
 	return BALL_GUARD_DIR;
 }
 
-const BALL_GUARD_TOUCH_ACTIONS = new Set(["click", "swipe", "key"]);
+// 2026-10-23：让路从「只有注入触摸的动作」扩到**所有会动屏幕的动作** —— 球那边的让位
+// 也升级成了"全部窗口一起退出命中测试"（设置里可关）。observe / set_value / launch_app
+// 不注入触摸，但它们同样是在"操控手机"，让球在这些时刻也让开，界面观感才一致。
+const BALL_GUARD_ACTIONS = new Set(["click", "swipe", "key", "observe", "set_value", "launch_app"]);
 const BALL_GUARD_ACK_TIMEOUT_MS = 500;
+// 球在跑就会每 2s 写一次心跳。没心跳 = 球没开 → 不发信号也不等 ACK（以前白等 500ms）。
+const BALL_ALIVE_FILE = "dsh-ball-alive";
+const BALL_ALIVE_TTL_MS = 8000;
+// 设置里把「全 UI 让位」关掉时，球回这个前缀的 ACK：意思是"这边放行，直接注入"。
+const BALL_GUARD_SKIP_PREFIX = "!skip:";
+
+function ballRunning(dir) {
+	try {
+		const st = fs.statSync(`${dir}/${BALL_ALIVE_FILE}`);
+		return Date.now() - st.mtimeMs < BALL_ALIVE_TTL_MS;
+	} catch (_) {
+		return false;
+	}
+}
 
 let ballGuardSeq = 0;   // 同一毫秒内的连续调用也要有不同 nonce（球靠"内容变了"识别新信号）
 
@@ -120,6 +137,8 @@ async function waitForBallStandDown(action, signal) {
 	const dir = resolveBallGuardDir();
 	const actPath = `${dir}/dsh-ball-act`;
 	const ackPath = `${dir}/dsh-ball-ack`;
+	// 球没在跑：连信号都不用写。ok=true 表示"不用等"，调用方不会打 [ball] 提示。
+	if (!ballRunning(dir)) return { ok: true, nonce: null, skipped: "ball-not-running" };
 	let nonce;
 	try {
 		nonce = `${Date.now()}-${process.pid}-${++ballGuardSeq}-${action}`;
@@ -136,11 +155,12 @@ async function waitForBallStandDown(action, signal) {
 	while (Date.now() < deadline) {
 		if (signal?.aborted) return { ok: false, reason: "aborted" };
 		try {
-			if (fs.readFileSync(ackPath, "utf8").trim() === nonce) {
+			const ack = fs.readFileSync(ackPath, "utf8").trim();
+			if (ack === nonce || ack === BALL_GUARD_SKIP_PREFIX + nonce) {
 				// 握手成功就把信号文件删掉：球下次重启时就不会读到一个"遗留信号"，
 				// 也就不会出现"首读把它记成已见、真信号被当成旧信号忽略"的坑。
 				try { fs.unlinkSync(actPath); } catch (_) {}
-				return { ok: true, nonce };
+				return ack === nonce ? { ok: true, nonce } : { ok: true, nonce, skipped: "yield-disabled" };
 			}
 		} catch (_) { /* 球还没写 ACK */ }
 		await new Promise((r) => setTimeout(r, 20));
@@ -180,7 +200,7 @@ const MOBILE_AGENT_GUIDANCE = `<mobile_agent_guidance>
 ### 1. Closed-Loop Verification
 - Every physical action (\`click\`, \`swipe\`, \`set_value\`, \`key\`, \`launch_app\`) automatically captures and returns the updated accessibility tree. Pass \`screenshot=true\` to attach an image.
 - Never perform blind consecutive actions without verifying the updated state. After each action, inspect the returned UI tree or image to confirm the intended transition (e.g., page navigated, dialog dismissed, field populated) before deciding your next step.
-- A floating overlay ball may be running on this device. Before \`click\`/\`swipe\`/\`key\` this plugin asks it to stop accepting touches (so your injected gesture cannot land on it); that handshake adds ~100ms and is expected — do not retry a click just because it took slightly longer. If a result contains a \`[ball]\` line, the ball did not confirm in time and your gesture may have been swallowed by it.
+- A floating overlay ball may be running on this device, together with its own sub-panels (text layer, hold-menu cards, input row, approval panel). Before any screen action (\`click\`/\`swipe\`/\`key\`/\`observe\`/\`set_value\`/\`launch_app\`) this plugin asks that UI to stand down — every one of its windows stops accepting touches, so your injected gesture always reaches the app underneath. That handshake adds ~60-100ms and is expected; do not retry an action just because it took slightly longer. If a result contains a \`[ball]\` line, the UI did not confirm in time and your gesture may have been swallowed by it. If the user turned the stand-down switch off in the ball settings, the handshake is skipped silently.
 
 ### 2. Grounding Priority: Element Target vs. Coordinates
 - Strongly prefer element-targeted interactions using \`target='<id>'\` from the accessibility dump. Target IDs are resilient to resolution differences, orientation changes, layout shifts, and scrolling.
@@ -440,7 +460,7 @@ export function apply(ctx) {
 						// 注入触摸前先请悬浮球让路（详见 waitForBallStandDown 的注释）。
 						// 只有真的会注入触摸的动作要等，observe/set_value/launch_app 不需要。
 						let ballGuard = "";
-						if (BALL_GUARD_TOUCH_ACTIONS.has(args.action)) {
+						if (BALL_GUARD_ACTIONS.has(args.action)) {
 							const guard = await waitForBallStandDown(args.action, signal);
 							if (!guard.ok && guard.reason !== "aborted") {
 								ballGuard = `\n\n[ball] 让路确认未收到（${guard.reason}）：动作已照发，若这次触摸没落到目标上，多半是悬浮球吃掉了手势。`;

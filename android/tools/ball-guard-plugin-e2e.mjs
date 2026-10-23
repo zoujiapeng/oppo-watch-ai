@@ -107,7 +107,7 @@ console.log(`[ball] 恢复后：${after}`);
 if (after.startsWith("touchable")) ok("球恢复可触摸（用户手指能点/拖）");
 else bad(`没有恢复：${after}`);
 
-console.log("\n== 4) 球不在/写不进信号时，必须快速失败并放行（fail-open）==");
+console.log("\n== 4) 球不在/写不进信号时，必须快速放行（fail-open）==");
 // 指向一个不存在的目录来模拟「球没装/目录没了」：
 // 注意不能靠"把 ACK 改名"——球 20ms 就会把新 ACK 写回来，根本挡不住。
 // 模块常量在 import 时就定下来了，所以用子进程 + 环境变量来切目录
@@ -134,8 +134,17 @@ const dt2 = Date.now() - t1;
 let parsed = null;
 try { parsed = JSON.parse(childOut.split("\n").pop()); } catch (_) {}
 console.log(`[ball] 子进程（信号目录=${bogusDir}）返回 ${childOut || "(空)"}，整体 ${dt2}ms`);
-if (parsed && !parsed.ok && parsed.dt <= 1500) ok(`拿不到信号目录时不阻塞（${parsed.dt}ms，调用方照发动作）`);
-else bad(`fail-open 行为不对：${childOut || "(无输出)"}`);
+// 2026-10-23 起有两种合法的 fail-open：
+//   · 目录里没有心跳（球没在跑 / 目录不对）→ 根本不发信号，ok=true 立刻返回（~0ms）；
+//   · 心跳在、但 ACK 迟迟不来（球卡住）→ 最多等 BALL_GUARD_ACK_TIMEOUT_MS(500ms)，ok=false。
+// 两种都必须在 1.5s 内放行，调用方不被拖住。
+if (parsed && parsed.dt <= 1500) {
+	ok(parsed.ok
+		? `球没心跳时立刻放行（${parsed.dt}ms，一个字节都没写，调用方照发动作）`
+		: `球在跑但不回 ACK 时超时放行（${parsed.dt}ms，调用方照发动作）`);
+} else {
+	bad(`fail-open 行为不对：${childOut || "(无输出)"}`);
+}
 
 // 收尾：别把信号文件留在那儿（留给下一轮测试/下次启动当"陈旧信号"读）
 for (const f of ["dsh-ball-act", "dsh-ball-ack"]) {

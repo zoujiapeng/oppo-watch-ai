@@ -39,7 +39,7 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | 它怎么接上 DSH 的（协议 / 状态表 / 黑区公式） | [`android/docs/DSH_ASSISTANT.md`](android/docs/DSH_ASSISTANT.md) |
 | 接手改代码（现状 / 关键决定 / 未做完） | [`android/docs/HANDOFF.md`](android/docs/HANDOFF.md) |
 | DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
-| **Agent 操控手机时球不吃手势**（球让路协议 / 验证脚本） | [`android/docs/BALL_TOUCH_GUARD.md`](android/docs/BALL_TOUCH_GUARD.md) |
+| **Agent 操控手机时球不吃手势**（全 UI 让位协议 / 设置页开关 / 验证脚本） | [`android/docs/BALL_TOUCH_GUARD.md`](android/docs/BALL_TOUCH_GUARD.md) |
 | **全部操作说明**（手势 / 状态 / 每个开关 / 调试口子 / 日志速查） | [`android/docs/OPERATIONS.md`](android/docs/OPERATIONS.md) |
 
 一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，见部署文档）。

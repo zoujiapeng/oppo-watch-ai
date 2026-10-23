@@ -1,8 +1,13 @@
 # 悬浮球 × DSH 触摸门控（球让路协议）
 
-> 一句话：**agent 注入的点击/滑动永远不会落到球上，用户手指照常能点球、拖球。**
+> 一句话：**agent 注入的点击/滑动永远不会落到球上（球自己的任何一个窗口都不行），
+> 用户手指照常能点球、拖球。**
 > 做法不是"把球画得更透明"，而是：玻璃层只画不摸 + 球上只有一个贴身代理窗口接用户手势 +
-> agent 要注入触摸前先打招呼，那一刻连代理窗口也退出命中测试。
+> agent 要动手之前先打招呼，那一刻**球拥有的每一个窗口**一起退出命中测试。
+>
+> 2026-10-23 修订：以前只让**代理窗口**让路，球后来长出来的那些窗口（文字点击层、状态 3 的
+> 全屏"点空白关掉"层、玻璃菜单、输入行、搜索层、审批三层）照样吃注入触摸 —— 这就是用户报的
+> 「这功能以前做过，但失效了」。现在统一由 `applyAgentYield()` 一处收口，**设置页有开关**。
 
 ## 1. 为什么会有这个问题
 
@@ -66,12 +71,51 @@ DSH 侧（要注入触摸时）                          球侧（每 60ms 轮�
   球不让路、不回 ACK，那一次点击就被球吃掉（现象：`[ball] 让路确认未收到` + 点击无反应）。
 - **握手成功后插件顺手删掉信号文件**（`fs.unlinkSync(actPath)`），从根上不留遗留物。
 
+## 2.5 全 UI 让位（2026-10-23，当前语义）
+
+老版本 `applyBallTouchability()` 只管代理窗口 `ballTouch` 一个，而且它在
+`ballTouch == null` 时**整段 return**（代理窗口没加成功 → 门控直接死掉）。
+10-16 之后球又长出 9 个窗口，全都可触摸：
+
+| 窗口 | 形态 | 让路手法 |
+|---|---|---|
+| `ballTouch` 代理层 | 全透明 | `FLAG_NOT_TOUCHABLE` |
+| `siriTouch` 文字点击层 | 全透明 2×2 → 文字带 | `FLAG_NOT_TOUCHABLE` |
+| `menuOutside` / `searchOutside` 全屏"点空白关掉"层 | 全透明铺满屏 | `FLAG_NOT_TOUCHABLE` |
+| `approvalTouch` 审批拖动层 | 全透明 | `FLAG_NOT_TOUCHABLE` |
+| `menuView` 玻璃菜单 / `convoBar` 输入行 / `convoSideBtn` / `searchBar` 搜索条 | **看得见** | 可触摸区域置空（`yieldRegion`） |
+| `siriText` 球内文字层 | 看得见（文字） | 可触摸区域置空 |
+| `approvalContent` / `approvalActionsScroll` / `approvalInputRow` 审批三层 | 看得见 | 可触摸区域置空 |
+
+**为什么分两种手法**：看得见的窗口一旦加 `FLAG_NOT_TOUCHABLE`，一加/OPPO 的 WindowManager 会把
+整窗 `alpha` 钉在 0.80（见 §5 第 13 条），而且摘掉 flag 也不保证还原 —— 那就是 10-16 那次
+"球变半透明贴纸"。所以可见窗口一律**只改可触摸区域**（`ViewTreeObserver` +
+`TOUCHABLE_INSETS_REGION`，反射挂动态代理），视觉一动不动。
+
+实现要点（`FloatingBallService`）：
+
+- `applyAgentYield(boolean on)`：唯一入口。状态翻转时 logcat 打
+  `agent yield -> 全 UI 让路（看得见、点不到）` / `恢复球窗口触摸`，并给所有登记过的可见窗口
+  `requestLayout()` 让系统重算区域。
+- `yieldFlag(view, params)`：只切换 `FLAG_NOT_TOUCHABLE` 位，**按切换前的真实状态还原**
+  （所以 `siriText` 本来该 `NOT_TOUCHABLE` 的时候不会被误改成可触摸）。
+- `yieldRegion(view)`：每个 View 只挂一次监听（`IdentityHashMap` 去重），监听里读
+  `agentYieldOn`：让路时空 region、平时满 region（0,0,w,h）。挂不上就退回 `yieldFlag`。
+- 调用点：`applyBallTouchability()` 尾部（所有状态切换都会走到），以及每 60ms 的 `pumpAgentGate()`
+  里让路期间补登记 —— agent 动作中途才建出来的窗口（审批面板、菜单卡片）最迟 60ms 内让路。
+- **开关**：`float_agent_yield`（默认 true）。设置页 → 悬浮水晶球 →「DSH 操控时全部 UI 让位」；
+  也仍然认老的文件开关 `dsh-ball-guard-off`。关掉时球**不**让路，但照样回 `!skip:<nonce>` ACK，
+  插件因此不用白等 500ms —— 手感跟没装球一样。
+- **心跳**：球每 2s 写 `dsh-ball-alive`。插件先看心跳：球没跑就根本不发信号、也不等 ACK
+  （以前球关着时每次注入都白等半秒的根源）。
+
+
 ## 3. 落地位置（三处）
 
 | 位置 | 角色 |
 |---|---|
 | `android/src/.../FloatingBallService.java` | 球侧：`pumpAgentGate()` / `applyBallTouchability()` / `syncBallTouchWindow()` / `setupBallTouchLayer()` / `inBallAtRaw()` / `gateDir()` |
-| `~/dsh-preset-mobile-use/lib/index.js` | DSH 侧**主路径**：`waitForBallStandDown()`，在 `default:` 分支发 `/api/action` 之前调用 |
+| `~/dsh-preset-mobile-use/lib/index.js` | DSH 侧**主路径**：`waitForBallStandDown()`（心跳探测 + `!skip:` 认账 + 全动作让路），在 `default:` 分支发 `/api/action` 之前调用 |
 | `patches/apply-vd-ball-guard-patch.sh` | CLI 路径：给 Magisk 模块里的 `/system/bin/vd` 的 tap/swipe/key 分支插 `ball_signal`（手动调试用） |
 
 ### 3.1 窗口结构（这次改动）
@@ -139,6 +183,50 @@ bash android/tools/ball-guard-verify.sh     # 球必须在跑
 [ok] 球恢复可触摸（用户手指能点/拖）
 ```
 
+### 4.1b 全窗口让位：`android/tools/ball-yield-verify.sh`（2026-10-23 新增）
+
+```bash
+bash android/tools/ball-yield-verify.sh --with-search   # 先把搜索层叫出来，窗口最多
+bash android/tools/ball-yield-verify.sh --off           # 验证开关关掉：不让路 + 回 !skip ACK
+```
+
+它按 `ownerPid` 把球进程的**所有**输入窗口列出来，读 `dumpsys input` 里的 `inputConfig`
+（有没有 `NOT_TOUCHABLE`）与 `touchableRegion`（是不是 `<empty>`），断言：
+
+- 平时：至少一个窗口可触摸；
+- 让路中：**一个都不能可触摸**（脚本持续重打信号，避免 `dumpsys` 太慢跑出 1.5s 窗口）；
+- 1.5s 后：恢复可触摸。
+
+实测（2026-10-23，LE2120 / Android 13，开着搜索层）：
+
+```
+── before
+35361a3 com.glslplayground.app|[57,186][1022,317]|touchable      ← 搜索胶囊
+85bde21 com.glslplayground.app|[0,-191][1080,2221]|touchable     ← 全屏"点空白关掉"层
+724e4d6 com.glslplayground.app|[0,96][2,98]|touchable            ← 文字点击层
+d82de03 dsh-ball-proxy|[178,1047][902,1557]|notTouchable          ← 搜索期间本来就不接管
+650a626 com.glslplayground.app|<empty>|notTouchable              ← 玻璃（永远只画不摸）
+── during
+35361a3 com.glslplayground.app|<empty>|notTouchable              ← 区域被置空，画面不动
+85bde21 com.glslplayground.app|[0,-191][1080,2221]|notTouchable   ← 加了 flag
+724e4d6 com.glslplayground.app|[0,96][2,98]|notTouchable
+d82de03 dsh-ball-proxy|[178,1047][902,1557]|notTouchable
+  [ok] 让路期间 5 个球窗口全部退出命中测试
+  [ok] ACK 匹配：verify-1792787896537941620-14-click
+── after
+  [ok] 已恢复可触摸（用户照常点球/拖球）
+★ 全部通过
+```
+
+开关关掉（`--off`）那一路也实测过：
+
+```
+  [ok] 开关关掉时窗口照旧可触摸（预期行为）
+  [ok] 球回了 skip ACK（插件不用白等 500ms）：!skip:verify-1792787946564177851-14-click
+★ 全部通过
+```
+
+
 ### 4.2 插件侧贯通：`android/tools/ball-guard-plugin-e2e.mjs`
 
 ```bash
@@ -158,6 +246,10 @@ node android/tools/ball-guard-plugin-e2e.mjs click   # 也支持 swipe / key
 [ok] 拿不到信号目录时不阻塞（1ms，调用方照发动作）
 ★ 全部通过
 ```
+
+> ⚠️ 跑之前先把搜索层收掉：`touch /sdcard/Android/data/com.glslplayground.app/files/search-close`。
+> 搜索胶囊在屏上时代理窗口**本来就故意不接管**（`applyBallTouchability` 的 `searchActive`），
+> 第三步"恢复可触摸"会误报失败。
 
 ### 4.2b 真机"agent 穿球点击"验证（2026-10-15 实拍，DSH 重启后）
 
@@ -247,15 +339,30 @@ agent gate -> ARM (球可触摸)
    见 `makeTouchTransparent()` 与 HANDOFF 那一节。**只有全透明的代理窗口可以留这个 flag。**
 14. **Siri 文字上的点击层（`siriTouch`）不会让路**：`applyBallTouchability()` 只切代理窗口，
    球里有文字时那条文字带仍可触摸 → agent 注入到那一带的点击会被它吃掉。改门控时记得带上它。
+15. **门控必须"一处收口"，不能一个窗口一个补丁**：`applyAgentYield()` 是唯一入口，
+    **以后新增任何可触摸窗口，都要在它里面登记**（透明层进 `yieldFlag`，可见层进 `yieldRegion`），
+    否则新窗口就会重演"让位失效"。查漏办法：`bash android/tools/ball-yield-verify.sh --with-search`。
+16. **`applyBallTouchability()` 不许再在第一行 return**：老版本 `ballTouch == null` 就整段退出，
+    于是代理窗口一旦没加成功，连其它窗口的让路也一起死了（日志里只有一行 `add ball touch failed`）。
+    现在代理窗口那段单独判空，后面照跑。
+17. **可见窗口别用 `FLAG_NOT_TOUCHABLE` 做让路**（第 13 条的延伸）：换来的是"贴纸感"，而且摘掉
+    flag 未必还原。可见窗口用 `yieldRegion`（空可触摸区域），透明窗口才用 flag。
 
 ## 6. 已知限制
 
 - ACT 的 mtime 精度是**秒级**：同一秒内的两次信号可能 mtime 相同（日志去重会少打一行，判定不受影响）。
 - 用户手指正按着球时 agent 要注入触摸：球会在 ~60ms 内退出命中测试，用户那串手势会收到
   `ACTION_CANCEL`（表现为球突然不跟手），这是设计取舍。
-- DSH 侧要**重启 DSH** 才会加载改过的插件（插件在启动时 import 进内存）。
 - 球被系统杀掉再打开（点「悬浮于桌面」）后重新开始轮询，无状态残留。
-- 球里有文字时，文字点击层那条带**不受让路协议管**（见踩坑 14）。
+- ~~球里有文字时，文字点击层那条带不受让路协议管~~ → **2026-10-23 已修**：`siriText` 与
+  `siriTouch` 都进了 `applyAgentYield()`，实测让路期间两者都是 `notTouchable`。
+- 让路只保证"球不吃手势"，不负责"球看不见"：球仍然画在屏幕上，DSH 截图里能看到它。
+  要让球彻底让开视线，得靠球自己收起来 / 挪走，协议不管这个。
+- 可见窗口的"可触摸区域置空"依赖 @hide API 反射；万一 OEM 又不认（日志 `yieldRegion failed`），
+  会退回 `FLAG_NOT_TOUCHABLE`：让路仍成功，但那个窗口可能被压到 alpha 0.80。
+- 插件侧的改动要**重启 DSH** 才生效（插件启动时 import 进内存）；App 侧装完 APK 立刻生效。
+- 让路窗口（每次动作后 1.5s）里，**用户**点球/点审批按钮也会被穿过去（那 1.5s 内球这一侧
+  确实"点不到"）。这是"全部让位"的必然代价：宁可漏一次用户点击，也不让 agent 的手势被吃掉。
 
 ## 7. 改动清单速查
 
@@ -268,6 +375,9 @@ agent gate -> ARM (球可触摸)
 | `android/tools/ball-guard-verify.sh` | 球侧端到端验证（信号 → notTouchable + ACK → 恢复） |
 | `android/tools/ball-guard-plugin-e2e.mjs` | 插件侧贯通验证（切真实插件代码跑，含 fail-open 用例） |
 | `android/tools/ball-proxy-state.py` | 按窗口名读代理层触摸状态（两个脚本共用同一口径） |
+| `FloatingBallService.java`（2026-10-23） | `applyAgentYield` / `yieldFlag` / `yieldRegion` / `setAgentYield` / `getAgentYield`；开关 `float_agent_yield`；心跳 `dsh-ball-alive`；关掉时回 `!skip:` ACK |
+| `MainActivity.java` / `WatchBridge.java` / `settings.html` | 「DSH 操控时全部 UI 让位」开关（`W.getAgentYield()` / `W.setAgentYield()`） |
+| `android/tools/ball-yield-verify.sh` | 全窗口让位端到端验证（平时可触摸 → 让路时全不可触摸 → 1.5s 恢复；`--off` 验证开关） |
 
 ## 8. 还没做的
 

@@ -304,6 +304,24 @@ public class MainActivity extends Activity {
         restartFloat();
     }
 
+    /**
+     * 「DSH 操控时全部 UI 让位」开关（默认开）。
+     *
+     * 开：agent 每次注入触摸之前，球自己的**所有**窗口（玻璃、文字、文字点击层、状态 3 卡片、
+     * 输入行、搜索层、审批三层）一起退出命中测试 —— 看得见、点不到，注入手势直达底下的 App。
+     * 关：回到老行为（只有代理窗口让路，其余窗口照吃触摸）。
+     *
+     * 不用重启悬浮球：服务每 60ms 读一次这个键，改完立刻生效。
+     */
+    public boolean getAgentYield() {
+        return prefs().getBoolean("float_agent_yield", true);
+    }
+
+    public void setAgentYield(boolean v) {
+        prefs().edit().putBoolean("float_agent_yield", v).apply();
+        if (FloatingBallService.running) FloatingBallService.setAgentYield(v);
+    }
+
     public int getFloatCapScale() {
         return prefs().getInt("float_cap_scale", 2);
     }
