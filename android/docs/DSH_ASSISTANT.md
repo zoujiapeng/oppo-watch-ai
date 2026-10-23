@@ -146,7 +146,11 @@ GET /api/remote.mux  (Upgrade: websocket, 不带 Origin)
 ## 怎么用
 
 1. 设置页打开「悬浮于桌面」（球浮起来），并保持「Siri 模式」开启。
-2. 设置页 →「DSH 文本助手」：确认开关打开、地址是 `http://127.0.0.1:3080`。
+2. 设置页 →「DSH 文本助手」：确认开关打开、地址指向**正在跑的那个** DSH。
+   本机（dshpj 起的）实际是 `http://127.0.0.1:3081`：先 `bash tools/dsh-cookie.sh`
+   （它会从 `pj-lan.mjs --token` 换一张 30 天 cookie 落到 `~/dsh.cookie`，并打印该填的地址），
+   再把地址填进设置页。日志出现 `authenticated against … via dsh.cookie` 才算连上；
+   之前填 3080 时会报 `Failed to connect to 127.0.0.1:3080`（那端口上没人监听）。
 3. **双指长按球**打开搜索胶囊，打字后按键盘回车发送；回答逐段写进球里。
 4. 也可以点「问一句（测试链路）」直接走一遍 DSH 往返。
 
