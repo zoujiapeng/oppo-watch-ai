@@ -4715,20 +4715,17 @@ public class FloatingBallService extends Service {
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
         computeZones();
-        // 六区的**玻璃圆仍由 GL 画**（用户：玻璃要通透），**图标由文字层画**。
-        // 关键：窗口不放大（见 computeZones）→ GL 的 surface 不失配（k=1）→ 两者同心。
-        // 圆只在"某个区被指到"时才显示（见 pushZoneScene 的 enabled 逻辑）。
-        renderer.zoneMode = true;
-        if (glView != null) glView.setAlpha(1f);
+        // 2026-10-23：六区/卡片**全部由文字层（BallZonesView）自己画**，GL 层暂时隐藏。
+        // 为什么：GLSurfaceView 的 surface 在窗口从 787×573 撑到 846×846 后仍停在旧尺寸，
+        // shader 的 k=1.075 → 玻璃圆被缩放/裁切，和图标永远对不上（用户报的"一个都对不准"）。
+        renderer.zoneMode = false;
+        if (glView != null) glView.setAlpha(0f);
         renderer.sHlAmt = 1.5f;
         renderer.sAb = 0.12f;
         renderer.sDensity = sqDensity();
         renderer.zCont = 0.80f;      // 和球同款"上黑下透"（球的黑顶就是这条曲线）
         renderer.zRefract = 16f;
         pushZoneScene();
-        Log.i("FloatingBall", "zones: glass alpha=" + (glView == null ? -1 : glView.getAlpha())
-                + " zoneMode=" + renderer.zoneMode + " win=" + winW + "x" + winH
-                + " z0=(" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0]) + ")");
         showZonesOverlay();
         applyBallTouchability();
         vibrate(22);
@@ -4755,12 +4752,11 @@ public class FloatingBallService extends Service {
         //   相邻圆心弦长 = ring × 2sin30° = ring = 2.35R，两个圆之间的空隙 ≈ 0.35R；
         //   命中判定半径是 1.15R —— 相邻两个命中圈的间距 (2.35R − 2×1.15R) = 0.05R > 0，
         //   所以**不会两个圆同时算命中**，这是"稍微再圆一点点、别选错"的关键。
-        // ★ 2026-10-23 用户确认"小一号那版效果很好"：六圆按**当前球窗**装下（不放大窗口），
-        //   这样 GL 的 surface 不会失配（k=1），玻璃圆和图标天然对齐。
-        //   ring = 2.1R：相邻圆心距 2.1R，命中圈 1.15R → 留 0.2R 空隙，不会选错。
-        float maxR = (Math.min(winW, winH) * 0.5f - dp(8)) / 3.1f;
-        zoneR = Math.min(zoneR, Math.max(dp(30), maxR));
-        zoneRing = zoneR * 2.1f;
+        // 环半径 = 2.35R，但必须能在"屏幕可用区域 - 两侧边距"里装下（否则最上/最下的圆会贴边/出屏）
+        float margin = dp(14);
+        float avail = Math.min(screenW, screenH - topInset) - 2 * margin;
+        float maxRing = avail * 0.5f - zoneR;
+        zoneRing = Math.max(zoneR * 1.55f, Math.min(zoneR * 2.35f, maxRing));
         // 角度从正上方开始、每 60° 一个（屏幕 y 向下 → sin 取正即向下）
         final int[] order = {ZONE_TOP, ZONE_TR, ZONE_BR, ZONE_BOTTOM, ZONE_BL, ZONE_TL};
         for (int i = 0; i < ZONE_COUNT; i++) {
@@ -4783,7 +4779,7 @@ public class FloatingBallService extends Service {
             zoneLocalX[i] = zoneCx[i] - loc[0];
             zoneLocalY[i] = zoneCy[i] - loc[1];
         }
-        // 窗口保持球的尺寸（放大窗口会让 GL surface 失配 → 玻璃和图标错位）
+        ensureZoneWindow();            // 环比球窗大 —— 窗口得先长到能装下六个圆
     }
 
     private float[] zoneLocalX, zoneLocalY;
@@ -4854,7 +4850,7 @@ public class FloatingBallService extends Service {
             m[i * 4] = (zoneActive == i) ? 1f : 0f;      // act
             m[i * 4 + 1] = 0.02f;                        // dark：和球一样是浅玻璃
             m[i * 4 + 2] = 1f;                           // 圆：圆角 = 半宽
-            m[i * 4 + 3] = 1f;                           // 六个圆**一直是玻璃**（用户 2026-10-23 明确）
+            m[i * 4 + 3] = 1f;                           // enabled
         }
         // 六个形状全部启用（不再有"第 5 个关掉"这回事）
         // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射
@@ -5560,8 +5556,7 @@ public class FloatingBallService extends Service {
             zonesView.setCardScroll(cardScrollMode());
             zonesView.setCardProgress(-1, 0f);
         }
-        // 卡片也走 GL 的玻璃（用户：进列表不能"失去玻璃"）。pushCardScene() 已在上一步把
-        // 玻璃形状换成"一整张面板"，六个圆自然不再画。GL 层全程保持可见。
+        pushCardScene();
         cardTapMode = true;               // 卡片一出现就落定：手指可以抬起，之后靠点击
         syncBallTouchWindow();            // 代理窗口要盖住整张卡片，否则点不到
         startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
@@ -5593,9 +5588,8 @@ public class FloatingBallService extends Service {
         holdDir = null;
         if (zonesView != null) { zonesView.hideCards(); zonesView.setCardScroll(0); }
         restoreHoldWindow();
-        if (renderer != null) renderer.zoneMode = true;
         pushZoneScene();
-        Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到六区");
+        Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到四区");
     }
 
     /** 当前**可见**的那一段（滚动窗口 [holdFirst, holdFirst+holdVisible)）。 */

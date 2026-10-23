@@ -220,13 +220,36 @@ final class BallZonesView extends View {
             float a = (active == i) ? 1f : (i >= 4 ? 0.42f : 0.92f);   // 待定的两个淡一点
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
-            // 玻璃圆由 GL 层画（通透的折射效果），这里**不画任何圆** —— 用户明确：
-            //   "你加上的圆似乎把玻璃弄得不通透了"。图标只是落在玻璃圆心上。
-            float rr = r;
-            if (i >= 4) continue;                     // 待定圆：什么都不画（玻璃由 GL 在指到时才出）
-            // 用户 2026-10-23：圆区里**不要文字**，只留一个发光图标（居中、落在玻璃圆的圆心上）；
-            //   圆本身由 GL 画（通透），这里一笔圆都不画。
-            drawIcon(cv, i, cx[i], cy[i], active == i);
+            float rr = r * (active == i ? 1.06f : 1f);
+            // ── 圆自己画：**同一个 Canvas、同一个原点** → 图标永远在圆心上（用户：让圆把图标囊括起来）──
+            discRect.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
+            int a0 = (int) ((active == i ? 46 : 26) * appear);
+            int a1 = (int) ((active == i ? 12 : 6) * appear);
+            radial.setShader(new android.graphics.RadialGradient(cx[i], cy[i] - rr * 0.25f, rr * 1.35f,
+                    new int[]{0x00FFFFFF | (a0 << 24), 0x00FFFFFF | (a1 << 24), 0x00000000},
+                    new float[]{0f, 0.62f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            disc.setShader(radial.getShader());
+            cv.drawCircle(cx[i], cy[i], rr, disc);              // 玻璃盘
+            disc.setShader(null); radial.setShader(null);
+            rim.setColor(((int) ((active == i ? 0x7A : 0x4A) * appear) << 24) | 0x00FFFFFF);
+            cv.drawCircle(cx[i], cy[i], rr - dp(0.8f), rim);    // 一圈细边
+            // 用户 2026-10-23：圆区里**不要文字**，只留一个大一点的发光图标（居中）
+            if (i >= 4) {
+                // 待定：只画一圈细环（占位，先说"这里还空着"）
+                stroke.setStrokeWidth(dp(1.2f));
+                ring.set(cx[i] - rr * 0.52f, cy[i] - rr * 0.52f, cx[i] + rr * 0.52f, cy[i] + rr * 0.52f);
+                cv.drawOval(ring, stroke);
+                stroke.setStrokeWidth(dp(1.7f));
+            } else {
+                drawIcon(cv, i, cx[i], cy[i], active == i);
+            }
+            if (active == i) {
+                ring.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
+                stroke.setStrokeWidth(dp(2.2f));
+                stroke.setColor(0x66FFFFFF);
+                cv.drawOval(ring, stroke);
+                stroke.setStrokeWidth(dp(1.7f));
+            }
         }
         cv.restoreToCount(save);
     }
@@ -235,21 +258,26 @@ final class BallZonesView extends View {
     private void drawCards(Canvas cv) {
         int n = Math.min(cardLabels.length, localRects.length / 4);
         if (n <= 0) return;
-        // 面板底：GL 的玻璃面板之外再垫一层很淡的深色，保证任何壁纸上都看得清
-        //（用户 2026-10-23：进列表时"失去玻璃" → 玻璃仍由 GL 画，这里只是保底可读）
+        // ── 面板底：整个状态 3 都由这一个 View 画（不再用 GL 层）──
+        //   理由：GLSurfaceView 的 surface 在窗口尺寸变化后可能仍停在旧尺寸（实测 787×573 vs 846×846），
+        //   玻璃层于是被缩放/裁切，圆和图标永远对不齐。这里用同一个 Canvas 画，天生对齐。
         if (localListRect.length >= 4) {
             float pad = dp(6f);
             RectF bg = new RectF(localListRect[0] - pad, localListRect[1] - pad,
                     localListRect[0] + localListRect[2] + pad,
                     localListRect[1] + localListRect[3] + pad);
-            disc.setShader(null);
-            disc.setColor(0x99000000);
+            disc.setShader(new android.graphics.LinearGradient(bg.left, bg.top, bg.left, bg.bottom,
+                    new int[]{0xE616161A, 0xE60E0E11}, null, android.graphics.Shader.TileMode.CLAMP));
+            disc.setColor(0x00000000);
             cv.drawRoundRect(bg, dp(14f), dp(14f), disc);
-            rim.setStyle(Paint.Style.STROKE);
-            rim.setStrokeWidth(dp(1.2f));
+            disc.setShader(null);
             rim.setColor(0x33FFFFFF);
+            rim.setStrokeWidth(dp(1.2f));
             cv.drawRoundRect(bg, dp(14f), dp(14f), rim);
         }
+        text.setTextAlign(Paint.Align.LEFT);
+        text.setTextSize(dp(10.5f));
+        text.setColor(0xD9FFFFFF);
         if (localTitleRect.length >= 4) {
             float tx = localTitleRect[0] + dp(10f);
             float ty = localTitleRect[1] + localTitleRect[3] * 0.66f;
