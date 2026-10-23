@@ -5568,7 +5568,11 @@ public class FloatingBallService extends Service {
             zonesView.setCardScroll(cardScrollMode());
             zonesView.setCardProgress(-1, 0f);
         }
-        if (glView != null) glView.setAlpha(0f);   // 卡片面板由文字层自绘 → GL 让位（窗口会长高，surface 会失配）
+        // ★ 2026-10-23（用户："方形完全透明，点一下才正常"）：这里以前把 GL 层 alpha 置 0，
+        //   让文字层"自绘面板"。文字层那块黑底已经删了（方形要玻璃），再置 0 就**什么都没有** →
+        //   卡片一出来是完全透明的，点一下才被别的路径重新推出来。
+        //   现在：GL 层保持可见，并且立刻把**方形玻璃**推给 GL（pushCardScene）。
+        pushCardScene();
         cardTapMode = true;               // 卡片一出现就落定：手指可以抬起，之后靠点击
         syncBallTouchWindow();            // 代理窗口要盖住整张卡片，否则点不到
         startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
