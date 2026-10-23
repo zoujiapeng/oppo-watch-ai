@@ -2,7 +2,6 @@ package com.glslplayground.app;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RadialGradient;
@@ -39,17 +38,12 @@ final class BallZonesView extends View {
     private int cardProgressIdx = -1;
     private float cardProgress = 0f;
     private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
-    /** 卡片面板的"压暗玻璃"底（卡片文字要能读）。 */
+    /** 六区的"玻璃盘"：自己画（和图标同一个 Canvas / 同一个原点，天生对齐）。 */
     private final Paint disc = new Paint(Paint.ANTI_ALIAS_FLAG);
-    /** 六区的玻璃圆：玻璃体 + 菲涅尔亮弧（同一个圆心画图标，所以永远"囊括"）。 */
-    private final Paint glass = new Paint(Paint.ANTI_ALIAS_FLAG);
-    /** 圆外那圈柔和暗影：把玻璃从背景里垫出来，替代"白色描边"。 */
-    private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
-    /** 玻璃上的那道斜向高光弧。 */
-    private final Paint spec = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF specRect = new RectF();
-    /** 画玻璃圆时用来把黑顶/反光裁在圆内。 */
-    private final Path clip = new Path();
+    private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF discRect = new RectF();
+    private final Paint radial = new Paint();
+    private final RectF ring = new RectF();
 
     /** 区心（**屏幕**坐标，service 直接给这个）。draw 时再换算成本 View 坐标。 */
     private final float[] sx = new float[ZONE_COUNT], sy = new float[ZONE_COUNT];
@@ -105,6 +99,9 @@ final class BallZonesView extends View {
         text.setShadowLayer(dp(1.6f), 0f, dp(0.6f), 0xC0000000);
         text.setTextSize(dp(12f));
         text.setTextAlign(Paint.Align.CENTER);
+        rim.setStyle(Paint.Style.STROKE);
+        rim.setStrokeWidth(dp(1.6f));
+        rim.setColor(0x66FFFFFF);
         disc.setStyle(Paint.Style.FILL);
         setClickable(false);
         setFocusable(false);
@@ -130,28 +127,6 @@ final class BallZonesView extends View {
         if (ys != null) System.arraycopy(ys, 0, sy, 0, Math.min(ZONE_COUNT, ys.length));
         r = radius;
         invalidate();
-        requestRealign();
-    }
-
-    // ── 2026-10-23（"图标整体偏一个位移"的最后一个坑）───────────────────────
-    // 状态 3 的窗口在进门那一瞬间还会被 WMS 挪/撑一次（ensureZoneWindow）。这一帧里
-    // getLocationOnScreen 拿到的还是旧原点 → 整层（玻璃圆 + 图标）被画在旧位置上，
-    // 之后窗口动了、内容却**不会自己重画** —— 屏幕上就是"图标和玻璃都偏了十几像素"。
-    // 所以进门后的 1.2 秒里按 100ms 重画几次：位置一变，下一帧就对上了。
-    private int realignTicks = 0;
-    private final Runnable realign = new Runnable() {
-        @Override public void run() {
-            if (!isShown()) { realignTicks = 0; return; }
-            invalidate();
-            if (++realignTicks < 12) postDelayed(this, 100);
-            else realignTicks = 0;
-        }
-    };
-
-    private void requestRealign() {
-        realignTicks = 0;
-        removeCallbacks(realign);
-        post(realign);
     }
 
     void setActive(int idx) {
@@ -242,91 +217,15 @@ final class BallZonesView extends View {
             return;
         }
         for (int i = 0; i < ZONE_COUNT; i++) {
-            // ── 2026-10-23（第五版）：玻璃圆仍然画在**这里**（和图标同一个 Canvas、同一个圆心，
-            //   对齐是画出来的，跟 GL 的 surface 尺寸/inset 全部无关），
-            //   但把这颗圆当"一片厚玻璃"来画，而不是一张平涂的圆盘：
-            //     ① 圆外：贴边柔和暗影（把玻璃从背景里垫出来，替代白色描边）
-            //     ② 圆内：顶部黑顶（上黑下透，和球同一条曲线感）+ 底部内反光 → 有厚度
-            //     ③ 贴边：菲涅尔亮弧（0.97R，白 12%→0 渐隐，不是一条线）
-            //     ④ 左上：一道斜向高光弧（玻璃"亮边"的那道光），2dp、白 34%，上下渐弱
-            //     ⑤ 右下：内阴影（背光侧），让圆"鼓"起来
-            float a = (active == i) ? 1f : 0.94f;
-            float rr = r;
-            float cxp = cx[i], cyp = cy[i];
-            int appA = Math.round(255 * appear);
-
-            // ① 外圈柔和暗影
-            halo.setShader(new RadialGradient(cxp, cyp, rr + dp(10f),
-                    new int[]{0x00000000, 0x00000000, 0x30000000, 0x00000000},
-                    new float[]{0f, rr / (rr + dp(10f)),
-                            Math.min(0.99f, (rr + dp(2.0f)) / (rr + dp(10f))), 1f},
-                    android.graphics.Shader.TileMode.CLAMP));
-            halo.setAlpha(appA);
-            cv.drawCircle(cxp, cyp, rr + dp(10f), halo);
-            halo.setShader(null);
-
-            int sc = cv.save();
-            clip.reset();
-            clip.addCircle(cxp, cyp, rr, Path.Direction.CW);
-            cv.clipPath(clip);
-
-            // ② a. 玻璃体：中心极淡、边缘略亮（透镜边缘那一圈"厚")
-            glass.setShader(new RadialGradient(cxp, cyp, rr,
-                    new int[]{0x08FFFFFF, 0x05FFFFFF, 0x00FFFFFF, 0x16FFFFFF, 0x04FFFFFF},
-                    new float[]{0f, 0.55f, 0.86f, 0.965f, 1f},
-                    android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(appA * a));
-            cv.drawCircle(cxp, cyp, rr, glass);
-            glass.setShader(null);
-
-            // ② b. 黑顶（上黑下透，和球的黑区同一条曲线）
-            glass.setShader(new LinearGradient(cxp, cyp - rr, cxp, cyp + rr * 0.10f,
-                    new int[]{0x3A000000, 0x14000000, 0x00000000}, new float[]{0f, 0.55f, 1f},
-                    android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(appA * a));
-            cv.drawCircle(cxp, cyp, rr, glass);
-            glass.setShader(null);
-
-            // ② c. 底部内反光（贴下沿往上一小段）
-            glass.setShader(new LinearGradient(cxp, cyp + rr, cxp, cyp + rr * 0.66f,
-                    new int[]{0x24FFFFFF, 0x00000000}, null, android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(appA * a));
-            cv.drawCircle(cxp, cyp, rr, glass);
-            glass.setShader(null);
-
-            // ⑤ 右下内阴影：让圆有"鼓起来"的体积
-            glass.setShader(new RadialGradient(cxp - rr * 0.35f, cyp - rr * 0.45f, rr * 1.55f,
-                    new int[]{0x00000000, 0x00000000, 0x1E000000},
-                    new float[]{0f, 0.55f, 1f}, android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(appA * a));
-            cv.drawCircle(cxp, cyp, rr, glass);
-            glass.setShader(null);
-
-            // ③ 菲涅尔亮弧：贴边一圈，靠上的一侧更亮
-            glass.setShader(new RadialGradient(cxp, cyp, rr,
-                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0x15FFFFFF, 0x05FFFFFF, 0x00FFFFFF},
-                    new float[]{0f, 0.93f, 0.975f, 0.995f, 1f},
-                    android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(appA * a));
-            cv.drawCircle(cxp, cyp, rr, glass);
-            glass.setShader(null);
-
-            // ④ 左上高光弧：玻璃上最常见的那道"亮边"
-            spec.setStyle(Paint.Style.STROKE);
-            spec.setStrokeCap(Paint.Cap.ROUND);
-            spec.setStrokeWidth(dp(2.2f));
-            specRect.set(cxp - rr + dp(2f), cyp - rr + dp(2f), cxp + rr - dp(2f), cyp + rr - dp(2f));
-            spec.setColor(((int) (0x44 * appear) << 24) | 0x00FFFFFF);
-            cv.drawArc(specRect, 196f, 74f, false, spec);
-            spec.setStrokeWidth(dp(4.5f));
-            spec.setColor(((int) (0x18 * appear) << 24) | 0x00FFFFFF);
-            cv.drawArc(specRect, 192f, 82f, false, spec);
-
-            cv.restoreToCount(sc);
-
-            if (i >= 4) continue;                    // 待定：只有玻璃圆，没有图标
+            float a = (active == i) ? 1f : (i >= 4 ? 0.42f : 0.92f);   // 待定的两个淡一点
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
+            // 玻璃圆由 GL 层画（通透的折射效果），这里**不画任何圆** —— 用户明确：
+            //   "你加上的圆似乎把玻璃弄得不通透了"。图标只是落在玻璃圆心上。
+            float rr = r;
+            if (i >= 4) continue;                     // 待定圆：什么都不画（玻璃由 GL 在指到时才出）
+            // 用户 2026-10-23：圆区里**不要文字**，只留一个发光图标（居中、落在玻璃圆的圆心上）；
+            //   圆本身由 GL 画（通透），这里一笔圆都不画。
             drawIcon(cv, i, cx[i], cy[i], active == i);
         }
         cv.restoreToCount(save);
@@ -336,46 +235,10 @@ final class BallZonesView extends View {
     private void drawCards(Canvas cv) {
         int n = Math.min(cardLabels.length, localRects.length / 4);
         if (n <= 0) return;
-        // ── 面板底（"选择工作目录 / 运行中的会话"那块方形玻璃）─────────────────
-        //   ★ 2026-10-23：**一根白描边都没有**。之前那圈 1.2dp 0x33FFFFFF 的圆角描边
-        //   就是用户说的「那个方形玻璃的白边」—— 已删除，现在只有：
-        //     · 一层从深到更深的半透明"压暗玻璃"（文字要在任何壁纸上都读得清）
-        //     · 一圈**贴边的柔光**（只在最外侧 2dp 内，alpha 8%，不是线条）
-        //     · 外圈柔和暗影（把它从背景里垫出来）
-        //   面板矩形按**实际画出来的**标题 + 行取并集 —— 不再依赖 service 另算的那块矩形，
-        //   否则行数一变面板就盖不住文字（实测出现过面板只盖住上半截）。
-        RectF panel = null;
-        if (localTitleRect.length >= 4) {
-            panel = new RectF(localTitleRect[0], localTitleRect[1],
-                    localTitleRect[0] + localTitleRect[2], localTitleRect[1] + localTitleRect[3]);
-        }
-        for (int i = 0; i < n; i++) {
-            RectF r = new RectF(localRects[i * 4], localRects[i * 4 + 1],
-                    localRects[i * 4] + localRects[i * 4 + 2],
-                    localRects[i * 4 + 1] + localRects[i * 4 + 3]);
-            if (panel == null) panel = r; else panel.union(r);
-        }
-        if (panel != null) {
-            panel.inset(-dp(9f), -dp(7f));
-            float cr = dp(16f);
-            // 外圈柔影（圆角矩形版）：四条边各垫一层淡淡的黑，不接触面板边线
-            halo.setShader(new LinearGradient(panel.left, panel.top, panel.left, panel.bottom,
-                    new int[]{0x33000000, 0x22000000, 0x44000000}, new float[]{0f, 0.5f, 1f},
-                    android.graphics.Shader.TileMode.CLAMP));
-            halo.setAlpha(Math.round(255 * appear));
-            RectF sh = new RectF(panel.left - dp(5f), panel.top - dp(4f),
-                    panel.right + dp(5f), panel.bottom + dp(6f));
-            cv.drawRoundRect(sh, cr + dp(5f), cr + dp(5f), halo);
-            halo.setShader(null);
-            // 压暗玻璃本体
-            disc.setShader(new LinearGradient(panel.left, panel.top, panel.left, panel.bottom,
-                    new int[]{0xF018181C, 0xF00C0C0F}, null, android.graphics.Shader.TileMode.CLAMP));
-            disc.setColor(0x00000000);
-            disc.setAlpha(Math.round(255 * appear));
-            cv.drawRoundRect(panel, cr, cr, disc);
-            disc.setShader(null);
-            disc.setAlpha(255);
-        }
+        // ── 面板底：**不画**。用户 2026-10-23：「每一个方形都是玻璃，被你弄成黑色的了」——
+        // 这块方形玻璃是 GL 层用球那颗 shader（FS_COMP）画出来的（pushCardScene），
+        // 文字层再糊一层 0xE6 的黑底把它盖死，就成了"黑色方块外面一圈白边"。
+        // 这里只排版白字（文字自带投影，压在玻璃上也读得清）。
         text.setTextAlign(Paint.Align.LEFT);
         text.setTextSize(dp(10.5f));
         text.setColor(0xD9FFFFFF);
