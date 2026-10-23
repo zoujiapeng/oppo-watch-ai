@@ -4715,12 +4715,11 @@ public class FloatingBallService extends Service {
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
         computeZones();
-        // 2026-10-23 **最终**：六区（玻璃圆 + 图标）全部由文字层一个 Canvas 画，GL 层整趟让位。
-        // 反复验证过：GL 层的 surface 在窗口尺寸变化后不重建（846 窗口里 surface 还是 787×573，
-        // k=1.075），玻璃必被缩放/裁切，和图标永远对不齐。与其继续对两套坐标，不如只留一套：
-        // 圆和图标在同一个 Canvas 上画 → 圆天然把图标包在中心。
-        renderer.zoneMode = false;
-        if (glView != null) glView.setAlpha(0f);
+        // 六区的**玻璃圆仍由 GL 画**（用户：玻璃要通透），**图标由文字层画**。
+        // 关键：窗口不放大（见 computeZones）→ GL 的 surface 不失配（k=1）→ 两者同心。
+        // 圆只在"某个区被指到"时才显示（见 pushZoneScene 的 enabled 逻辑）。
+        renderer.zoneMode = true;
+        if (glView != null) glView.setAlpha(1f);
         renderer.sHlAmt = 1.5f;
         renderer.sAb = 0.12f;
         renderer.sDensity = sqDensity();
@@ -4756,12 +4755,12 @@ public class FloatingBallService extends Service {
         //   相邻圆心弦长 = ring × 2sin30° = ring = 2.35R，两个圆之间的空隙 ≈ 0.35R；
         //   命中判定半径是 1.15R —— 相邻两个命中圈的间距 (2.35R − 2×1.15R) = 0.05R > 0，
         //   所以**不会两个圆同时算命中**，这是"稍微再圆一点点、别选错"的关键。
-        // 环半径 = 2.35R（相邻圆心距 2.35R，命中圈 1.15R → 还留 0.05R 空隙，不会选错）；
-        // 但要在"屏幕可用区域 - 14dp 边距"里装得下。
-        float margin = dp(14);
-        float avail = Math.min(screenW, screenH - topInset) - 2 * margin;
-        float maxRing = avail * 0.5f - zoneR;
-        zoneRing = Math.max(zoneR * 1.55f, Math.min(zoneR * 2.35f, maxRing));
+        // ★ 2026-10-23 用户确认"小一号那版效果很好"：六圆按**当前球窗**装下（不放大窗口），
+        //   这样 GL 的 surface 不会失配（k=1），玻璃圆和图标天然对齐。
+        //   ring = 2.1R：相邻圆心距 2.1R，命中圈 1.15R → 留 0.2R 空隙，不会选错。
+        float maxR = (Math.min(winW, winH) * 0.5f - dp(8)) / 3.1f;
+        zoneR = Math.min(zoneR, Math.max(dp(30), maxR));
+        zoneRing = zoneR * 2.1f;
         // 角度从正上方开始、每 60° 一个（屏幕 y 向下 → sin 取正即向下）
         final int[] order = {ZONE_TOP, ZONE_TR, ZONE_BR, ZONE_BOTTOM, ZONE_BL, ZONE_TL};
         for (int i = 0; i < ZONE_COUNT; i++) {
@@ -4784,7 +4783,7 @@ public class FloatingBallService extends Service {
             zoneLocalX[i] = zoneCx[i] - loc[0];
             zoneLocalY[i] = zoneCy[i] - loc[1];
         }
-        ensureZoneWindow();            // 窗口放大到能装下六个圆（GL 已让位，不影响任何对齐）
+        // 窗口保持球的尺寸（放大窗口会让 GL surface 失配 → 玻璃和图标错位）
     }
 
     private float[] zoneLocalX, zoneLocalY;
@@ -4855,7 +4854,8 @@ public class FloatingBallService extends Service {
             m[i * 4] = (zoneActive == i) ? 1f : 0f;      // act
             m[i * 4 + 1] = 0.02f;                        // dark：和球一样是浅玻璃
             m[i * 4 + 2] = 1f;                           // 圆：圆角 = 半宽
-            m[i * 4 + 3] = 1f;                           // enabled
+            // 用户 2026-10-23：**圆只在指到那个区时才显示**（不是六个一直亮着）
+            m[i * 4 + 3] = (holdZoneHover == i) ? 1f : 0f;
         }
         // 六个形状全部启用（不再有"第 5 个关掉"这回事）
         // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射

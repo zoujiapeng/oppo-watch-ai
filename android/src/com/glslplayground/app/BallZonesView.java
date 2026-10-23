@@ -220,45 +220,13 @@ final class BallZonesView extends View {
             float a = (active == i) ? 1f : (i >= 4 ? 0.42f : 0.92f);   // 待定的两个淡一点
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
-            // ── 玻璃圆：**这里自己画**（和图标同一个 Canvas、同一个圆心）──
-            //   用户 2026-10-23：「圆是玻璃，要让图标被玻璃囊括起来」。
-            //   以前圆由 GL 层画：GL 的 surface 在窗口放大后不重建（k≠1），圆被缩放/裁切，
-            //   和图标永远对不上。现在两样都在同一个 Canvas 上 → 圆心就是图标中心。
-            float rr = r * (active == i ? 1.04f : 1f);
-            int aTop = (int) ((active == i ? 64 : 40) * appear);
-            int aMid = (int) ((active == i ? 30 : 18) * appear);
-            radial.setShader(new android.graphics.RadialGradient(cx[i], cy[i] - rr * 0.30f, rr * 1.28f,
-                    new int[]{0x00FFFFFF | (aTop << 24), 0x00FFFFFF | (aMid << 24), 0x00000000},
-                    new float[]{0f, 0.55f, 1f}, android.graphics.Shader.TileMode.CLAMP));
-            disc.setShader(radial.getShader());
-            cv.drawCircle(cx[i], cy[i], rr, disc);
-            disc.setShader(null); radial.setShader(null);
-            // 一圈亮边 + 顶部高光弧：有了这两笔才像"玻璃"而不是"描边圆"
-            rim.setStyle(Paint.Style.STROKE);
-            rim.setStrokeWidth(dp(1.6f));
-            rim.setColor(((int) ((active == i ? 0x8A : 0x5E) * appear) << 24) | 0x00FFFFFF);
-            cv.drawCircle(cx[i], cy[i], rr - dp(0.8f), rim);
-            rim.setStrokeWidth(dp(1.2f));
-            rim.setColor(((int) ((active == i ? 0x9A : 0x66) * appear) << 24) | 0x00FFFFFF);
-            cv.drawArc(new RectF(cx[i] - rr + dp(0.6f), cy[i] - rr + dp(0.6f),
-                    cx[i] + rr - dp(0.6f), cy[i] + rr - dp(0.6f)), 208f, 124f, false, rim);
-            // 用户 2026-10-23：圆区里**不要文字**，只留一个大一点的发光图标（居中）
-            if (i >= 4) {
-                // 待定：只画一圈细环（占位，先说"这里还空着"）
-                stroke.setStrokeWidth(dp(1.2f));
-                ring.set(cx[i] - rr * 0.52f, cy[i] - rr * 0.52f, cx[i] + rr * 0.52f, cy[i] + rr * 0.52f);
-                cv.drawOval(ring, stroke);
-                stroke.setStrokeWidth(dp(1.7f));
-            } else {
-                drawIcon(cv, i, cx[i], cy[i], active == i);
-            }
-            if (active == i) {
-                ring.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
-                stroke.setStrokeWidth(dp(2.2f));
-                stroke.setColor(0x66FFFFFF);
-                cv.drawOval(ring, stroke);
-                stroke.setStrokeWidth(dp(1.7f));
-            }
+            // 玻璃圆由 GL 层画（通透的折射效果），这里**不画任何圆** —— 用户明确：
+            //   "你加上的圆似乎把玻璃弄得不通透了"。图标只是落在玻璃圆心上。
+            float rr = r;
+            if (i >= 4) continue;                     // 待定圆：什么都不画（玻璃由 GL 在指到时才出）
+            // 用户 2026-10-23：圆区里**不要文字**，只留一个发光图标（居中、落在玻璃圆的圆心上）；
+            //   圆本身由 GL 画（通透），这里一笔圆都不画。
+            drawIcon(cv, i, cx[i], cy[i], active == i);
         }
         cv.restoreToCount(save);
     }
