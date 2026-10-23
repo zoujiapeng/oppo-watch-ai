@@ -206,6 +206,28 @@ final class DshApi {
         return out;
     }
 
+    /** 正在跑的会话（`running=true`），新到旧 —— 状态 3 左下角那张「运行中」卡片用它。 */
+    List<SessionRow> runningSessions() throws Exception {
+        List<SessionRow> out = new ArrayList<>();
+        for (SessionRow r : sessions()) if (r.running) out.add(r);
+        return out;
+    }
+
+    /**
+     * 停掉一条会话**当前正在跑的这一轮**：`session/cancel` `{request:{sessionId}}`。
+     *
+     * 语义（spec §session/prompt 脚注）：只中止这一轮，会话本身还在，之后还能继续发。
+     * 会话已经结束 / 不存在时 DSH 也回 ok（幂等），所以调用方不需要先查 running。
+     */
+    boolean cancelSession(String sessionId) throws Exception {
+        if (sessionId == null || sessionId.isEmpty()) return false;
+        JSONObject req = new JSONObject();
+        req.put("sessionId", sessionId);
+        JSONObject value = call("session/cancel", argsOf(req));
+        Log.i(TAG, "session/cancel " + sessionId + " -> " + value);
+        return true;
+    }
+
     /** 会话最后一条助手回答（"进入这个对话"时要把它显示在方形球里）。 */
     String lastAnswer(String sessionId) throws Exception {
         long cursor = 0;

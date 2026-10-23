@@ -27,6 +27,7 @@ final class BallZonesView extends View {
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    private final RectF ring2 = new RectF();
     private final RectF ring = new RectF();
 
     private final float[] cx = new float[4], cy = new float[4];
@@ -211,7 +212,7 @@ final class BallZonesView extends View {
         return s.substring(0, n) + "…";
     }
 
-    /** 图标：0 文件夹 / 1 放大镜 / 2 铅笔 / 3 滑杆。尺寸按 r 等比缩放。 */
+    /** 图标：0 文件夹 / 1 放大镜 / 2 停止（运行中会话） / 3 滑杆。尺寸按 r 等比缩放。 */
     private void drawIcon(Canvas cv, int which, float x, float y, boolean on) {
         float s = r * 0.80f;                    // 图标边长（比原来大一截）
         cv.save();
@@ -235,15 +236,10 @@ final class BallZonesView extends View {
                 path.lineTo(20.8f, 20.8f);
                 break;
             }
-            case 2: {                           // 输入：铅笔
-                path.moveTo(4f, 20f);
-                path.lineTo(5.2f, 15.4f);
-                path.lineTo(16.4f, 4.2f);
-                path.lineTo(19.8f, 7.6f);
-                path.lineTo(8.6f, 18.8f);
-                path.close();
-                path.moveTo(14.6f, 6.0f);
-                path.lineTo(18.0f, 9.4f);
+            case 2: {                           // 运行中的会话 / 停止（2026-10-23 换掉铅笔）
+                // 外框一个圆角方块 + 中间实心方块 = 一眼认得出的「停止」
+                ring2.set(2.6f, 2.6f, 21.4f, 21.4f);
+                path.addRoundRect(ring2, 4.2f, 4.2f, Path.Direction.CW);
                 break;
             }
             default: {                          // 参数：三根滑杆
@@ -270,6 +266,10 @@ final class BallZonesView extends View {
         stroke.setColor(0xFFFFFFFF);                  // 芯：纯白
         stroke.setStrokeWidth(core * k24);
         cv.drawPath(path, stroke);
+        if (which == 2) {                             // 停止：中间那块实心（跟芯一样纯白）
+            fill.setColor(0xFFFFFFFF);
+            cv.drawRoundRect(new RectF(8.2f, 8.2f, 15.8f, 15.8f), 1.6f, 1.6f, fill);
+        }
         if (which == 3) {                             // 滑杆的三个旋钮（也用纯白，跟芯一致）
             fill.setColor(0xFFFFFFFF);
             cv.drawCircle(8f, 7f, 1.9f, fill);

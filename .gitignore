@@ -8,3 +8,7 @@ dsh-liquid-glass-siri/shots/
 
 # 预览工作目录（球体截图 / 对比图，不入库）
 .preview/
+
+# python 缓存（png_scan.py 跑过就会生成）
+__pycache__/
+*.pyc

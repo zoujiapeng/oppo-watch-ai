@@ -2177,6 +2177,7 @@ public class FloatingBallService extends Service {
     /** 方形态宽度 = 屏宽 × 该比例（不再随文字/字号变）。 */
     private static final float SIRI_W_RATIO = 0.78f;
     /** 方形态高度上限 = 屏高 × 该比例（用户要求 55%）。 */
+    @Deprecated  // 2026-10-23 起高度上限 = 宽度（siriMaxBallH 直接返回 siriMaxBallW），这个比例不再参与计算
     private static final float SIRI_H_RATIO = 0.55f;
     private boolean siriEnabled = false;
     /**
@@ -3632,9 +3633,14 @@ public class FloatingBallService extends Service {
         return 0f;
     }
 
-    /** 方形态高度上限：屏高 55%（用户 2026-10-16 要求从 85% 收到 55%）。 */
+    /**
+     * 方形态高度上限 = **宽度**（用户 2026-10-23：「限高弄成最高的高度等同于宽度，最大就是正方形」）。
+     *
+     * 原来是屏高 55%（2412×0.55 ≈ 1327），比宽度（1080×0.78 ≈ 842）大得多 ——
+     * 长回复会把方框拉成一条竖长条。现在顶到宽度就停，再长的字在方形里滚动。
+     */
     private float siriMaxBallH() {
-        return screenH * SIRI_H_RATIO;
+        return siriMaxBallW();
     }
 
     private float siriMaxBallW() {
@@ -3808,10 +3814,9 @@ public class FloatingBallService extends Service {
         // 上下留白（黑区/球高的余量）：字号大就多留一点
         // 文字四周留白：底部多留一截，保证最后一行完整落在玻璃里（用户：宁可玻璃拉长也别露字）
         float padY = Math.max(dp(18), siriTextPx * mdFontRatio() * 0.85f);
-        // 方形态高度上限：**屏高 50%**（用户 2026-10-23 定），再长的文字在方形内滚动
-        float maxBallH = screenH * 0.50f;
-
         float maxBallW = siriMaxBallW();
+        // 方形态高度上限 = 宽度（最大就是个正方形）。多出来的文字在方形里滚动。
+        float maxBallH = siriMaxBallH();
         // ── 方形态几何（用户 2026-10-16 明确要求）────────────────────────────
         //   · 宽**固定** = 屏宽 85%（siriMaxBallW），字号/文字多少都不许改它；
         //   · 高随文字往下长（th = 文字实际高度 + 上下留白），**不再强行拉成正方形** ——
@@ -4707,7 +4712,15 @@ public class FloatingBallService extends Service {
         final DshApi api = DshApi.get(this);
         prefetchedDirs = null;
         prefetchDirPath = null;
+        prefetchedRunning = null;          // null = 还没取到（卡片会显示「读取中…」）
         new Thread(() -> {
+            // ① **先**取「运行中的会话」：一次 session/list 就够，几十毫秒。
+            //   左下角那张卡片是 260ms 悬停后就弹的，必须比它快才能一按就有内容。
+            try {
+                applyRunningPrefetch(api.runningSessions());
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "zones: 读运行中会话失败 " + message(t));
+            }
             try {
                 final List<String> dirs = api.recentDirs();
                 // 前 4 个目录的会话都先取回：右滑进去时列表已经热的，不会先闪一个"载入中/1 项"
@@ -4727,7 +4740,8 @@ public class FloatingBallService extends Service {
                     prefetchDirPath = firstDir;
                     prefetchedSessions = rows == null ? new ArrayList<>() : rows;
                     Log.i("FloatingBall", "zones: 预取 " + dirs.size() + " 个目录 / "
-                            + rows.size() + " 条会话");
+                            + rows.size() + " 条会话 / 运行中 "
+                            + (prefetchedRunning == null ? "?" : prefetchedRunning.size()) + " 条");
                 });
             } catch (Throwable t) {
                 Log.w("FloatingBall", "zones: 预取失败 " + message(t));
@@ -4908,6 +4922,8 @@ public class FloatingBallService extends Service {
     private List<String> prefetchedDirs = null;
     private String prefetchDirPath = null;
     private List<DshApi.SessionRow> prefetchedSessions = new ArrayList<>();
+    /** 左下角「运行中的会话」预取结果；null = 还没取到。 */
+    private List<DshApi.SessionRow> prefetchedRunning = null;
     private final java.util.LinkedHashMap<String, List<DshApi.SessionRow>> prefetchCache =
             new java.util.LinkedHashMap<>();
 
@@ -4918,7 +4934,9 @@ public class FloatingBallService extends Service {
             if (android.os.SystemClock.uptimeMillis() - holdZoneAt < ZONE_DWELL_MS) return;
             if (z == ZONE_TL) openHoldDirs();
             else if (z == ZONE_TR) commitHold(() -> enterSearchMode("状态3 右上：搜索会话", "", true, BAR_SEARCH));
-            else if (z == ZONE_BL) commitHold(() -> openSettingsMenu());   // = 搜索框双指长按的参数弹窗
+            // 左下角（2026-10-23 替换掉原来的「参数」）：**正在跑的会话**，松手在谁上面就停谁。
+            // 参数弹窗没丢 —— 搜索框双指长按（onTwoFingerHold）还是同一条路。
+            else if (z == ZONE_BL) startHoldRunning();
             else commitHold(() -> openDshSettings("状态3 右下"));
         }
     };
@@ -5183,6 +5201,84 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /**
+     * 左下角：**正在跑的会话**（`session/list` 里 running=true 的那些）。
+     *
+     * 用一级卡片（和工作目录同一套版式），所以没有"返回上一级"：
+     * 手指停在某一行上松手 = 停掉那条会话的当前这一轮（`session/cancel`）。
+     * 这一步只中止当前回合，会话本身还在，随时能继续发消息。
+     */
+    /** 把「运行中」的预取结果落下去；如果卡片正开着，立刻重画一次（不等用户再悬停）。 */
+    private void applyRunningPrefetch(final List<DshApi.SessionRow> rows) {
+        main.post(() -> {
+            prefetchedRunning = rows;
+            if (zonesActive && holdLevel == 1 && "运行中的会话".equals(holdTitle)) {
+                startHoldRunning();            // 这一次走的是"已有数据"分支，不会递归取数
+            }
+        });
+    }
+
+    private void startHoldRunning() {
+        if (!zonesActive) return;
+        List<DshApi.SessionRow> rows = prefetchedRunning;
+        List<HoldItem> items = new ArrayList<>();
+        if (rows != null) {
+            int max = Math.min(10, rows.size());          // 面板上限 10 行，多了靠边缘滚动
+            for (int i = 0; i < max; i++) {
+                DshApi.SessionRow r = rows.get(i);
+                String sub = relTime(r.updatedAt);
+                if (!r.subtitle().isEmpty()) sub = sub + " · " + r.subtitle();
+                items.add(new HoldItem(r.title, sub, 4, r.id));   // kind=4：运行中会话（松手停止）
+            }
+            if (items.isEmpty()) items.add(new HoldItem("没有正在跑的会话", "松手退出", 9, ""));
+        } else {
+            items.add(new HoldItem("读取运行中的会话…", "", 9, ""));
+        }
+        showCards(1, "运行中的会话", items);
+        if (rows != null) return;
+        // 预取还没回来：后台取一次再刷（用户还停在这一级才刷，别抢画面）
+        final DshApi api = DshApi.get(this);
+        new Thread(() -> {
+            try {
+                final List<DshApi.SessionRow> got = api.runningSessions();
+                main.post(() -> {
+                    prefetchedRunning = got;
+                    if (zonesActive && holdLevel == 1 && "运行中的会话".equals(holdTitle)) {
+                        startHoldRunning();
+                    }
+                });
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "zones: 读运行中会话失败 " + message(t));
+            }
+        }, "hold-running").start();
+    }
+
+    /** 停掉一条正在跑的会话（`session/cancel`），球上给一句 toast 反馈。 */
+    private void stopRunningSession(final String sid, final String title) {
+        final DshApi api = DshApi.get(this);
+        Log.i("FloatingBall", "zones: 停止会话「" + title + "」sid=" + sid);
+        new Thread(() -> {
+            boolean ok;
+            String err = null;
+            try { ok = api.cancelSession(sid); }
+            catch (Throwable t) { ok = false; err = message(t); }
+            final boolean okf = ok;
+            final String errf = err;
+            main.post(() -> {
+                String msg = okf ? "已停止「" + title + "」" : "停止失败：" + errf;
+                Log.i("FloatingBall", "zones: " + msg);
+                try {
+                    android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+                } catch (Throwable ignored) { }
+                if (okf && prefetchedRunning != null) {      // 本地列表顺手摘掉，下次按住就是新的
+                    List<DshApi.SessionRow> keep = new ArrayList<>();
+                    for (DshApi.SessionRow r : prefetchedRunning) if (!sid.equals(r.id)) keep.add(r);
+                    prefetchedRunning = keep;
+                }
+            });
+        }, "hold-stop").start();
+    }
+
     /** 卡片上屏（形状 + 文字一起换）。 */
     private void showCards(int level, String title, List<HoldItem> items) {
         boolean sameLevel = (holdLevel == level) && title.equals(holdTitle);
@@ -5394,6 +5490,26 @@ public class FloatingBallService extends Service {
         if (!zonesActive) return;
         // 三级（会话）里松手 = 选中这条会话（进对话卡）；只停在工作目录层级松手 = 无效操作
         if (!cancelled && holdLevel >= 2 && holdFocus < 0) holdFocus = nearestRow(lastHoldY);
+        // 左下角那张「运行中的会话」是一级卡片（没有下一级）：松在哪一行就停哪一条
+        // 只在**手指确实落在列表里**时才认「最近那行」：这张卡片是"停止"操作，
+        // 手指滑到旁边松手绝不能被理解成停掉某条会话（工作目录那张卡片可以随便松手）。
+        if (!cancelled && holdLevel == 1 && "运行中的会话".equals(holdTitle) && holdFocus < 0
+                && holdListRect != null
+                && lastHoldX >= holdListRect[0] && lastHoldX <= holdListRect[0] + holdListRect[2]
+                && lastHoldY >= holdListRect[1] && lastHoldY <= holdListRect[1] + holdListRect[3]) {
+            holdFocus = nearestRow(lastHoldY);
+        }
+        if (!cancelled && holdFocus >= 0 && holdFocus < holdItems.size()
+                && holdItems.get(holdFocus).kind == 4) {
+            final String sid = holdItems.get(holdFocus).data;
+            final String title = holdItems.get(holdFocus).label;
+            Log.i("FloatingBall", "zones: 松手选中运行中会话「" + title + "」→ 停止");
+            exitZones();
+            main.postDelayed(new Runnable() {
+                @Override public void run() { stopRunningSession(sid, title); }
+            }, 60);
+            return;
+        }
         if (!cancelled && holdLevel >= 2 && holdFocus >= 0 && holdFocus < holdItems.size()
                 && holdItems.get(holdFocus).kind == 1) {
             final String sid = holdItems.get(holdFocus).data;
@@ -5417,7 +5533,7 @@ public class FloatingBallService extends Service {
             return;
         }
         if (!cancelled && holdLevel == 1) {
-            Log.i("FloatingBall", "zones: 只选到工作目录，视为无效操作");
+            Log.i("FloatingBall", "zones: 一级卡片「" + holdTitle + "」松手时不在任何一行 → 无效操作");
         }
         Log.i("FloatingBall", "zones: 松手 → 回初始状态（level=" + holdLevel + "）");
         exitZones();
