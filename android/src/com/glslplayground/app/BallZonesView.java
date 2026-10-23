@@ -45,6 +45,9 @@ final class BallZonesView extends View {
     private final Paint glass = new Paint(Paint.ANTI_ALIAS_FLAG);
     /** 圆外那圈柔和暗影：把玻璃从背景里垫出来，替代"白色描边"。 */
     private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** 玻璃上的那道斜向高光弧。 */
+    private final Paint spec = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF specRect = new RectF();
     /** 画玻璃圆时用来把黑顶/反光裁在圆内。 */
     private final Path clip = new Path();
 
@@ -239,56 +242,88 @@ final class BallZonesView extends View {
             return;
         }
         for (int i = 0; i < ZONE_COUNT; i++) {
-            // ── 2026-10-23（用户第三次修："六个图标要和六个玻璃对准，且不要白色轮廓"）──
-            // 玻璃圆**就在这里画**：和图标同一个 Canvas、同一个圆心 —— 对齐是画出来的，
-            // 不再依赖 GL 层那条 (屏幕坐标 − 窗口原点) × k 的换算（这台机器上 k 永远算不准）。
-            // 画法上**一根描边都没有**，靠三层"软"的东西立住：
-            //   ① 圆外：贴边一圈柔和暗影（深色 / 浅色壁纸都能把圆"垫"出来）
-            //   ② 圆内：顶部黑顶（球上那条"上黑下透"）+ 底部内反光 → 有厚度、有方向
-            //   ③ 贴边：菲涅尔亮弧（0.96R 处最亮 ~11% 白，往内外两侧渐隐，不是一条线）
-            float a = (active == i) ? 1f : 0.92f;
+            // ── 2026-10-23（第五版）：玻璃圆仍然画在**这里**（和图标同一个 Canvas、同一个圆心，
+            //   对齐是画出来的，跟 GL 的 surface 尺寸/inset 全部无关），
+            //   但把这颗圆当"一片厚玻璃"来画，而不是一张平涂的圆盘：
+            //     ① 圆外：贴边柔和暗影（把玻璃从背景里垫出来，替代白色描边）
+            //     ② 圆内：顶部黑顶（上黑下透，和球同一条曲线感）+ 底部内反光 → 有厚度
+            //     ③ 贴边：菲涅尔亮弧（0.97R，白 12%→0 渐隐，不是一条线）
+            //     ④ 左上：一道斜向高光弧（玻璃"亮边"的那道光），2dp、白 34%，上下渐弱
+            //     ⑤ 右下：内阴影（背光侧），让圆"鼓"起来
+            float a = (active == i) ? 1f : 0.94f;
             float rr = r;
+            float cxp = cx[i], cyp = cy[i];
+            int appA = Math.round(255 * appear);
+
             // ① 外圈柔和暗影
-            halo.setShader(new RadialGradient(cx[i], cy[i], rr + dp(10f),
-                    new int[]{0x00000000, 0x00000000, 0x2E000000, 0x00000000},
+            halo.setShader(new RadialGradient(cxp, cyp, rr + dp(10f),
+                    new int[]{0x00000000, 0x00000000, 0x30000000, 0x00000000},
                     new float[]{0f, rr / (rr + dp(10f)),
                             Math.min(0.99f, (rr + dp(2.0f)) / (rr + dp(10f))), 1f},
                     android.graphics.Shader.TileMode.CLAMP));
-            halo.setAlpha(Math.round(255 * appear));
-            cv.drawCircle(cx[i], cy[i], rr + dp(10f), halo);
+            halo.setAlpha(appA);
+            cv.drawCircle(cxp, cyp, rr + dp(10f), halo);
             halo.setShader(null);
-            // ② + ③ 玻璃体 / 黑顶 / 内反光 / 菲涅尔亮弧（都裁在圆内）
+
+            int sc = cv.save();
             clip.reset();
-            clip.addCircle(cx[i], cy[i], rr, Path.Direction.CW);
-            cv.save();
+            clip.addCircle(cxp, cyp, rr, Path.Direction.CW);
             cv.clipPath(clip);
-            // 玻璃体：中心几乎全透明，只把边缘"染"一点点白，保证不通透度被毁
-            glass.setShader(new RadialGradient(cx[i], cy[i], rr,
-                    new int[]{0x07FFFFFF, 0x04FFFFFF, 0x00FFFFFF, 0x14FFFFFF},
-                    new float[]{0f, 0.62f, 0.88f, 1f},
+
+            // ② a. 玻璃体：中心极淡、边缘略亮（透镜边缘那一圈"厚")
+            glass.setShader(new RadialGradient(cxp, cyp, rr,
+                    new int[]{0x08FFFFFF, 0x05FFFFFF, 0x00FFFFFF, 0x16FFFFFF, 0x04FFFFFF},
+                    new float[]{0f, 0.55f, 0.86f, 0.965f, 1f},
                     android.graphics.Shader.TileMode.CLAMP));
-            glass.setAlpha(Math.round(255 * appear * a));
-            cv.drawCircle(cx[i], cy[i], rr, glass);
+            glass.setAlpha(Math.round(appA * a));
+            cv.drawCircle(cxp, cyp, rr, glass);
             glass.setShader(null);
-            // 黑顶：上沿压一点暗，等于"玻璃有厚度"
-            glass.setShader(new LinearGradient(cx[i], cy[i] - rr, cx[i], cy[i] + rr * 0.18f,
-                    new int[]{0x30000000, 0x0C000000, 0x00000000}, new float[]{0f, 0.55f, 1f},
+
+            // ② b. 黑顶（上黑下透，和球的黑区同一条曲线）
+            glass.setShader(new LinearGradient(cxp, cyp - rr, cxp, cyp + rr * 0.10f,
+                    new int[]{0x3A000000, 0x14000000, 0x00000000}, new float[]{0f, 0.55f, 1f},
                     android.graphics.Shader.TileMode.CLAMP));
-            cv.drawCircle(cx[i], cy[i], rr, glass);
+            glass.setAlpha(Math.round(appA * a));
+            cv.drawCircle(cxp, cyp, rr, glass);
             glass.setShader(null);
-            // 底部内反光：贴着下沿的一条柔光（从下沿往上 22%R 渐隐）
-            glass.setShader(new LinearGradient(cx[i], cy[i] + rr, cx[i], cy[i] + rr * 0.72f,
-                    new int[]{0x1CFFFFFF, 0x00000000}, null, android.graphics.Shader.TileMode.CLAMP));
-            cv.drawCircle(cx[i], cy[i], rr, glass);
+
+            // ② c. 底部内反光（贴下沿往上一小段）
+            glass.setShader(new LinearGradient(cxp, cyp + rr, cxp, cyp + rr * 0.66f,
+                    new int[]{0x24FFFFFF, 0x00000000}, null, android.graphics.Shader.TileMode.CLAMP));
+            glass.setAlpha(Math.round(appA * a));
+            cv.drawCircle(cxp, cyp, rr, glass);
             glass.setShader(null);
-            // 菲涅尔亮弧：贴边 1.5%R 内最亮，向外 0、向内快速衰减
-            glass.setShader(new RadialGradient(cx[i], cy[i], rr,
-                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0x12FFFFFF, 0x04FFFFFF, 0x00FFFFFF},
-                    new float[]{0f, 0.90f, 0.965f, 0.992f, 1f},
+
+            // ⑤ 右下内阴影：让圆有"鼓起来"的体积
+            glass.setShader(new RadialGradient(cxp - rr * 0.35f, cyp - rr * 0.45f, rr * 1.55f,
+                    new int[]{0x00000000, 0x00000000, 0x1E000000},
+                    new float[]{0f, 0.55f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            glass.setAlpha(Math.round(appA * a));
+            cv.drawCircle(cxp, cyp, rr, glass);
+            glass.setShader(null);
+
+            // ③ 菲涅尔亮弧：贴边一圈，靠上的一侧更亮
+            glass.setShader(new RadialGradient(cxp, cyp, rr,
+                    new int[]{0x00FFFFFF, 0x00FFFFFF, 0x15FFFFFF, 0x05FFFFFF, 0x00FFFFFF},
+                    new float[]{0f, 0.93f, 0.975f, 0.995f, 1f},
                     android.graphics.Shader.TileMode.CLAMP));
-            cv.drawCircle(cx[i], cy[i], rr, glass);
+            glass.setAlpha(Math.round(appA * a));
+            cv.drawCircle(cxp, cyp, rr, glass);
             glass.setShader(null);
-            cv.restore();
+
+            // ④ 左上高光弧：玻璃上最常见的那道"亮边"
+            spec.setStyle(Paint.Style.STROKE);
+            spec.setStrokeCap(Paint.Cap.ROUND);
+            spec.setStrokeWidth(dp(2.2f));
+            specRect.set(cxp - rr + dp(2f), cyp - rr + dp(2f), cxp + rr - dp(2f), cyp + rr - dp(2f));
+            spec.setColor(((int) (0x44 * appear) << 24) | 0x00FFFFFF);
+            cv.drawArc(specRect, 196f, 74f, false, spec);
+            spec.setStrokeWidth(dp(4.5f));
+            spec.setColor(((int) (0x18 * appear) << 24) | 0x00FFFFFF);
+            cv.drawArc(specRect, 192f, 82f, false, spec);
+
+            cv.restoreToCount(sc);
+
             if (i >= 4) continue;                    // 待定：只有玻璃圆，没有图标
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
