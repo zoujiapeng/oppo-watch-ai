@@ -4725,6 +4725,9 @@ public class FloatingBallService extends Service {
         showZonesOverlay();
         applyBallTouchability();
         vibrate(22);
+        Log.i("FloatingBall", "zones: 几何 i0=(" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0])
+                + ") i4=(" + Math.round(zoneCx[4]) + "," + Math.round(zoneCy[4])
+                + ") i2=(" + Math.round(zoneCx[2]) + "," + Math.round(zoneCy[2]) + ") ring=" + Math.round(zoneRing));
         Log.i("FloatingBall", "zones: 进入状态 3（" + why + "）R=" + Math.round(zoneR)
                 + " 中心=(" + Math.round(zoneCx[0] + zoneR * 1.15f) + ","
                 + Math.round(zoneCy[0] + zoneR * 1.15f) + ") 请滑到某个圆区");
@@ -4736,8 +4739,9 @@ public class FloatingBallService extends Service {
         // 2026-10-23：菜单**整体居中于屏幕**（不再跟球心跑）。
         // 球可能贴着屏幕边/底，跟着它算菜单就会有一角出屏 —— 用户报的就是这个。
         int topInset = Math.round(winY0());
+        // 用户 2026-10-23：**左右居中**，上下跟"触发那一刻球在哪"（再夹进屏幕）。
         float cx = screenW * 0.5f;
-        float cy = topInset + (screenH - topInset) * 0.5f;
+        float cy = loc[1] + winH * 0.5f;
         float halfH = winSize * 0.9f * minHalfY;
         zoneR = Math.max(dp(46), halfH * 0.48f);
         // 六个圆围成一圈：半径 = 2.35 × 圆半径。
@@ -4756,6 +4760,12 @@ public class FloatingBallService extends Service {
             zoneCx[order[i]] = cx + (float) (zoneRing * Math.cos(a));
             zoneCy[order[i]] = cy + (float) (zoneRing * Math.sin(a));
         }
+        // 上下夹一下：整个环必须落在屏幕内（含 14dp 边距）
+        float ext = zoneRing + zoneR + dp(14);
+        float cyMin = topInset + ext;
+        float cyMax = screenH - ext;
+        if (cyMax < cyMin) cyMax = cyMin;
+        cy = Math.max(cyMin, Math.min(cyMax, cy));
         holdCenterX = cx; holdCenterY = cy;
         if (holdWinH0 <= 0) holdWinH0 = winH;
         if (holdWinW0 <= 0) holdWinW0 = winW;
@@ -4821,6 +4831,11 @@ public class FloatingBallService extends Service {
     /** 每帧把六个圆区（屏幕像素、y 向下）交给 GL 层；高亮跟着 zoneActive 走。 */
     private void pushZoneScene() {
         if (renderer == null) return;
+        // 玻璃层原点**直接取窗口 params**（syncWinPos 是 500ms 轮询，刚挪完窗口时还是旧值）
+        if (params != null) {
+            renderer.winX = params.x;
+            renderer.winY = params.y + Math.round(winY0());
+        }
         float[] s = new float[ZONE_COUNT * 4];
         float[] m = new float[ZONE_COUNT * 4];
         for (int i = 0; i < ZONE_COUNT; i++) {
@@ -4907,7 +4922,7 @@ public class FloatingBallService extends Service {
             syncZoneLocal();
         }
         zonesView.hideCards();                 // 上一次的列表文字不许留在屏幕上
-        zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+        zonesView.setZones(zoneCx, zoneCy, zoneR);   // **屏幕**坐标：View 自己按真实窗口位置换算
         zonesView.setActive(-1);
         zonesView.setAppear(1f);
         zonesParams.width = winW;
@@ -5631,21 +5646,20 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 卡片矩形（**屏幕**坐标）—— 文字层自己在 draw 时换算成本窗口坐标，不再预减窗口原点。 */
     private float[] localRects() {
-        int[] loc = new int[2];
-        glView.getLocationOnScreen(loc);
         float[] out = new float[visCount() * 4];
         if (holdTitleRect != null) {
-            holdTitleLocal = new float[]{holdTitleRect[0] - loc[0], holdTitleRect[1] - loc[1],
+            holdTitleLocal = new float[]{holdTitleRect[0], holdTitleRect[1],
                     holdTitleRect[2], holdTitleRect[3]};
         }
         if (holdListRect != null) {
-            holdListLocal = new float[]{holdListRect[0] - loc[0], holdListRect[1] - loc[1],
+            holdListLocal = new float[]{holdListRect[0], holdListRect[1],
                     holdListRect[2], holdListRect[3]};
         }
         for (int i = 0; i < visCount(); i++) {
-            out[i * 4] = holdRects[i * 4] - loc[0];
-            out[i * 4 + 1] = holdRects[i * 4 + 1] - loc[1];
+            out[i * 4] = holdRects[i * 4];
+            out[i * 4 + 1] = holdRects[i * 4 + 1];
             out[i * 4 + 2] = holdRects[i * 4 + 2];
             out[i * 4 + 3] = holdRects[i * 4 + 3];
         }
@@ -5689,7 +5703,7 @@ public class FloatingBallService extends Service {
                 zoneLocalX[i] = zoneCx[i] - loc[0];
                 zoneLocalY[i] = zoneCy[i] - loc[1];
             }
-            zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+            zonesView.setZones(zoneCx, zoneCy, zoneR);   // **屏幕**坐标：View 自己按真实窗口位置换算
         }
         Log.i("FloatingBall", "zones: 卡片窗口长高 " + winH + "px（顶 y=" + newTop + "）");
     }
@@ -5737,7 +5751,7 @@ public class FloatingBallService extends Service {
             zonesParams.x = newX; zonesParams.y = newY;
             zonesParams.width = newW; zonesParams.height = newH;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
-            zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+            zonesView.setZones(zoneCx, zoneCy, zoneR);   // **屏幕**坐标：View 自己按真实窗口位置换算
         }
         // 玻璃层也用同一个原点：renderer.winX/winY 是**屏幕**坐标，卡片的形状就按它换算
         if (renderer != null) { renderer.winX = params.x; renderer.winY = newYScreen; }
@@ -5772,7 +5786,7 @@ public class FloatingBallService extends Service {
             zonesParams.height = h0;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
             syncZoneLocal();
-            zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
+            zonesView.setZones(zoneCx, zoneCy, zoneR);   // **屏幕**坐标：View 自己按真实窗口位置换算
         }
         if (renderer != null) { renderer.winX = params.x; renderer.winY = params.y + Math.round(winY0()); }
         pushZoneScene();

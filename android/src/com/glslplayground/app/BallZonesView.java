@@ -39,6 +39,9 @@ final class BallZonesView extends View {
     private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ring = new RectF();
 
+    /** 区心（**屏幕**坐标，service 直接给这个）。draw 时再换算成本 View 坐标。 */
+    private final float[] sx = new float[ZONE_COUNT], sy = new float[ZONE_COUNT];
+    /** 本 View 坐标下的区心（onDraw 里按真实窗口位置算出来，保证和玻璃同一个原点）。 */
     private final float[] cx = new float[ZONE_COUNT], cy = new float[ZONE_COUNT];
     private float r = 60f;
     private int active = -1;
@@ -65,6 +68,12 @@ final class BallZonesView extends View {
 
     private float[] cardTitleRect = new float[0];
     private float[] cardListRect = new float[0];
+    /** draw 时换算出来的"本 View 坐标下的卡片矩形"（service 给的是屏幕坐标）。 */
+    private float[] localRects = new float[0];
+    private float[] localTitleRect = new float[0];
+    private float[] localListRect = new float[0];
+    private int cardLocX = 0, cardLocY = 0;
+    private long lastAlignLog = 0;
     private final Paint rowHi = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     BallZonesView(Context c) {
@@ -102,9 +111,10 @@ final class BallZonesView extends View {
         invalidate();
     }
 
+    /** 传**屏幕**坐标：draw 时用 getLocationOnScreen 换算，窗口被挪过也不会错位。 */
     void setZones(float[] xs, float[] ys, float radius) {
-        System.arraycopy(xs, 0, cx, 0, Math.min(ZONE_COUNT, xs == null ? 0 : xs.length));
-        System.arraycopy(ys, 0, cy, 0, Math.min(ZONE_COUNT, ys == null ? 0 : ys.length));
+        if (xs != null) System.arraycopy(xs, 0, sx, 0, Math.min(ZONE_COUNT, xs.length));
+        if (ys != null) System.arraycopy(ys, 0, sy, 0, Math.min(ZONE_COUNT, ys.length));
         r = radius;
         invalidate();
     }
@@ -150,6 +160,46 @@ final class BallZonesView extends View {
 
     @Override protected void onDraw(Canvas cv) {
         if (appear <= 0.01f) return;
+        // ⚠ 2026-10-23：所有坐标都从**屏幕坐标**换算到"本 View 坐标"。
+        // 以前由 service 用 glView.getLocationOnScreen() 预先算好 —— 窗口刚被挪过时那是旧值，
+        // 于是整层图标偏一个位移（"六个图标没有一个对得上的"）。draw 这一刻的位置才是真的。
+        int[] wloc = new int[2];
+        getLocationOnScreen(wloc);
+        for (int i = 0; i < ZONE_COUNT; i++) {
+            cx[i] = sx[i] - wloc[0];
+            cy[i] = sy[i] - wloc[1];
+        }
+        cardLocX = wloc[0];
+        cardLocY = wloc[1];
+        // 对齐自检：View 窗口原点 + 本地圆心 应该 == 屏幕圆心（service 侧的 zoneCx/zoneCy）
+        if (System.currentTimeMillis() - lastAlignLog > 800) {
+            lastAlignLog = System.currentTimeMillis();
+            android.util.Log.i("FloatingBall", "zones align: viewWin=(" + wloc[0] + "," + wloc[1]
+                    + ") r=" + Math.round(r)
+                    + " i0=(" + Math.round(cx[0] + wloc[0]) + "," + Math.round(cy[0] + wloc[1]) + ")"
+                    + " i4=(" + Math.round(cx[4] + wloc[0]) + "," + Math.round(cy[4] + wloc[1]) + ")");
+        }
+        if (localTitleRect.length < 4) localTitleRect = new float[4];
+        if (localListRect.length < 4) localListRect = new float[4];
+        if (cardTitleRect.length >= 4) {
+            localTitleRect[0] = cardTitleRect[0] - cardLocX;
+            localTitleRect[1] = cardTitleRect[1] - cardLocY;
+            localTitleRect[2] = cardTitleRect[2];
+            localTitleRect[3] = cardTitleRect[3];
+        }
+        if (cardListRect.length >= 4) {
+            localListRect[0] = cardListRect[0] - cardLocX;
+            localListRect[1] = cardListRect[1] - cardLocY;
+            localListRect[2] = cardListRect[2];
+            localListRect[3] = cardListRect[3];
+        }
+        if (localRects.length < cardRects.length) localRects = new float[cardRects.length];
+        for (int i = 0; i < cardRects.length; i += 4) {
+            localRects[i] = cardRects[i] - cardLocX;
+            localRects[i + 1] = cardRects[i + 1] - cardLocY;
+            localRects[i + 2] = cardRects[i + 2];
+            localRects[i + 3] = cardRects[i + 3];
+        }
         int save = cv.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(appear * 255));
         if (cardMode) {
             drawCards(cv);
@@ -189,10 +239,10 @@ final class BallZonesView extends View {
         text.setTextAlign(Paint.Align.LEFT);
         text.setTextSize(dp(10.5f));
         text.setColor(0xD9FFFFFF);
-        if (cardTitleRect.length >= 4) {
-            float tx = cardTitleRect[0] + dp(10f);
-            float ty = cardTitleRect[1] + cardTitleRect[3] * 0.66f;
-            cv.drawText(fit(cardTitle, text, cardTitleRect[2] - dp(34f)), tx, ty, text);
+        if (localTitleRect.length >= 4) {
+            float tx = localTitleRect[0] + dp(10f);
+            float ty = localTitleRect[1] + localTitleRect[3] * 0.66f;
+            cv.drawText(fit(cardTitle, text, localTitleRect[2] - dp(34f)), tx, ty, text);
             if (cardScroll != 0) {
                 // 右上一个很小的箭头：▲ 还能往上翻、▼ 下面还有（面板大小不变，只是可滚动）
                 Paint.Align old = text.getTextAlign();
@@ -200,19 +250,19 @@ final class BallZonesView extends View {
                 text.setTextSize(dp(11f));
                 text.setColor(0x99FFFFFF);
                 String arrow = (cardScroll == 1) ? "↑" : (cardScroll == 3) ? "↑↓" : "↓";
-                cv.drawText(arrow, cardTitleRect[0] + cardTitleRect[2] - dp(10f), ty, text);
+                cv.drawText(arrow, localTitleRect[0] + localTitleRect[2] - dp(10f), ty, text);
                 text.setTextAlign(old);
             }
         }
         // 焦点行的高亮：面板内部的一条胶囊底（不是另一块玻璃）
-        if (cardFocus >= 0 && cardFocus * 4 + 3 < cardRects.length) {
+        if (cardFocus >= 0 && cardFocus * 4 + 3 < localRects.length) {
             // 悬停越久底色越亮 + 底部一条进度线 —— "停够就进下一级"这件事必须看得见
             float p = (cardProgressIdx == cardFocus) ? cardProgress : 0f;
             int a = 0x40 + Math.round((0x88 - 0x40) * p);
             rowHi.setColor((a << 24) | 0x00FFFFFF);
-            RectF hi = new RectF(cardRects[cardFocus * 4], cardRects[cardFocus * 4 + 1],
-                    cardRects[cardFocus * 4] + cardRects[cardFocus * 4 + 2],
-                    cardRects[cardFocus * 4 + 1] + cardRects[cardFocus * 4 + 3]);
+            RectF hi = new RectF(localRects[cardFocus * 4], localRects[cardFocus * 4 + 1],
+                    localRects[cardFocus * 4] + localRects[cardFocus * 4 + 2],
+                    localRects[cardFocus * 4 + 1] + localRects[cardFocus * 4 + 3]);
             hi.inset(dp(2f), dp(2f));
             cv.drawRoundRect(hi, dp(9f), dp(9f), rowHi);
             if (p > 0.02f) {
@@ -225,8 +275,8 @@ final class BallZonesView extends View {
             }
         }
         for (int i = 0; i < n; i++) {
-            float x = cardRects[i * 4], y = cardRects[i * 4 + 1];
-            float w = cardRects[i * 4 + 2], h = cardRects[i * 4 + 3];
+            float x = localRects[i * 4], y = localRects[i * 4 + 1];
+            float w = localRects[i * 4 + 2], h = localRects[i * 4 + 3];
             boolean on = (i == cardFocus);
             text.setTextSize(dp(on ? 13.5f : 12.5f));
             text.setColor(on ? 0xFFFFFFFF : 0xE6FFFFFF);
