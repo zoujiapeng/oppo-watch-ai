@@ -62,9 +62,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // 服务侧每帧组装好数组再整体赋值（copy-on-write），避免 GL 线程读到半截数据。
     public volatile boolean zoneMode = false;
     /** 5 × vec4(cx, cy, halfX, halfY)，屏幕像素、y 向下。 */
-    public volatile float[] zShape = new float[20];
+    public volatile float[] zShape = new float[24];   // 6 个形状 × (x,y,hx,hy)
     /** 5 × vec4(act, dark, cornerRadius, enabled)。 */
-    public volatile float[] zMeta = new float[20];
+    public volatile float[] zMeta = new float[24];
     // 材质（2026-10-23 改成球那套）：折射强度 / 折射带宽（占短半轴比例）/ 球面感 /
     // 色散 / 烟熏 / 黑顶（cap0 最黑处、cap1 完全透处，ny 单位）/ 赤道线亮度
     public volatile float zCont = 0.55f;        // 保留字段（旧参数，已不参与绘制）
@@ -726,7 +726,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
         float[] s = zShape;
         float[] m = zMeta;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {                              // 2026-10-23：四区 → 六区
             if (m[i * 4 + 3] < 0.5f) continue;                     // enabled
             float hx = Math.max(1f, s[i * 4 + 2] * k);
             float hy = Math.max(1f, s[i * 4 + 3] * k);

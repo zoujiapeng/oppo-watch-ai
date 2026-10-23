@@ -19,8 +19,13 @@ import android.view.View;
  */
 final class BallZonesView extends View {
 
-    /** 四个区：0=左上 1=右上 2=左下 3=右下（顺序与 FloatingBallService.ZONE_* 一致）。 */
-    static final String[] LABELS = {"工作目录", "搜索会话", "输入", "参数"};
+    /**
+     * 六个区（2026-10-23：四区 → 六区围成一圈）：
+     * 0=左上 工作目录 / 1=右上 搜索会话 / 2=左下 停止（运行中会话） / 3=右下 参数 /
+     * 4=正上 待定 / 5=正下 待定（占位，只画一圈淡淡的轮廓）。
+     */
+    static final String[] LABELS = {"工作目录", "搜索会话", "停止", "参数", "待定", "待定"};
+    static final int ZONE_COUNT = 6;
 
     private final float density;
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -34,7 +39,7 @@ final class BallZonesView extends View {
     private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ring = new RectF();
 
-    private final float[] cx = new float[4], cy = new float[4];
+    private final float[] cx = new float[ZONE_COUNT], cy = new float[ZONE_COUNT];
     private float r = 60f;
     private int active = -1;
     /** 0..1 出现进度（按住时淡入，避免"啪"地出现）。 */
@@ -98,8 +103,8 @@ final class BallZonesView extends View {
     }
 
     void setZones(float[] xs, float[] ys, float radius) {
-        System.arraycopy(xs, 0, cx, 0, 4);
-        System.arraycopy(ys, 0, cy, 0, 4);
+        System.arraycopy(xs, 0, cx, 0, Math.min(ZONE_COUNT, xs == null ? 0 : xs.length));
+        System.arraycopy(ys, 0, cy, 0, Math.min(ZONE_COUNT, ys == null ? 0 : ys.length));
         r = radius;
         invalidate();
     }
@@ -151,13 +156,21 @@ final class BallZonesView extends View {
             cv.restoreToCount(save);
             return;
         }
-        for (int i = 0; i < 4; i++) {
-            float a = (active == i) ? 1f : 0.92f;
+        for (int i = 0; i < ZONE_COUNT; i++) {
+            float a = (active == i) ? 1f : (i >= 4 ? 0.42f : 0.92f);   // 待定的两个淡一点
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
             float rr = r * (active == i ? 1.06f : 1f);
-            // 用户 2026-10-23：四个缩小镜里**不要文字**，只留一个大一点的发光图标（居中）
-            drawIcon(cv, i, cx[i], cy[i], active == i);
+            // 用户 2026-10-23：圆区里**不要文字**，只留一个大一点的发光图标（居中）
+            if (i >= 4) {
+                // 待定：只画一圈细环（占位，先说"这里还空着"）
+                stroke.setStrokeWidth(dp(1.2f));
+                ring.set(cx[i] - rr * 0.52f, cy[i] - rr * 0.52f, cx[i] + rr * 0.52f, cy[i] + rr * 0.52f);
+                cv.drawOval(ring, stroke);
+                stroke.setStrokeWidth(dp(1.7f));
+            } else {
+                drawIcon(cv, i, cx[i], cy[i], active == i);
+            }
             if (active == i) {
                 ring.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
                 stroke.setStrokeWidth(dp(2.2f));
