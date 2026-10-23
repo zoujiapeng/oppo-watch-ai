@@ -4715,17 +4715,21 @@ public class FloatingBallService extends Service {
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
         computeZones();
-        // 2026-10-23：六区/卡片**全部由文字层（BallZonesView）自己画**，GL 层暂时隐藏。
-        // 为什么：GLSurfaceView 的 surface 在窗口从 787×573 撑到 846×846 后仍停在旧尺寸，
-        // shader 的 k=1.075 → 玻璃圆被缩放/裁切，和图标永远对不上（用户报的"一个都对不准"）。
+        // 2026-10-23（第三次修"对不准"）：玻璃圆仍然交给 GL 画（和球同一颗 FS_COMP 的折射/色散），
+        // 但把坐标这件事一次做对：
+        //   · renderer.winPixelW/H 现在跟着**真实 surface**走（onSurfaceChanged + ensureZoneWindow），
+        //     k = winW / winPixelW 恒为 1 → 形状坐标 (屏幕坐标 − 窗口原点) 就是窗口内像素；
+        //   · 文字层的图标用同一份屏幕坐标（setZones 传的就是 zoneCx/zoneCy）→ 同心、天然囊括；
+        //   · GLSurfaceView 是 SurfaceView，setAlpha 对它的 surface 无效（以前那行只是自我安慰），
+        //     所以这里不再假装"隐藏玻璃层"，只把材质参数给到位。
         renderer.zoneMode = false;
-        if (glView != null) glView.setAlpha(0f);
         renderer.sHlAmt = 1.5f;
         renderer.sAb = 0.12f;
         renderer.sDensity = sqDensity();
         renderer.zCont = 0.80f;      // 和球同款"上黑下透"（球的黑顶就是这条曲线）
         renderer.zRefract = 16f;
         pushZoneScene();
+        kickGlassRender();           // 窗口刚撑大：别让 GL 停在"旧参数画的那一帧"上
         showZonesOverlay();
         applyBallTouchability();
         vibrate(22);
@@ -4833,12 +4837,42 @@ public class FloatingBallService extends Service {
     }
 
     /** 每帧把六个圆区（屏幕像素、y 向下）交给 GL 层；高亮跟着 zoneActive 走。 */
+    /**
+     * 敲几帧：窗口/几何刚变过，GL 可能还停在"用旧参数画出来的那一帧"上。
+     * 在 RENDERMODE_WHEN_DIRTY + SurfaceView 的组合下，那一帧会**一直留在屏幕上**，
+     * 看起来就是"六个图标和六个玻璃永远对不准"。连续敲几次，让最后一帧落在新参数上。
+     */
+    private void kickGlassRender() {
+        final GLSurfaceView v = glView;
+        if (v == null) return;
+        final int[] delays = {0, 40, 90, 180, 380, 700};
+        for (final int d : delays) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    try { v.requestRender(); } catch (Throwable ignored) { }
+                }
+            }, d);
+        }
+    }
+
     private void pushZoneScene() {
         if (renderer == null) return;
         // 玻璃层原点**直接取窗口 params**（syncWinPos 是 500ms 轮询，刚挪完窗口时还是旧值）
         if (params != null) {
             renderer.winX = params.x;
             renderer.winY = params.y + Math.round(winY0());
+        }
+        // ★ 2026-10-23：k 必须钉死在 1。
+        //   实测这台机器上窗口从 787×573 撑到 846×846 后 **onSurfaceChanged 不会再走**，
+        //   而 shader 里 k = winW / winPixelW：一个停在旧值就变成 1.075（圆放大）或 0.93（圆缩小），
+        //   两种都会让六个圆整体缩放、和图标越远越偏 —— 这就是"一个都对不上"的真正原因。
+        //   状态 3 期间 GL 的 surface 就等于这个窗口（resetGlassBufferFull 已钉成窗口尺寸），
+        //   所以窗口像素 = surface 像素，k = 1，`屏幕坐标 − 窗口原点` 就是窗口内像素。
+        if (winW > 0 && winH > 0) {
+            renderer.winW = winW;
+            renderer.winH = winH;
+            renderer.winPixelW = winW;
+            renderer.winPixelH = winH;
         }
         float[] s = new float[ZONE_COUNT * 4];
         float[] m = new float[ZONE_COUNT * 4];
@@ -4850,7 +4884,11 @@ public class FloatingBallService extends Service {
             m[i * 4] = (zoneActive == i) ? 1f : 0f;      // act
             m[i * 4 + 1] = 0.02f;                        // dark：和球一样是浅玻璃
             m[i * 4 + 2] = 1f;                           // 圆：圆角 = 半宽
-            m[i * 4 + 3] = 1f;                           // enabled
+            // ★ 2026-10-23：GL 层的六个圆**全部关掉**（enabled=0）。
+            //   zoneMode 仍然开着 —— 那是为了"别把球画出来"；形状全关 = 这一帧什么都不画，
+            //   整个 GL 表面就是透明的。玻璃圆改由文字层自绘（和图标同一个 Canvas → 必定同心）。
+            //   之前两套各画一半，GL 的 k 一变就把圆缩放走位，怎么调都对不上。
+            m[i * 4 + 3] = 0f;                           // enabled = 0（玻璃由文字层画）
         }
         // 六个形状全部启用（不再有"第 5 个关掉"这回事）
         // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射
@@ -4866,6 +4904,10 @@ public class FloatingBallService extends Service {
         renderer.zEdgeShade2 = 0.90f;
         renderer.zDesat = 0.15f;
         renderer.zDome = 0.75f;
+        // 2026-10-23：**不要白边，但圆要看得见** —— 用一圈**外侧柔和阴影**代替描边：
+        // 深色壁纸上圆是"玻璃压下去的一块"，浅色壁纸上又能靠折射/烟熏立住；
+        // 关键是没有一条纯白的线，用户要的就是这个。
+        renderer.zShadow = 0.85f;
         renderer.zShape = s;
         renderer.zMeta = m;
     }
@@ -5768,6 +5810,10 @@ public class FloatingBallService extends Service {
         params.x = newX; params.y = newY;
         params.width = newW; params.height = newH;
         winW = newW; winH = newH;
+        // ★ 2026-10-23：窗口是我们自己改的，surface 探测（onSurfaceChanged）不一定重走一趟，
+        //   所以这里同步记一次"surface 像素 = 窗口像素"。k 必须是 1，否则六圆整体缩放，
+        //   图标（文字层，真实屏幕坐标）永远对不上玻璃（GL 层，窗口坐标 × k）。
+        if (renderer != null) { renderer.winPixelW = winW; renderer.winPixelH = winH; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         resetGlassBufferFull();          // 六区要精确对齐 → 关掉降采样，并把 surface 钉成窗口尺寸
         // 立刻再钉一次：updateViewLayout 之后系统还会走一趟 layout，可能把 surface 改回旧尺寸
@@ -5777,6 +5823,8 @@ public class FloatingBallService extends Service {
                 try { glView.requestLayout(); } catch (Throwable ignored) { }
                 try { glView.getHolder().setFixedSize(Math.max(2, winW), Math.max(2, winH)); }
                 catch (Throwable ignored) { }
+                if (renderer != null) { renderer.winPixelW = winW; renderer.winPixelH = winH; }
+                pushZoneScene();
                 Log.i("FloatingBall", "glass surface 重新钉 " + winW + "x" + winH);
             }
         }, 350);
@@ -5814,6 +5862,7 @@ public class FloatingBallService extends Service {
         winW = w0;
         params.width = w0;
         params.height = h0;
+        if (renderer != null) { renderer.winPixelW = winW; renderer.winPixelH = winH; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         if (zonesView != null && zonesParams != null) {
             zonesParams.width = w0;
@@ -5824,6 +5873,7 @@ public class FloatingBallService extends Service {
         }
         if (renderer != null) { renderer.winX = params.x; renderer.winY = params.y + Math.round(winY0()); }
         pushZoneScene();
+        kickGlassRender();
         Log.i("FloatingBall", "zones: 卡片关闭，球窗回到 " + w0 + "x" + h0);
     }
 
@@ -5836,7 +5886,9 @@ public class FloatingBallService extends Service {
         s[1] = holdListRect[1] + holdListRect[3] * 0.5f;
         s[2] = holdListRect[2] * 0.5f;
         s[3] = holdListRect[3] * 0.5f;
-        m[0] = 0f; m[1] = 0.60f; m[2] = 0.14f; m[3] = 1f;   // 面板模式，圆角 ≈ 20dp
+        // 卡片面板同样交给文字层画（BZonesView.drawCards 的压暗玻璃），GL 这颗形状不再启用：
+        // 否则面板位置又要在两套坐标系之间对，白边也是从 GL 的玻璃壳那边冒出来的。
+        m[0] = 0f; m[1] = 0.60f; m[2] = 0.14f; m[3] = 0f;   // 面板形状：不启用
         for (int i = 1; i < 6; i++) {
             s[i * 4] = 0; s[i * 4 + 1] = 0; s[i * 4 + 2] = 1; s[i * 4 + 3] = 1;
             m[i * 4] = 0; m[i * 4 + 1] = 0; m[i * 4 + 2] = 1; m[i * 4 + 3] = 0;

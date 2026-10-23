@@ -26,7 +26,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public interface OnSurfaceReady { void onReady(SurfaceTexture st); }
 
     private final int screenW, screenH;
-    private int winW, winH;
+    /** 绘制缓冲尺寸：service 在状态 3 里会把它**钉成窗口尺寸**（surface 不随窗口 resize 重建时，
+     *  onSurfaceChanged 不会再来，只能由服务侧同步 —— 否则 shader 的 k = winW/winPixelW ≠ 1，
+     *  玻璃圆会整体缩放，和文字层的图标错位）。 */
+    public volatile int winW, winH;
     public volatile int capW = 0, capH = 0;   // 实际抓屏分辨率（低延迟模式可小于屏幕；采样用归一化 UV，与分辨率无关）
     public volatile int refSize = 0;          // 参考尺寸（原悬浮窗边长）：几何缩放/位置基准，与窗口实际高度解耦
 
@@ -812,6 +815,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     @Override public void onSurfaceChanged(GL10 gl, int w, int h) {
         winW = w; winH = h;                    // 窗口尺寸随实际情况更新（Siri 模式窗口会贴合球）
+        // ★ 2026-10-23（"一个都对不准"的根因）：`winPixelW/H` 以前只在 service 的
+        //   updateSiriWindow 里写。状态 3 用 ensureZoneWindow 把窗口撑到 846×846，那条路
+        //   被 `if (menuShown || zonesActive) return;` 挡住 → winPixelW 停在旧的 787×573，
+        //   于是 k = winW/winPixelW = 1.075，六圆整体放大 7.5% 并随距离偏移，
+        //   而文字层里的图标用的是真实屏幕坐标 → 怎么调都对不上（日志 `画布缩放 k=1.0749682`）。
+        //   surface 真实像素只有这里知道，就地记账：k 恒等于 1，玻璃圆和图标共用同一坐标。
+        winPixelW = w; winPixelH = h;
         GLES20.glViewport(0, 0, w, h);
         full = null; half = null; half2 = null;
         bg = null; bg2 = null; bgInit = false; lastSnapMs = 0; gotFrames = 0;
