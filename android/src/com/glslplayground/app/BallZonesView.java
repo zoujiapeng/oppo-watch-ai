@@ -235,26 +235,21 @@ final class BallZonesView extends View {
     private void drawCards(Canvas cv) {
         int n = Math.min(cardLabels.length, localRects.length / 4);
         if (n <= 0) return;
-        // ── 面板底：整个状态 3 都由这一个 View 画（不再用 GL 层）──
-        //   理由：GLSurfaceView 的 surface 在窗口尺寸变化后可能仍停在旧尺寸（实测 787×573 vs 846×846），
-        //   玻璃层于是被缩放/裁切，圆和图标永远对不齐。这里用同一个 Canvas 画，天生对齐。
+        // 面板底：GL 的玻璃面板之外再垫一层很淡的深色，保证任何壁纸上都看得清
+        //（用户 2026-10-23：进列表时"失去玻璃" → 玻璃仍由 GL 画，这里只是保底可读）
         if (localListRect.length >= 4) {
             float pad = dp(6f);
             RectF bg = new RectF(localListRect[0] - pad, localListRect[1] - pad,
                     localListRect[0] + localListRect[2] + pad,
                     localListRect[1] + localListRect[3] + pad);
-            disc.setShader(new android.graphics.LinearGradient(bg.left, bg.top, bg.left, bg.bottom,
-                    new int[]{0xE616161A, 0xE60E0E11}, null, android.graphics.Shader.TileMode.CLAMP));
-            disc.setColor(0x00000000);
-            cv.drawRoundRect(bg, dp(14f), dp(14f), disc);
             disc.setShader(null);
-            rim.setColor(0x33FFFFFF);
+            disc.setColor(0x99000000);
+            cv.drawRoundRect(bg, dp(14f), dp(14f), disc);
+            rim.setStyle(Paint.Style.STROKE);
             rim.setStrokeWidth(dp(1.2f));
+            rim.setColor(0x33FFFFFF);
             cv.drawRoundRect(bg, dp(14f), dp(14f), rim);
         }
-        text.setTextAlign(Paint.Align.LEFT);
-        text.setTextSize(dp(10.5f));
-        text.setColor(0xD9FFFFFF);
         if (localTitleRect.length >= 4) {
             float tx = localTitleRect[0] + dp(10f);
             float ty = localTitleRect[1] + localTitleRect[3] * 0.66f;

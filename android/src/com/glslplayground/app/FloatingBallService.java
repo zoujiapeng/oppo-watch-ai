@@ -4854,8 +4854,7 @@ public class FloatingBallService extends Service {
             m[i * 4] = (zoneActive == i) ? 1f : 0f;      // act
             m[i * 4 + 1] = 0.02f;                        // dark：和球一样是浅玻璃
             m[i * 4 + 2] = 1f;                           // 圆：圆角 = 半宽
-            // 用户 2026-10-23：**圆只在指到那个区时才显示**（不是六个一直亮着）
-            m[i * 4 + 3] = (holdZoneHover == i) ? 1f : 0f;
+            m[i * 4 + 3] = 1f;                           // 六个圆**一直是玻璃**（用户 2026-10-23 明确）
         }
         // 六个形状全部启用（不再有"第 5 个关掉"这回事）
         // 圆区：整圈都在折射带里（像一颗被压扁的球）；黑顶压到中线上，下半圈留给折射
@@ -5561,7 +5560,8 @@ public class FloatingBallService extends Service {
             zonesView.setCardScroll(cardScrollMode());
             zonesView.setCardProgress(-1, 0f);
         }
-        if (glView != null) glView.setAlpha(0f);   // 卡片面板由文字层自绘 → GL 让位（窗口会长高，surface 会失配）
+        // 卡片也走 GL 的玻璃（用户：进列表不能"失去玻璃"）。pushCardScene() 已在上一步把
+        // 玻璃形状换成"一整张面板"，六个圆自然不再画。GL 层全程保持可见。
         cardTapMode = true;               // 卡片一出现就落定：手指可以抬起，之后靠点击
         syncBallTouchWindow();            // 代理窗口要盖住整张卡片，否则点不到
         startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
@@ -5594,7 +5594,6 @@ public class FloatingBallService extends Service {
         if (zonesView != null) { zonesView.hideCards(); zonesView.setCardScroll(0); }
         restoreHoldWindow();
         if (renderer != null) renderer.zoneMode = true;
-        if (glView != null) glView.setAlpha(1f);    // 回六区：玻璃回来
         pushZoneScene();
         Log.i("FloatingBall", "zones: 手指离开卡片 → 自动隐藏，回到六区");
     }
