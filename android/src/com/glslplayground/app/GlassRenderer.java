@@ -686,9 +686,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      * 黑区/赤道线/壳光，只是每个形状换一组 uCenter/uHalf/uCorner/uPanelMode，
      * 开 GL_BLEND（预乘 alpha：ONE / ONE_MINUS_SRC_ALPHA）把 5 个形状依次叠上去。
      */
+    private long lastKLog = 0;
     private void drawZoneLayerBall(int bgTex) {
         if (compProg == 0) return;
         float k = (winPixelW > 0 && winW > 0) ? (float) winW / (float) winPixelW : 1f;
+        if (Math.abs(k - 1f) > 0.02f && System.currentTimeMillis() - lastKLog > 2000) {
+            lastKLog = System.currentTimeMillis();
+            android.util.Log.w("FloatingBall", "zones: 画布缩放 k=" + k + "（win " + winW + "x" + winH
+                    + " / surface " + winPixelW + "x" + winPixelH + "）—— 圆会和图标错位");
+        }
         float invK = 1f / Math.max(k, 1e-3f);
 
         GLES20.glEnable(GLES20.GL_BLEND);

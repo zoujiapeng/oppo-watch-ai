@@ -2998,8 +2998,6 @@ public class FloatingBallService extends Service {
      */
     private void syncBallTouchWindow() {
         if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
-        int[] loc = new int[2];
-        glView.getLocationOnScreen(loc);
         float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
         float bhx, bhy;
         if (zonesActive) {
@@ -3010,8 +3008,10 @@ public class FloatingBallService extends Service {
             bhx = Math.max(1f, glassHalfW());
             bhy = Math.max(1f, glassHalfH());
         }
-        float cx = loc[0] + winW * 0.5f;
-        float cy = loc[1] + winH * 0.5f;
+        // 中心按窗口 params 算（屏幕坐标 = params + 状态栏）。以前用 getLocationOnScreen，
+        // 窗口刚被挪过时是旧值 → 代理窗口/命中区整体偏一大截。
+        float cx = params.x + winW * 0.5f;
+        float cy = params.y + Math.round(winY0()) + winH * 0.5f;
         int w = Math.max(2, Math.min(screenW, Math.round(2 * (bhx + pad))));
         int h = Math.max(2, Math.min(screenH, Math.round(2 * (bhy + pad))));
         int x = Math.round(cx - w * 0.5f);
@@ -4715,7 +4715,11 @@ public class FloatingBallService extends Service {
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
         computeZones();
-        renderer.zoneMode = true;                        // 球整趟让路：这一帧画的是四个圆区
+        // 2026-10-23：六区/卡片**全部由文字层（BallZonesView）自己画**，GL 层暂时隐藏。
+        // 为什么：GLSurfaceView 的 surface 在窗口从 787×573 撑到 846×846 后仍停在旧尺寸，
+        // shader 的 k=1.075 → 玻璃圆被缩放/裁切，和图标永远对不上（用户报的"一个都对不准"）。
+        renderer.zoneMode = false;
+        if (glView != null) glView.setAlpha(0f);
         renderer.sHlAmt = 1.5f;
         renderer.sAb = 0.12f;
         renderer.sDensity = sqDensity();
@@ -5722,6 +5726,25 @@ public class FloatingBallService extends Service {
      * 六区是**环形**排布，比球大一圈 —— 窗口先长到能装下整个环，否则最上/最下的圆会被窗口裁掉。
      * 以球心为中心同时长宽（球心不动），退出时由 restoreHoldWindow() 还回去。
      */
+    /**
+     * 玻璃层缓冲恢复"跟随视图"全分辨率。
+     *
+     * 为什么必须：大方框那条路上会 `setFixedSize(bw,bh)` 降分辨率（area > 70 万像素时），
+     * shader 里于是 k = winW/winPixelW ≠ 1，所有形状按 k 缩放 —— 六区这种"图形要跟图标对齐"
+     * 的层被这么一缩，就整体朝左上偏，越远偏得越多（用户看到的"一个都没对准"）。
+     */
+    private void resetGlassBufferFull() {
+        if (glView == null) return;
+        glassBufW = -1; glassBufH = -1;
+        try {
+            // ⚠ 这里**必须钉成窗口尺寸**，不能写 0,0（"跟随视图"）。
+            //   实测：窗口从 787×573 长到 846×846 后，surface 仍停在 787×573 →
+            //   shader 里 k = winW/winPixelW = 1.075，六圆整体缩放，跟图标全部错位。
+            glView.getHolder().setFixedSize(Math.max(2, winW), Math.max(2, winH));
+        } catch (Throwable ignored) { }
+        Log.i("FloatingBall", "glass buffer -> 全分辨率 " + winW + "x" + winH);
+    }
+
     private void ensureZoneWindow() {
         if (wm == null || glView == null || params == null) return;
         int inset = Math.round(winY0());
@@ -5746,6 +5769,17 @@ public class FloatingBallService extends Service {
         params.width = newW; params.height = newH;
         winW = newW; winH = newH;
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();          // 六区要精确对齐 → 关掉降采样，并把 surface 钉成窗口尺寸
+        // 立刻再钉一次：updateViewLayout 之后系统还会走一趟 layout，可能把 surface 改回旧尺寸
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!zonesActive || glView == null) return;
+                try { glView.requestLayout(); } catch (Throwable ignored) { }
+                try { glView.getHolder().setFixedSize(Math.max(2, winW), Math.max(2, winH)); }
+                catch (Throwable ignored) { }
+                Log.i("FloatingBall", "glass surface 重新钉 " + winW + "x" + winH);
+            }
+        }, 350);
         syncZoneLocal();                     // ⚠️ 用新 params 算（getLocationOnScreen 此刻还没生效 → 图标错位）
         if (zonesView != null && zonesParams != null) {
             zonesParams.x = newX; zonesParams.y = newY;
@@ -5952,6 +5986,7 @@ public class FloatingBallService extends Service {
             renderer.zShape = new float[24];
             renderer.zMeta = new float[24];
         }
+        if (glView != null) glView.setAlpha(1f);         // 退出状态 3：玻璃层回来
         // 回到球：几何/文字按当前状态重排（和搜索层收起时同一套收尾）
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;

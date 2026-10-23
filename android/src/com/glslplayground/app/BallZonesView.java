@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.view.View;
 
@@ -37,6 +38,11 @@ final class BallZonesView extends View {
     private int cardProgressIdx = -1;
     private float cardProgress = 0f;
     private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** 六区的"玻璃盘"：自己画（和图标同一个 Canvas / 同一个原点，天生对齐）。 */
+    private final Paint disc = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF discRect = new RectF();
+    private final Paint radial = new Paint();
     private final RectF ring = new RectF();
 
     /** 区心（**屏幕**坐标，service 直接给这个）。draw 时再换算成本 View 坐标。 */
@@ -93,6 +99,10 @@ final class BallZonesView extends View {
         text.setShadowLayer(dp(1.6f), 0f, dp(0.6f), 0xC0000000);
         text.setTextSize(dp(12f));
         text.setTextAlign(Paint.Align.CENTER);
+        rim.setStyle(Paint.Style.STROKE);
+        rim.setStrokeWidth(dp(1.6f));
+        rim.setColor(0x66FFFFFF);
+        disc.setStyle(Paint.Style.FILL);
         setClickable(false);
         setFocusable(false);
         setWillNotDraw(false);
@@ -211,6 +221,18 @@ final class BallZonesView extends View {
             int alpha = Math.round(a * 255 * appear);
             stroke.setColor((alpha << 24) | 0x00FFFFFF);
             float rr = r * (active == i ? 1.06f : 1f);
+            // ── 圆自己画：**同一个 Canvas、同一个原点** → 图标永远在圆心上（用户：让圆把图标囊括起来）──
+            discRect.set(cx[i] - rr, cy[i] - rr, cx[i] + rr, cy[i] + rr);
+            int a0 = (int) ((active == i ? 46 : 26) * appear);
+            int a1 = (int) ((active == i ? 12 : 6) * appear);
+            radial.setShader(new android.graphics.RadialGradient(cx[i], cy[i] - rr * 0.25f, rr * 1.35f,
+                    new int[]{0x00FFFFFF | (a0 << 24), 0x00FFFFFF | (a1 << 24), 0x00000000},
+                    new float[]{0f, 0.62f, 1f}, android.graphics.Shader.TileMode.CLAMP));
+            disc.setShader(radial.getShader());
+            cv.drawCircle(cx[i], cy[i], rr, disc);              // 玻璃盘
+            disc.setShader(null); radial.setShader(null);
+            rim.setColor(((int) ((active == i ? 0x7A : 0x4A) * appear) << 24) | 0x00FFFFFF);
+            cv.drawCircle(cx[i], cy[i], rr - dp(0.8f), rim);    // 一圈细边
             // 用户 2026-10-23：圆区里**不要文字**，只留一个大一点的发光图标（居中）
             if (i >= 4) {
                 // 待定：只画一圈细环（占位，先说"这里还空着"）
@@ -234,8 +256,25 @@ final class BallZonesView extends View {
 
     /** 卡片排版：标题一行 + 每张卡片两行（名字 / 说明），焦点那张更亮。 */
     private void drawCards(Canvas cv) {
-        int n = Math.min(cardLabels.length, cardRects.length / 4);
+        int n = Math.min(cardLabels.length, localRects.length / 4);
         if (n <= 0) return;
+        // ── 面板底：整个状态 3 都由这一个 View 画（不再用 GL 层）──
+        //   理由：GLSurfaceView 的 surface 在窗口尺寸变化后可能仍停在旧尺寸（实测 787×573 vs 846×846），
+        //   玻璃层于是被缩放/裁切，圆和图标永远对不齐。这里用同一个 Canvas 画，天生对齐。
+        if (localListRect.length >= 4) {
+            float pad = dp(6f);
+            RectF bg = new RectF(localListRect[0] - pad, localListRect[1] - pad,
+                    localListRect[0] + localListRect[2] + pad,
+                    localListRect[1] + localListRect[3] + pad);
+            disc.setShader(new android.graphics.LinearGradient(bg.left, bg.top, bg.left, bg.bottom,
+                    new int[]{0xE616161A, 0xE60E0E11}, null, android.graphics.Shader.TileMode.CLAMP));
+            disc.setColor(0x00000000);
+            cv.drawRoundRect(bg, dp(14f), dp(14f), disc);
+            disc.setShader(null);
+            rim.setColor(0x33FFFFFF);
+            rim.setStrokeWidth(dp(1.2f));
+            cv.drawRoundRect(bg, dp(14f), dp(14f), rim);
+        }
         text.setTextAlign(Paint.Align.LEFT);
         text.setTextSize(dp(10.5f));
         text.setColor(0xD9FFFFFF);
