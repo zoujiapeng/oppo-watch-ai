@@ -4888,7 +4888,14 @@ public class FloatingBallService extends Service {
     }
 
     private static final long ZONE_DWELL_MS = 260;
-    private static final long ITEM_DWELL_MS = 650;
+    /** 悬停在**目录行**上多久 → 进这个目录的会话列表（2026-10-23 新交互：不再靠右滑）。 */
+    private static final long DIR_DWELL_MS = 520;
+    // 2026-10-23：**只有目录行**能"悬停进入"。会话行不做悬停动作 —— 用户明确说
+    // 「太容易不小心进入会话」，进会话必须是"手指停在该行 + 松手"这一步显式确认。
+    /** 悬停在**标题行（‹ 返回）**上多久 → 回退一级。 */
+    private static final long TITLE_BACK_DWELL_MS = 200;
+    /** 换级之后的"静默期"：这段时间里的悬停/松手都不算数（防止手指没动就被带进下一级）。 */
+    private static final long LEVEL_ARM_MS = 300;
 
     private int holdLevel = 0;                  // 0=四区 1=二级卡片 2=三级卡片
     private String holdTitle = "";
@@ -4915,6 +4922,11 @@ public class FloatingBallService extends Service {
     private boolean holdPendingExpand = false;
     private int holdFocus = -1;
     private long holdFocusAt = 0;
+    /** 手指进「标题行 = ‹ 返回」热区的时刻（0 = 现在不在标题行上）。 */
+    private long titleHoverAt = 0;
+    /** 悬停进度（0..1），只用来画焦点行的高亮/进度条。 */
+    private float holdDwellProgress = 0f;
+    private boolean holdTickPosted = false;
     private String holdDir = null;
     private long holdZoneAt = 0;
     private int holdZoneHover = -1;
@@ -4967,6 +4979,32 @@ public class FloatingBallService extends Service {
             }
             return;
         }
+        long now = android.os.SystemClock.uptimeMillis();
+
+        // ── 回退一级（2026-10-23 重做）──────────────────────────────────────────
+        // 老做法：必须"往左划"，而且是在面板内部划 —— 面板很宽，划起来又长又难控。
+        // 现在三个口子，都是**短距离**，而且**必须在"边缘自动滚动"之前判**：
+        // 手指抽到面板上方时，边缘逻辑会把它当成"上滚"，永远轮不到回退。
+        //   ① 手指从面板里抽走（左/上/下任意方向离开面板 26dp）→ 立刻退一级；
+        //   ② 指到**标题行**（‹ 返回）停 200ms → 退一级（和按钮一样明确）；
+        //   ③ 面板内部往左甩 20dp（习惯动作，保留）。
+        if (leftPanel(rawX, rawY)) {
+            titleHoverAt = 0;
+            setHoldEdgeDir(0);
+            goBackOneLevel();
+            return;
+        }
+        if (onCardTitle(rawX, rawY)) {
+            setHoldEdgeDir(0);
+            if (titleHoverAt == 0) titleHoverAt = now;
+            if (now - titleHoverAt >= TITLE_BACK_DWELL_MS) {
+                titleHoverAt = 0;
+                goBackOneLevel();
+            }
+            return;                                   // 标题行不算"选中某一行"
+        }
+        titleHoverAt = 0;
+
         // 手指停在面板上/下边缘 → 自动滚动；滚动期间不抢焦点（否则滚动一格焦点就跳一行）
         if (holdListRect != null && holdVisible < holdItems.size()) {
             float top = holdListRect[1] + dp(26);                  // 跳过标题
@@ -4980,40 +5018,102 @@ public class FloatingBallService extends Service {
         }
         if (holdEdgeDir != 0) return;
         int i = nearestRow(rawY);
-        // 一级（工作目录）：双指**往右滑一点点**就进入该目录选会话
-        // （用户：长按→左上显示工作目录，然后双指往右滑一点点进目录；不要求滑到屏幕边缘）
-        // 方向判定永远盯着**手指当前坐标**相对上一次转折点的位移（不是"进入这一级时的 X"），
-        // 这样手指在半路往右/往左推一点点就能生效，不会因为起点太远而失效。
         float dx = rawX - swipeAnchorX;
-        if (holdLevel == 1 && dx > dp(10)) {
+        if (holdLevel >= 2 && dx < -dp(20)) {
             swipeAnchorX = rawX;
-            if (i >= 0 && i < holdItems.size() && holdItems.get(i).kind == 0) {
-                Log.i("FloatingBall", "zones: 右滑 " + Math.round(dx) + "px → 进入「"
-                        + holdItems.get(i).label + "」选会话");
-                openHoldSessions(holdItems.get(i).data);
-                return;
-            }
-            holdPendingExpand = true;
-            Log.i("FloatingBall", "zones: 右滑时列表未就绪，挂起展开");
-        }
-        if (holdLevel >= 2 && dx < -dp(10)) {
-            Log.i("FloatingBall", "zones: 左滑 " + Math.round(dx) + "px → 退回工作目录列表");
-            holdLevel = 1;
-            swipeAnchorX = rawX;
-            openHoldDirs();
+            goBackOneLevel();
             return;
         }
+
+        // ── 焦点：手指真的移到哪一行，就选哪一行 ────────────────────────────────
         if (i != holdFocus) {
             holdFocus = i;
-            holdFocusAt = android.os.SystemClock.uptimeMillis();
+            holdFocusAt = now;
+            holdDwellProgress = 0f;
             holdScrollToFocus();                 // 先滚（可能重排过一次）
             refreshCards();
             if (i >= 0) vibrate(6);
         }
-        // 手指离开卡片区 → 自动隐藏，回到一级圆区
-        if (i < 0 && farFromCards(rawY)) {
+    }
+
+    /**
+     * 一级 → 关掉卡片回四区；二级 → 回上一级（工作目录）。
+     * （"回退"只退一级，不再要求用户斜着划到面板外面去。）
+     */
+    private void goBackOneLevel() {
+        if (holdLevel >= 2) {
+            Log.i("FloatingBall", "zones: 回退一级 → 工作目录列表");
+            holdLevel = 1;
+            openHoldDirs();
+        } else if (holdLevel == 1) {
+            Log.i("FloatingBall", "zones: 回退一级 → 四个圆区");
             closeCards();
         }
+    }
+
+    /** 手指已经离开列表面板（任意方向超过 26dp）——"抽走手指"= 退一级。 */
+    private boolean leftPanel(float rawX, float rawY) {
+        if (holdListRect == null) return false;
+        float m = dp(26);
+        float l = holdListRect[0] - m, t = holdListRect[1] - m;
+        float r = holdListRect[0] + holdListRect[2] + m;
+        float b = holdListRect[1] + holdListRect[3] + m;
+        return rawX < l || rawX > r || rawY < t || rawY > b;
+    }
+
+    /** 手指是不是在标题行上（标题行 = 「‹ 返回」热区）。 */
+    private boolean onCardTitle(float rawX, float rawY) {
+        if (holdTitleRect == null) return false;
+        float m = dp(6);
+        return rawX >= holdTitleRect[0] - m && rawX <= holdTitleRect[0] + holdTitleRect[2] + m
+                && rawY >= holdTitleRect[1] - m && rawY <= holdTitleRect[1] + holdTitleRect[3] + m;
+    }
+
+    // ── 悬停计时：手指停住不动也要能"累计"（靠定时器，不靠触摸事件）──────────────
+    private final Runnable holdDwellTick = new Runnable() {
+        @Override public void run() {
+            if (!zonesActive || holdLevel == 0) { holdTickPosted = false; return; }
+            pumpHoldDwell();
+            if (zonesActive && holdLevel > 0) main.postDelayed(this, 50);
+            else holdTickPosted = false;
+        }
+    };
+
+    private void startHoldDwellTick() {
+        if (holdTickPosted) return;
+        holdTickPosted = true;
+        main.removeCallbacks(holdDwellTick);
+        main.post(holdDwellTick);
+    }
+
+    /**
+     * 悬停判定 + 进度条。
+     *
+     * 规则（2026-10-23 新交互）：
+     *   · 目录行停 {@link #DIR_DWELL_MS} → 进会话列表；
+     *   · 会话行停 {@link #ITEM_DWELL_MS} → 直接进这条会话；
+     *   · 「运行中的会话」那几条**不**做悬停动作（停止只能在松手时确认，避免误停）；
+     *   · 换级后 {@link #LEVEL_ARM_MS} 内的悬停不算数 —— 手指没动就被带进下一级是以前最大的坑。
+     */
+    private void pumpHoldDwell() {
+        if (!zonesActive || holdLevel == 0) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (holdFocus < 0 || holdFocus >= visCount() + holdFirst) { holdDwellProgress = 0f; return; }
+        int idx = holdFocus;
+        if (idx >= holdItems.size()) { holdDwellProgress = 0f; return; }
+        HoldItem it = holdItems.get(idx);
+        // 只有**目录行**能悬停进入（kind 0）。会话行（kind 1）必须"停在那一行再松手"，
+        // 不做悬停自动进入 —— 那太容易误开一条会话。
+        if (it.kind != 0) { holdDwellProgress = 0f; return; }
+        if (now - holdLevelAt < LEVEL_ARM_MS) { holdDwellProgress = 0f; return; }
+        long need = DIR_DWELL_MS;
+        long held = now - holdFocusAt;
+        holdDwellProgress = Math.max(0f, Math.min(1f, held / (float) need));
+        if (zonesView != null) zonesView.setCardProgress(holdFocus - holdFirst, holdDwellProgress);
+        if (held < need) return;
+        holdDwellProgress = 0f;
+        Log.i("FloatingBall", "zones: 悬停 " + need + "ms → 进入「" + it.label + "」的会话");
+        openHoldSessions(it.data);
     }
 
     private boolean farFromCards(float rawY) {
@@ -5027,7 +5127,7 @@ public class FloatingBallService extends Service {
     private void refreshCards() {
         computeCardRects();
         if (zonesView != null) {
-            zonesView.showCards(holdTitle, labels(), subs(), localRects(), holdTitleLocal,
+            zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
                     holdListLocal, holdFocus < 0 ? -1 : holdFocus - holdFirst);
             zonesView.setCardScroll(cardScrollMode());
         }
@@ -5291,22 +5391,37 @@ public class FloatingBallService extends Service {
         holdItems.addAll(items);          // 全部收进来，面板只显示 holdVisible 行，靠 holdFirst 滚动
         holdFirst = 0;
         holdFocus = -1;
+        holdDwellProgress = 0f;
+        titleHoverAt = 0;
         computeCardRects();
         if (zonesView != null) {
-            zonesView.showCards(title, labels(), subs(), localRects(), holdTitleLocal,
+            zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
                     holdListLocal, -1);
             zonesView.setCardScroll(cardScrollMode());
+            zonesView.setCardProgress(-1, 0f);
         }
         pushCardScene();
+        startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
         Log.i("FloatingBall", "zones: 卡片「" + title + "」" + items.size() + " 项");
         // 换级后**不**自动选中：手指要真的移到某一行上才算（否则停着不动会一路自动钻到底）
         holdEnterY = lastHoldY;
         holdFocusArmed = false;
     }
 
+    /** 卡片标题的**显示**文字：前面加「‹ 」提示"标题行 = 返回"（holdTitle 本身不带，别污染判断）。 */
+    private String cardTitleText() {
+        return "‹ " + (holdTitle == null ? "" : holdTitle);
+    }
+
     private void closeCards() {
         if (holdLevel == 0) return;
         setHoldEdgeDir(0);
+        // 回到四区后必须把"上一次停在哪个圆区"清掉，否则手指还停在同一个圆区上时
+        // 再想进这一区就再也不会触发（z != holdZoneHover 永远为 false）—— 2026-10-23 实测到的坑。
+        holdZoneHover = -1;
+        holdZoneAt = 0;
+        titleHoverAt = 0;
+        holdDwellProgress = 0f;
         holdLevel = 0;
         holdItems.clear();
         holdFocus = -1;
@@ -5488,16 +5603,15 @@ public class FloatingBallService extends Service {
     /** 松手：不管在哪一级，都回初始状态（"松手则恢复初始状态"）。 */
     void finishZones(boolean cancelled) {
         if (!zonesActive) return;
-        // 三级（会话）里松手 = 选中这条会话（进对话卡）；只停在工作目录层级松手 = 无效操作
-        if (!cancelled && holdLevel >= 2 && holdFocus < 0) holdFocus = nearestRow(lastHoldY);
-        // 左下角那张「运行中的会话」是一级卡片（没有下一级）：松在哪一行就停哪一条
-        // 只在**手指确实落在列表里**时才认「最近那行」：这张卡片是"停止"操作，
-        // 手指滑到旁边松手绝不能被理解成停掉某条会话（工作目录那张卡片可以随便松手）。
-        if (!cancelled && holdLevel == 1 && "运行中的会话".equals(holdTitle) && holdFocus < 0
-                && holdListRect != null
-                && lastHoldX >= holdListRect[0] && lastHoldX <= holdListRect[0] + holdListRect[2]
-                && lastHoldY >= holdListRect[1] && lastHoldY <= holdListRect[1] + holdListRect[3]) {
-            holdFocus = nearestRow(lastHoldY);
+        // ⚠️ 2026-10-23：**不再**"松手就选最近那一行"。
+        // 老逻辑在 holdFocus<0 时抓 nearestRow —— 于是「刚进会话列表、手指没动就松手」
+        // 会直接把第一条会话打开（用户报的"太容易不小心进入会话"）。
+        // 现在只有"手指**真的停在某一行上**"且过了换级静默期，松手才算选中。
+        boolean armed = android.os.SystemClock.uptimeMillis() - holdLevelAt >= LEVEL_ARM_MS;
+        if (!cancelled && (!armed || holdFocus < 0)) {
+            Log.i("FloatingBall", "zones: 松手时没有明确选中的行（armed=" + armed
+                    + " focus=" + holdFocus + "）→ 只回初始状态");
+            holdFocus = -1;
         }
         if (!cancelled && holdFocus >= 0 && holdFocus < holdItems.size()
                 && holdItems.get(holdFocus).kind == 4) {
@@ -5533,7 +5647,7 @@ public class FloatingBallService extends Service {
             return;
         }
         if (!cancelled && holdLevel == 1) {
-            Log.i("FloatingBall", "zones: 一级卡片「" + holdTitle + "」松手时不在任何一行 → 无效操作");
+            Log.i("FloatingBall", "zones: 一级卡片「" + holdTitle + "」松手没落在某一行 → 不回退、不执行");
         }
         Log.i("FloatingBall", "zones: 松手 → 回初始状态（level=" + holdLevel + "）");
         exitZones();

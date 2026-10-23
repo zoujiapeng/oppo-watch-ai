@@ -28,6 +28,10 @@ final class BallZonesView extends View {
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private final RectF ring2 = new RectF();
+    /** 焦点行的悬停进度（0..1）—— 2026-10-23 起"停够时间就进下一级"，得让用户看得见。 */
+    private int cardProgressIdx = -1;
+    private float cardProgress = 0f;
+    private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ring = new RectF();
 
     private final float[] cx = new float[4], cy = new float[4];
@@ -83,6 +87,16 @@ final class BallZonesView extends View {
     private float dp(float v) { return v * density; }
 
     /** 区心与半径（本 View 坐标系 = 球窗坐标系）。 */
+    /** 焦点行的悬停进度：0..1（idx = 可见段里的下标，-1 = 没有）。 */
+    void setCardProgress(int idx, float p) {
+        int ni = idx;
+        float np = Math.max(0f, Math.min(1f, p));
+        if (ni == cardProgressIdx && Math.abs(np - cardProgress) < 0.01f) return;
+        cardProgressIdx = ni;
+        cardProgress = np;
+        invalidate();
+    }
+
     void setZones(float[] xs, float[] ys, float radius) {
         System.arraycopy(xs, 0, cx, 0, 4);
         System.arraycopy(ys, 0, cy, 0, 4);
@@ -179,12 +193,23 @@ final class BallZonesView extends View {
         }
         // 焦点行的高亮：面板内部的一条胶囊底（不是另一块玻璃）
         if (cardFocus >= 0 && cardFocus * 4 + 3 < cardRects.length) {
-            rowHi.setColor(0x2EFFFFFF);
+            // 悬停越久底色越亮 + 底部一条进度线 —— "停够就进下一级"这件事必须看得见
+            float p = (cardProgressIdx == cardFocus) ? cardProgress : 0f;
+            int a = 0x40 + Math.round((0x88 - 0x40) * p);
+            rowHi.setColor((a << 24) | 0x00FFFFFF);
             RectF hi = new RectF(cardRects[cardFocus * 4], cardRects[cardFocus * 4 + 1],
                     cardRects[cardFocus * 4] + cardRects[cardFocus * 4 + 2],
                     cardRects[cardFocus * 4 + 1] + cardRects[cardFocus * 4 + 3]);
             hi.inset(dp(2f), dp(2f));
             cv.drawRoundRect(hi, dp(9f), dp(9f), rowHi);
+            if (p > 0.02f) {
+                // 进度线：行底一条纯白细线，从左往右长到 p —— 悬停进度的唯一可视反馈
+                float inner = hi.width() - dp(12f);
+                float w = Math.max(dp(3f), inner * p);
+                bar.setColor(0xFFFFFFFF);
+                cv.drawRoundRect(hi.left + dp(6f), hi.bottom - dp(3.4f),
+                        hi.left + dp(6f) + w, hi.bottom - dp(1.4f), dp(1f), dp(1f), bar);
+            }
         }
         for (int i = 0; i < n; i++) {
             float x = cardRects[i * 4], y = cardRects[i * 4 + 1];
