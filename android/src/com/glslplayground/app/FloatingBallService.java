@@ -3001,8 +3001,15 @@ public class FloatingBallService extends Service {
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
         float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
-        float bhx = Math.max(1f, glassHalfW());
-        float bhy = Math.max(1f, glassHalfH());
+        float bhx, bhy;
+        if (zonesActive) {
+            // 状态 3 期间：整个环 / 整张卡片都要能点到（玻璃只画球那么大，得按环来）
+            bhx = zoneRing + zoneR + dp(6);
+            bhy = zoneRing + zoneR + dp(6);
+        } else {
+            bhx = Math.max(1f, glassHalfW());
+            bhy = Math.max(1f, glassHalfH());
+        }
         float cx = loc[0] + winW * 0.5f;
         float cy = loc[1] + winH * 0.5f;
         int w = Math.max(2, Math.min(screenW, Math.round(2 * (bhx + pad))));
@@ -3132,6 +3139,14 @@ public class FloatingBallService extends Service {
                         if (approvalShown) return false;
                         if (searchActive) return false;         // 搜索胶囊期间屏幕归胶囊
                         if (menuShown) return false;            // 玻璃菜单开着时归菜单
+                        // ── 状态 3 的"点击模式"：卡片落定后 / 六区（松手后仍在）都靠点击 ──
+                        if (zonesActive) {
+                            cardDownX = e.getRawX(); cardDownY = e.getRawY();
+                            cardDragged = false; cardDownFirst = holdFirst;
+                            main.removeCallbacks(longPress);
+                            if (holdLevel == 0) updateHoldTouch(e.getRawX(), e.getRawY());
+                            return true;
+                        }
                         // 球上才算（代理窗口比球略大，多出来的边不响应）
                         if (!inBallAtRaw(e.getRawX(), e.getRawY())) return false;
                         downX = e.getRawX(); downY = e.getRawY();
@@ -3144,6 +3159,20 @@ public class FloatingBallService extends Service {
                         main.postDelayed(longPress, 480);
                         return true;
                     case MotionEvent.ACTION_MOVE: {
+                        // 六区里移动=换高亮；卡片里移动=拖动滚动
+                        if (zonesActive) {
+                            if (holdLevel == 0) { updateHoldTouch(e.getRawX(), e.getRawY()); return true; }
+                            float dy = e.getRawY() - cardDownY;
+                            if (!cardDragged && Math.abs(dy) > dp(8)) cardDragged = true;
+                            if (cardDragged && !holdItems.isEmpty()) {
+                                int rh = Math.max(1, Math.round(dp(34)));
+                                int step = Math.round(dy / rh);
+                                int maxFirst = Math.max(0, holdItems.size() - holdVisible);
+                                int want = Math.max(0, Math.min(maxFirst, cardDownFirst - step));
+                                if (want != holdFirst) { holdFirst = want; refreshCards(); }
+                            }
+                            return true;
+                        }
                         // 状态 3：手指还按着 —— 只更新"落在哪个圆区"，不做别的
                         if (zonesActive) {
                             updateHoldTouch(e.getRawX(), e.getRawY());
@@ -3182,6 +3211,19 @@ public class FloatingBallService extends Service {
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        if (zonesActive) {                               // 松手 = 一次点击（六区或卡片）
+                            boolean dragged = cardDragged;
+                            cardDragged = false;
+                            if (dragged) return true;
+                            if (holdLevel == 0) {
+                                int z = holdZoneHover;
+                                Log.i("FloatingBall", "zones: 点击圆区 z=" + z);
+                                if (z >= 0) runZoneAction(z); else exitZones();
+                                return true;
+                            }
+                            cardTap(e.getRawX(), e.getRawY());
+                            return true;
+                        }
                         if (zonesActive) {                               // 状态 3 松手
                             finishZones(false);
                             return true;
@@ -3213,6 +3255,7 @@ public class FloatingBallService extends Service {
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        if (zonesActive) return true;                    // 别把卡片/菜单关掉
                         if (zonesActive) finishZones(true);
                         return true;
                     default:
@@ -4690,15 +4733,22 @@ public class FloatingBallService extends Service {
     private void computeZones() {
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
-        float cx = loc[0] + winW * 0.5f;
-        float cy = loc[1] + winH * 0.5f;
+        // 2026-10-23：菜单**整体居中于屏幕**（不再跟球心跑）。
+        // 球可能贴着屏幕边/底，跟着它算菜单就会有一角出屏 —— 用户报的就是这个。
+        int topInset = Math.round(winY0());
+        float cx = screenW * 0.5f;
+        float cy = topInset + (screenH - topInset) * 0.5f;
         float halfH = winSize * 0.9f * minHalfY;
         zoneR = Math.max(dp(46), halfH * 0.48f);
         // 六个圆围成一圈：半径 = 2.35 × 圆半径。
         //   相邻圆心弦长 = ring × 2sin30° = ring = 2.35R，两个圆之间的空隙 ≈ 0.35R；
         //   命中判定半径是 1.15R —— 相邻两个命中圈的间距 (2.35R − 2×1.15R) = 0.05R > 0，
         //   所以**不会两个圆同时算命中**，这是"稍微再圆一点点、别选错"的关键。
-        zoneRing = zoneR * 2.35f;
+        // 环半径 = 2.35R，但必须能在"屏幕可用区域 - 两侧边距"里装下（否则最上/最下的圆会贴边/出屏）
+        float margin = dp(14);
+        float avail = Math.min(screenW, screenH - topInset) - 2 * margin;
+        float maxRing = avail * 0.5f - zoneR;
+        zoneRing = Math.max(zoneR * 1.55f, Math.min(zoneR * 2.35f, maxRing));
         // 角度从正上方开始、每 60° 一个（屏幕 y 向下 → sin 取正即向下）
         final int[] order = {ZONE_TOP, ZONE_TR, ZONE_BR, ZONE_BOTTOM, ZONE_BL, ZONE_TL};
         for (int i = 0; i < ZONE_COUNT; i++) {
@@ -4833,12 +4883,10 @@ public class FloatingBallService extends Service {
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
             zonesParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
-            int[] loc = new int[2];
-            glView.getLocationOnScreen(loc);
-            zonesParams.x = loc[0];
-            // ⚠ params 是**父容器内**坐标（父容器顶边 = 状态栏下沿），loc 是屏幕坐标 → 要减 inset，
-            //   否则整层文字/图标比玻璃低一个状态栏（2026-10-23 修）
-            zonesParams.y = loc[1] - Math.round(winY0());
+            // ⚠ 位置直接取 **params**（window 的父容器坐标）。别用 glView.getLocationOnScreen：
+            //   窗口刚被 ensureZoneWindow 挪过时它还是旧值 → 图标整层偏一个位移（用户报的"图标离圆了"）。
+            zonesParams.x = params.x;
+            zonesParams.y = params.y;
             try {
                 wm.addView(v, zonesParams);
                 zonesView = v;
@@ -4851,17 +4899,12 @@ public class FloatingBallService extends Service {
         }
         // 每次进入都重新贴窗口位置（球被挪过 / 窗口位置变过时，图标和玻璃必须还对齐）
         if (glView != null && zonesParams != null) {
-            int[] loc = new int[2];
-            glView.getLocationOnScreen(loc);
-            zonesParams.x = loc[0];
-            zonesParams.y = loc[1] - Math.round(winY0());
+            zonesParams.x = params.x;
+            zonesParams.y = params.y;
             zonesParams.width = winW;
             zonesParams.height = winH;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
-            for (int i = 0; i < ZONE_COUNT; i++) {
-                zoneLocalX[i] = zoneCx[i] - loc[0];
-                zoneLocalY[i] = zoneCy[i] - loc[1];
-            }
+            syncZoneLocal();
         }
         zonesView.hideCards();                 // 上一次的列表文字不许留在屏幕上
         zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
@@ -4944,6 +4987,14 @@ public class FloatingBallService extends Service {
     private long titleHoverAt = 0;
     /** 标题行回退过一次 → 手指必须先离开标题行，才允许再触发（否则会一口气退两级）。 */
     private boolean titleLatched = false;
+    // ── 点击模式（2026-10-23：卡片出现后 = 普通点击面板，不用再按住）──────────────
+    /** true = 卡片已经"落定"，手指可以抬起；之后靠点击选择。 */
+    private boolean cardTapMode = false;
+    private float cardDownX, cardDownY;
+    private boolean cardDragged;
+    private int cardDownFirst;
+    /** finishZones 是被"点击"调用的（点击模式里松手不应该关掉卡片）。 */
+    private boolean cardTapCommit;
     /** 悬停进度（0..1），只用来画焦点行的高亮/进度条。 */
     private float holdDwellProgress = 0f;
     private boolean holdTickPosted = false;
@@ -4964,19 +5015,63 @@ public class FloatingBallService extends Service {
             int z = holdZoneHover;
             if (!zonesActive || z < 0 || holdLevel != 0) return;
             if (android.os.SystemClock.uptimeMillis() - holdZoneAt < ZONE_DWELL_MS) return;
-            if (z == ZONE_TOP || z == ZONE_BOTTOM) {
-                // 两个"待定"占位圆：只做高亮，不挂动作（用户：另外两个圆待定）
-                Log.i("FloatingBall", "zones: 待定圆（" + (z == ZONE_TOP ? "上" : "下") + "）暂无动作");
-                return;
-            }
-            if (z == ZONE_TL) openHoldDirs();
-            else if (z == ZONE_TR) commitHold(() -> enterSearchMode("状态3 右上：搜索会话", "", true, BAR_SEARCH));
-            // 左下角（2026-10-23 替换掉原来的「参数」）：**正在跑的会话**，松手在谁上面就停谁。
-            // 参数弹窗没丢 —— 搜索框双指长按（onTwoFingerHold）还是同一条路。
-            else if (z == ZONE_BL) startHoldRunning();
-            else commitHold(() -> openDshSettings("状态3 右下"));
+            runZoneAction(z);
         }
     };
+
+    /**
+     * 某个圆区的动作（悬停够时、或点击时都走这里）。
+     *
+     * 左下角（2026-10-23 替换掉原来的「参数」）是**正在跑的会话**；参数弹窗没丢 ——
+     * 搜索框双指长按（onTwoFingerHold）还是同一条路。
+     */
+    private void runZoneAction(int z) {
+        if (z == ZONE_TOP || z == ZONE_BOTTOM) {
+            // 两个"待定"占位圆：只做高亮，不挂动作（用户：另外两个圆待定）
+            Log.i("FloatingBall", "zones: 待定圆（" + (z == ZONE_TOP ? "上" : "下") + "）暂无动作");
+            return;
+        }
+        if (z == ZONE_TL) openHoldDirs();
+        else if (z == ZONE_TR) commitHold(() -> enterSearchMode("状态3 右上：搜索会话", "", true, BAR_SEARCH));
+        else if (z == ZONE_BL) startHoldRunning();
+        else commitHold(() -> openDshSettings("状态3 右下"));
+    }
+
+    /**
+     * 卡片上的一次点击（2026-10-23：卡片落定后就是普通可点面板）：
+     *   标题行「‹ 」→ 返回上一级；某一行 → 执行（目录=进它的会话 / 会话=进对话 / 新建=建 / 运行中=停止）；
+     *   点在面板外面（还在球身上）→ 收起卡片回六区。
+     */
+    private void cardTap(float x, float y) {
+        if (onCardTitle(x, y)) {
+            Log.i("FloatingBall", "zones: 点击标题 → 返回上一级");
+            goBackOneLevel();
+            return;
+        }
+        boolean inPanel = holdListRect != null
+                && x >= holdListRect[0] && x <= holdListRect[0] + holdListRect[2]
+                && y >= holdListRect[1] && y <= holdListRect[1] + holdListRect[3];
+        int i = nearestRow(y);
+        if (inPanel && i >= 0 && i < holdItems.size()) {
+            final HoldItem it = holdItems.get(i);
+            holdFocus = i;
+            refreshCards();
+            Log.i("FloatingBall", "zones: 点击第 " + (i + 1) + " 行「" + it.label + "」kind=" + it.kind);
+            if (it.kind == 0) {                       // 目录 → 进它的会话列表
+                openHoldSessions(it.data);
+                return;
+            }
+            if (it.kind == 1 || it.kind == 2 || it.kind == 4) {
+                cardTapCommit = true;
+                try { finishZones(false); } finally { cardTapCommit = false; }
+                return;
+            }
+            return;                                   // 占位/其它：点了不动
+        }
+        Log.i("FloatingBall", "zones: 点面板外 → 收起卡片，回六区");
+        closeCards();
+        syncBallTouchWindow();
+    }
 
     /** 悬停不再触发任何提交：选中只发生在"二级里松手"。 */
 
@@ -5105,6 +5200,9 @@ public class FloatingBallService extends Service {
      */
     private void pumpHoldDwell() {
         if (!zonesActive || holdLevel == 0) return;
+        // 2026-10-23：卡片已经是"点击面板"了 —— **不再**靠悬停自动进下一级
+        //（手指刚好停在第一行上时会被自动带进去，用户明确不要这个）。
+        if (cardTapMode) return;
         long now = android.os.SystemClock.uptimeMillis();
         // ① 标题行「‹ 」：停 200ms → 回退一级（手指不动也算）
         if (onCardTitle(lastHoldX, lastHoldY)) {
@@ -5440,6 +5538,8 @@ public class FloatingBallService extends Service {
             zonesView.setCardProgress(-1, 0f);
         }
         pushCardScene();
+        cardTapMode = true;               // 卡片一出现就落定：手指可以抬起，之后靠点击
+        syncBallTouchWindow();            // 代理窗口要盖住整张卡片，否则点不到
         startHoldDwellTick();            // 手指停着不动也要能累计悬停（靠定时器）
         Log.i("FloatingBall", "zones: 卡片「" + title + "」" + items.size() + " 项");
         // 换级后**不**自动选中：手指要真的移到某一行上才算（否则停着不动会一路自动钻到底）
@@ -5461,7 +5561,9 @@ public class FloatingBallService extends Service {
         holdZoneAt = 0;
         titleHoverAt = 0;
         holdDwellProgress = 0f;
+        cardTapMode = false;
         holdLevel = 0;
+        syncBallTouchWindow();          // 退出点击模式 → 代理窗口缩回球那么大
         holdItems.clear();
         holdFocus = -1;
         holdDir = null;
@@ -5592,6 +5694,16 @@ public class FloatingBallService extends Service {
         Log.i("FloatingBall", "zones: 卡片窗口长高 " + winH + "px（顶 y=" + newTop + "）");
     }
 
+    /** 按**当前窗口 params** 重算 zoneLocal（不能用 getLocationOnScreen：updateViewLayout 之后还没生效 → 图标错位）。 */
+    private void syncZoneLocal() {
+        if (params == null) return;
+        int inset = Math.round(winY0());
+        for (int i = 0; i < ZONE_COUNT; i++) {
+            zoneLocalX[i] = zoneCx[i] - params.x;
+            zoneLocalY[i] = zoneCy[i] - (params.y + inset);
+        }
+    }
+
     /**
      * 六区是**环形**排布，比球大一圈 —— 窗口先长到能装下整个环，否则最上/最下的圆会被窗口裁掉。
      * 以球心为中心同时长宽（球心不动），退出时由 restoreHoldWindow() 还回去。
@@ -5605,28 +5717,36 @@ public class FloatingBallService extends Service {
         if (cx <= 0 || cy <= 0) return;
         int newW = Math.max(winW, need);
         int newH = Math.max(winH, need);
+        int m = Math.round(dp(8));                       // 和真实屏幕至少留 8dp
         int newX = Math.round(cx - newW * 0.5f);
-        int newY = Math.round(cy - newH * 0.5f) - inset;
-        newX = Math.max(-newW / 2, Math.min(screenW - newW / 2, newX));
-        newY = Math.max(inset - newH / 2, Math.min(screenH - newH / 2 - inset, newY));
+        int newXmin = m, newXmax = screenW - m - newW;
+        if (newXmax < newXmin) newXmax = newXmin;
+        newX = Math.max(newXmin, Math.min(newXmax, newX));
+        int newYScreen = Math.round(cy - newH * 0.5f);
+        int newYminS = inset + m, newYmaxS = screenH - m - newH;
+        if (newYmaxS < newYminS) newYmaxS = newYminS;
+        newYScreen = Math.max(newYminS, Math.min(newYmaxS, newYScreen));
+        int newY = newYScreen - inset;
         if (newW == winW && newH == winH && newX == params.x && newY == params.y) return;
         params.x = newX; params.y = newY;
         params.width = newW; params.height = newH;
         winW = newW; winH = newH;
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        syncZoneLocal();                     // ⚠️ 用新 params 算（getLocationOnScreen 此刻还没生效 → 图标错位）
         if (zonesView != null && zonesParams != null) {
             zonesParams.x = newX; zonesParams.y = newY;
             zonesParams.width = newW; zonesParams.height = newH;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
-            int[] loc = new int[2];
-            glView.getLocationOnScreen(loc);
-            for (int i = 0; i < ZONE_COUNT; i++) {
-                zoneLocalX[i] = zoneCx[i] - loc[0];
-                zoneLocalY[i] = zoneCy[i] - loc[1];
-            }
             zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
         }
-        Log.i("FloatingBall", "zones: 六区窗口 " + winW + "x" + winH);
+        // 玻璃层也用同一个原点：renderer.winX/winY 是**屏幕**坐标，卡片的形状就按它换算
+        if (renderer != null) { renderer.winX = params.x; renderer.winY = newYScreen; }
+        pushZoneScene();
+        Log.i("FloatingBall", "zones: 六区窗口 " + winW + "x" + winH + " @(" + newX + "," + newYScreen + ")"
+                + " z0=(" + Math.round(zoneLocalX[0]) + "," + Math.round(zoneLocalY[0]) + ")"
+                + " z4=(" + Math.round(zoneLocalX[4]) + "," + Math.round(zoneLocalY[4]) + ")"
+                + " z5=(" + Math.round(zoneLocalX[5]) + "," + Math.round(zoneLocalY[5]) + ")"
+                + " view=" + (zonesView == null ? "null" : zonesView.getWidth() + "x" + zonesView.getHeight()));
     }
 
     /** 卡片关掉 → 球窗恢复进状态 3 时的高度。 */
@@ -5651,14 +5771,11 @@ public class FloatingBallService extends Service {
             zonesParams.width = w0;
             zonesParams.height = h0;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
-            int[] loc = new int[2];
-            glView.getLocationOnScreen(loc);
-            for (int i = 0; i < ZONE_COUNT; i++) {
-                zoneLocalX[i] = zoneCx[i] - loc[0];
-                zoneLocalY[i] = zoneCy[i] - loc[1];
-            }
+            syncZoneLocal();
             zonesView.setZones(zoneLocalX, zoneLocalY, zoneR);
         }
+        if (renderer != null) { renderer.winX = params.x; renderer.winY = params.y + Math.round(winY0()); }
+        pushZoneScene();
         Log.i("FloatingBall", "zones: 卡片关闭，球窗回到 " + w0 + "x" + h0);
     }
 
@@ -5697,6 +5814,11 @@ public class FloatingBallService extends Service {
     /** 松手：不管在哪一级，都回初始状态（"松手则恢复初始状态"）。 */
     void finishZones(boolean cancelled) {
         if (!zonesActive) return;
+        if (cardTapMode && !cardTapCommit && holdLevel > 0) {
+            // 卡片已经落定成"点击面板"：手指抬起来不该把它关掉（用户 2026-10-23 要求）
+            Log.i("FloatingBall", "zones: 松手（卡片已落定，保持打开）");
+            return;
+        }
         // ⚠️ 2026-10-23：**不再**"松手就选最近那一行"。
         // 老逻辑在 holdFocus<0 时抓 nearestRow —— 于是「刚进会话列表、手指没动就松手」
         // 会直接把第一条会话打开（用户报的"太容易不小心进入会话"）。
@@ -5803,6 +5925,7 @@ public class FloatingBallService extends Service {
 
     private void exitZones() {
         zonesActive = false;
+        cardTapMode = false;
         holdWinH0 = 0;          // 下次进状态 3 重新记基准窗口（六区会把它撑大）
         holdWinW0 = 0;
         zoneActive = -1;
