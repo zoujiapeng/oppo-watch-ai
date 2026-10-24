@@ -281,13 +281,36 @@ async function fileChannelStandDown(nonce, signal) {
 	return { ok: false, nonce, reason: `文件通道 ${actedDir} 500ms 内没有 ACK` };
 }
 
+// ── 动作流水（给"换机后到底走没走通"留证据）──────────────────────────────────
+// 每发一次让路信号就追加一行到 $HOME/dsh-ball-guard.log。为什么落盘：
+//   AI/人 在另一台手机上排错时，唯一能确认真实通道的就是这一行（doctor 的环 9 会读它）。
+//   只写自己的 HOME，不依赖球目录权限；超过 200KB 自动只留最后 200 行。
+const BALL_GUARD_LOG =
+	process.env.DSH_BALL_GUARD_LOG ||
+	`${process.env.HOME || "/data/data/com.termux/files/home"}/dsh-ball-guard.log`;
+
+function logGuardResult(action, res) {
+	try {
+		const reason = res.reason ? ` reason=${String(res.reason).replace(/\s+/g, " ").slice(0, 240)}` : "";
+		const skipped = res.skipped ? ` skipped=${res.skipped}` : "";
+		const line =
+			`${new Date().toISOString()} uid=${typeof process.getuid === "function" ? process.getuid() : "-"}` +
+			` action=${action} ok=${res.ok ? 1 : 0} via=${res.via || "-"} nonce=${res.nonce || "-"}${skipped}${reason}\n`;
+		fs.appendFileSync(BALL_GUARD_LOG, line, { mode: 0o644 });
+		if (fs.statSync(BALL_GUARD_LOG).size > 200 * 1024) {
+			const keep = fs.readFileSync(BALL_GUARD_LOG, "utf8").split("\n").slice(-200).join("\n");
+			fs.writeFileSync(BALL_GUARD_LOG, `${keep}\n`);
+		}
+	} catch (_) { /* 日志写不进去不影响让路本身 */ }
+}
+
 /**
  * 注入前请球让路。返回 { ok, nonce, via, reason? }：
  *   ok=true  → 球已确认让路（或让位开关关着，回 !skip），调用方直接注入；
  *   ok=false → 没拿到确认，动作照发（fail-open），但**一定会带一行 [ball] 提示**，
  *              并说明三条通道各是怎么失败的 —— 换机型排错就靠这一行。
  */
-async function waitForBallStandDown(action, signal) {
+async function standDownOnce(action, signal) {
 	const nonce = `${Date.now()}-${process.pid}-${++ballGuardSeq}-${action}`;
 
 	// ① TCP（主通道）
@@ -316,6 +339,13 @@ async function waitForBallStandDown(action, signal) {
 		return { ok: false, nonce, reason: `心跳太旧（${Math.round(hb.ageMs / 1000)}s，${hb.dir}，via ${hb.via}）：球可能刚被杀` };
 	}
 	return fileChannelStandDown(nonce, signal);
+}
+
+/** 对外入口：跑一次让路 + 记一行流水（换机排错就靠这一行）。 */
+async function waitForBallStandDown(action, signal) {
+	const res = await standDownOnce(action, signal);
+	logGuardResult(action, res);
+	return res;
 }
 
 /** 动作发完之后立刻放行（TCP 通道才有效；文件通道靠 ACT_HOLD_MS 自然过期）。 */

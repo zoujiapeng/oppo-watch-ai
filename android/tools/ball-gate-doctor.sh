@@ -199,6 +199,32 @@ else
   note "没有 dumpsys（Termux 里正常）→ 用 su -c dumpsys input 手工看"
 fi
 
+hdr "环 9 · 最近一次手机动作到底走了哪条通道"
+GLOG="${DSH_BALL_GUARD_LOG:-$HOME/dsh-ball-guard.log}"
+if [ -f "$GLOG" ]; then
+  LAST=$(tail -1 "$GLOG" 2>/dev/null | tr -d '\r')
+  AGE=$(( $(date +%s) - $(stat -c %Y "$GLOG" 2>/dev/null || echo 0) ))
+  printf '        %s\n' "$LAST"
+  VIA=$(printf '%s' "$LAST" | sed -E 's/.* via=([^ ]*).*/\1/')
+  OKF=$(printf '%s' "$LAST" | sed -E 's/.* ok=([01]).*/\1/')
+  case "$VIA:$OKF" in
+    tcp:*:1)  pass "最近一次动作走 **TCP**（${AGE}s 前）→ 跨机型通道生效" ;;
+    file:*:1) pass "最近一次动作走**文件**通道（${AGE}s 前）→ 也能通，但依赖目录权限" ;;
+    -:1)      note "最近一次动作是'球没在跑'的快速放行（${AGE}s 前）" ;;
+    *:0)
+      if [ "$AGE" -gt 1800 ]; then
+        note "最近一次动作是 ${AGE}s 前的失败（太久远，当历史看）：${LAST}"
+      else
+        fail "最近一次动作**没拿到让路确认**（${AGE}s 前）→ 看上面 reason"
+      fi ;;
+    :|"")     note "流水文件是空的 → 重启 DSH 后随便让 AI 点一下就会生成" ;;
+    *)        note "日志格式不认识：$LAST" ;;
+  esac
+  echo "        （完整流水：$GLOG）"
+else
+  note "还没有流水文件（$GLOG）→ 重启 DSH 后随便让 AI 点一下就会生成"
+fi
+
 echo
 echo "════ 结论 ════"
 if [ "$bad" -eq 0 ]; then

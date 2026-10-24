@@ -33,6 +33,10 @@ if (begin < 0 || end < 0 || end <= begin) {
 }
 const block = src.slice(begin, end);
 const modPath = "/data/data/com.termux/files/usr/tmp/ball-guard-plugin-block.mjs";
+// 测试自己的日志单独放：别把 e2e 的"故意失败"用例写进真实的 ~/dsh-ball-guard.log
+// （否则 doctor 环 9 会把测试记录当成"最近一次动作失败"）。
+const TEST_LOG = `${process.env.TMPDIR || "/data/data/com.termux/files/usr/tmp"}/bg-e2e-guard.log`;
+process.env.DSH_BALL_GUARD_LOG = TEST_LOG;
 fs.writeFileSync(
 	modPath,
 	`import fs from "node:fs";\nimport net from "node:net";\nimport { execFileSync } from "node:child_process";\n` +
@@ -111,7 +115,7 @@ const runChild = (probe, env) => {
 	try {
 		return execFileSync(process.execPath, ["--input-type=module", "-e", probe], {
 			encoding: "utf8",
-			env: { ...process.env, ...env },
+			env: { ...process.env, DSH_BALL_GUARD_LOG: TEST_LOG, ...env },
 			timeout: 20000,
 		}).trim();
 	} catch (e) {

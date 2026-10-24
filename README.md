@@ -33,6 +33,18 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 点空白/返回键收回去并把球还回来。
 见 [`OPERATIONS.md`](android/docs/OPERATIONS.md) 第三·五节。
 
+### 🤖 让 AI 自己修（一句话交给它就行）
+
+> "同步 `zoujiapeng/oppo-watch-ai`，按 `AI-FIX-BALL-GUARD.md` 把这台手机的悬浮球误触修好。"
+
+接活的 AI 会：`git pull` → `bash ai-ball-guard-setup.sh`（装球 APK + 装 DSH 插件 + 打让路补丁）
+→ 看末行 `RESULT: PASS|FAIL` → `--restart-dsh` 让插件进内存 → 按作业单验收。
+**仓库根目录的 [`AGENTS.md`](AGENTS.md) 会被 DSH 自动读进上下文**，里面写了同样的入口和硬性约束；
+作业单是 [`AI-FIX-BALL-GUARD.md`](AI-FIX-BALL-GUARD.md)（含 FAIL 分支表 F0~F5 与完成判据）。
+
+为什么必须"两半都装"、为什么本机能用换机就失效（含实测证据），见
+[`android/docs/BALL_GUARD_CROSS_DEVICE.md`](android/docs/BALL_GUARD_CROSS_DEVICE.md)。
+
 | 你想干什么 | 看这份 |
 |---|---|
 | **换一台手机装（给 AI 的操作清单 + 体检命令 + 踩坑表）** | [`android/docs/DEPLOY_OTHER_PHONE.md`](android/docs/DEPLOY_OTHER_PHONE.md) |
