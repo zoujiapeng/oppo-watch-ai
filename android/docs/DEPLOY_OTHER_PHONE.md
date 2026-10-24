@@ -285,36 +285,51 @@ ps -A | grep -i caplive
 
 ---
 
-## 9.5 Agent 操控手机时，别让球吃掉注入的手势（可选，但强烈建议）
+## 9.5 Agent 操控手机时，别让球吃掉注入的手势（换机必做，两半都要装）
 
 DSH 的 mobile 工具注入触摸（click/swipe/key）走 `/system/bin/input`，和真手指共用同一套
-窗口命中测试 —— 球盖在屏幕中间时，注入的 `ACTION_DOWN` 会被球吃掉。完整原理与实现见
-[`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)，这里只列**换机后要做的三件事**：
+窗口命中测试 —— 球盖在屏幕中间时，注入的 `ACTION_DOWN` 会被球吃掉。完整原理见
+[`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)，**跨机型为什么容易只装一半**见
+[`BALL_GUARD_CROSS_DEVICE.md`](BALL_GUARD_CROSS_DEVICE.md)。
+
+> ⚠️ 这一功能是**两半**：球侧（APK，收到信号就让路）+ DSH 侧（插件，注入前发信号）。
+> 只装 APK 不装插件 = 球永远等不到信号 = 点击照旧落在球上。
+> 而且 2026-10-24 之前，插件那条文件信号在**非 root 的 DSH** 上会静默失效（读
+> `/sdcard/Android/data/<球包名>` 被 Android 11+ 拒），所以换机后一定要跑体检。
 
 ```bash
-# 1) 建信号目录（球在这里写 ACK；不能放 /data/local/tmp：shell_data_file 标签，
-#    untrusted_app 只能读不能写，实测写 ACK 报 EACCES）
-mkdir -p /sdcard/Android/data/com.glslplayground.app/files
+# ① 装新 APK（2026-10-24 之后的版本才带回环 TCP 门控）
+pm install -r glsl-playground.apk
+#    打开 App → 设置 →「悬浮于桌面」
 
-# 2) DSH 侧插件（升级 dsh-preset-mobile-use 会覆盖，需重打）
-grep -n "waitForBallStandDown" ~/dsh-preset-mobile-use/lib/index.js
+# ② 装 DSH 侧插件（不在 npm 上，从仓库装），再打让路补丁
+git clone https://github.com/AcidGr/dsh-preset-mobile-use.git ~/dsh-preset-mobile-use
+dsh plugin add --profile web "link:$HOME/dsh-preset-mobile-use"
+bash ~/oppo-watch-ai/patches/install-ball-guard-plugin.sh      # 幂等；--check 只看不改
 
-# 3) vd CLI（手动 vd tap/swipe 调试那条路，重启后生效）
+# ③ 重启 DSH（插件是 ESM，启动时才 import 进内存）
+
+# ④ 体检 + 贯通（球要在跑）
+bash ~/oppo-watch-ai/android/tools/ball-gate-doctor.sh
+node ~/oppo-watch-ai/android/tools/ball-guard-plugin-e2e.mjs click
+
+# ⑤ 可选：手动 vd tap/swipe 调试那条路（重启后生效）
 bash ~/oppo-watch-ai/patches/apply-vd-ball-guard-patch.sh
-
-# 验证（球要在跑；两个脚本都不需要重启 DSH）
-bash ~/oppo-watch-ai/android/tools/ball-guard-verify.sh           # 球侧：信号→notTouchable+ACK→恢复
-node ~/oppo-watch-ai/android/tools/ball-guard-plugin-e2e.mjs key  # 插件侧贯通（切真实插件代码跑）
 ```
 
-换包名 / 换机器时，**两边路径要一起改**：球侧 `FloatingBallService` 的 `gateDir()`（默认
-`getExternalFilesDir(null)`），DSH 侧 `lib/index.js` 的 `BALL_GUARD_DIR`（可用
-环境变量 `DSH_BALL_GUARD_DIR` 覆盖）。
+体检两条关键环：
 
-临时关掉联动：`touch /sdcard/Android/data/com.glslplayground.app/files/dsh-ball-guard-off`。
+- **环 5** = 插件有没有让路代码（原版 preset 一定有 mobile 工具，但**没有**让路逻辑）；
+- **环 7** = 球的回环门控在不在（`nc` 发 `PING` 应回 `ALIVE <pid> <yield> <port>`）。
 
-两个别踩的坑（换机器也一样）：信号文件**必须原子写**（`.tmp` + `mv`，否则球会读到半个 nonce）；
-让路窗口要按**本地时钟**算，别用 `/sdcard` 上的 mtime（FUSE 缓存会让窗口缩水）。
+换包名 / 换机器：插件侧用 `DSH_BALL_PKG` / `DSH_BALL_GUARD_DIRS` / `DSH_BALL_GATE_PORT`
+覆盖，球侧端口在设置里改 `float_gate_port`（默认 3181）。
+
+临时关掉联动：`touch /sdcard/Android/data/com.glslplayground.app/files/dsh-ball-guard-off`
+（或球设置页关「DSH 操控时全部 UI 让位」；关掉时球回 `!skip:`，插件立刻放行）。
+
+两个别踩的坑（换机器也一样）：信号文件**必须原子写**（`.tmp` + `mv`）；
+让路窗口按**本地时钟**算，别用 `/sdcard` 上的 mtime（FUSE 缓存会让窗口缩水）。
 
 ## 10. 给 AI 的最短行动清单
 

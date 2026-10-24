@@ -110,6 +110,42 @@ DSH 侧（要注入触摸时）                          球侧（每 60ms 轮�
   （以前球关着时每次注入都白等半秒的根源）。
 
 
+## 2.6 跨机型：文件信号不够，必须有一条不依赖文件系统的通道（2026-10-24）
+
+**症状**：同一套球 + 同一套插件，本机让路正常；换一台 root 手机，让 AI 去点外卖，
+点击落在球上（用户报的"误触到玻璃"）。
+
+**根因**（两条，都是实测，详见 [`BALL_GUARD_CROSS_DEVICE.md`](BALL_GUARD_CROSS_DEVICE.md)）：
+
+1. `GATEDIR` 是球的**外部私有目录**，Android 11+ 只对属主 App 开放。本机 DSH 是
+   **root** 起的，所以插件读写一直通；换机后 DSH 是普通 Termux 用户 →
+   `statSync(dsh-ball-alive)` 直接 `EACCES` → `ballRunning()` 返回 false →
+   **一个信号都不发**（实测：`{"ok":true,"skipped":"ball-not-running","dt":1}`，静默）。
+2. 球侧 `pumpAgentGate()` 第一行 `if (wm == null || ballTouch == null) return;`
+   把**心跳**也一起跳过了：代理窗口没加成功时，插件永远认为"球没在跑"。
+
+**修法**（球侧 + 插件侧一起改）：
+
+- 球新增**回环 TCP 门控**：`127.0.0.1:3181`（占用则 3182/3183），行协议
+  `PING` / `YIELD <nonce> [holdMs]` / `RELEASE <nonce>` / `STATUS`。
+  不碰文件系统 → 不受 FUSE、挂载命名空间、SELinux 文件标签影响。
+- 心跳改到判空**之前**，内容变 JSON（带 `port` / `yield` / `touch`），
+  外部私有 + 内部私有目录**都写**。
+- 插件通道顺序：**TCP → 文件（6 个候选目录，直连或 `su` 中继）→ 报错**；
+  全断时 `reason` 逐条写明，结果里一定出现 `[ball]` 行（不再静默）。
+- 动作发完 `RELEASE`，用户不用干等 1.5~4s。
+
+**实测**（本机，把进程降到 Termux uid 10326 模拟普通用户）：
+
+```
+旧插件 + 文件通道：{"ok":true,"skipped":"ball-not-running","dt":1}      ← 静默，点击落球
+新插件 + TCP 通道：{"ok":true,"via":"tcp:3181","dt":18}                 ← 18ms 握手
+新插件 + 关掉 TCP：{"ok":false,"reason":"tcp 端口…都没人应答，文件心跳…读不到","dt":474}  ← 会说出来
+```
+
+换机三件事：装新 APK、装/升级插件（`patches/install-ball-guard-plugin.sh`）、
+重启 DSH 后跑 `android/tools/ball-gate-doctor.sh`。
+
 ## 3. 落地位置（三处）
 
 | 位置 | 角色 |
@@ -117,6 +153,8 @@ DSH 侧（要注入触摸时）                          球侧（每 60ms 轮�
 | `android/src/.../FloatingBallService.java` | 球侧：`pumpAgentGate()` / `applyBallTouchability()` / `syncBallTouchWindow()` / `setupBallTouchLayer()` / `inBallAtRaw()` / `gateDir()` |
 | `~/dsh-preset-mobile-use/lib/index.js` | DSH 侧**主路径**：`waitForBallStandDown()`（心跳探测 + `!skip:` 认账 + 全动作让路），在 `default:` 分支发 `/api/action` 之前调用 |
 | `patches/apply-vd-ball-guard-patch.sh` | CLI 路径：给 Magisk 模块里的 `/system/bin/vd` 的 tap/swipe/key 分支插 `ball_signal`（手动调试用） |
+| `patches/install-ball-guard-plugin.sh` | **换机用**：在任意手机把插件装好/升级好（备份 + 自检 + 注册 profile） |
+| `android/tools/ball-gate-doctor.sh` | **换机用**：八环体检（球在不在 / DSH uid / 心跳三路径 / 权限实测 / 插件版本 / 开关 / TCP / 窗口） |
 
 ### 3.1 窗口结构（这次改动）
 
@@ -405,6 +443,10 @@ agent gate -> ARM (球可触摸)
 | `FloatingBallService.java`（2026-10-23） | `applyAgentYield` / `yieldFlag` / `yieldRegion` / `setAgentYield` / `getAgentYield`；开关 `float_agent_yield`；心跳 `dsh-ball-alive`；关掉时回 `!skip:` ACK |
 | `MainActivity.java` / `WatchBridge.java` / `settings.html` | 「DSH 操控时全部 UI 让位」开关（`W.getAgentYield()` / `W.setAgentYield()`） |
 | `android/tools/ball-yield-verify.sh` | 全窗口让位端到端验证（平时可触摸 → 让路时全不可触摸 → 1.5s 恢复；`--off` 验证开关） |
+| `FloatingBallService.java`（2026-10-24） | 回环 TCP 门控（3181，`PING/YIELD/RELEASE/STATUS`）；心跳前置到判空之前；`gateDirs()` 双目录；心跳 JSON（含 port/yield/touch）；`gateUntilMs`/`lastActNonce` 改 volatile；onDestroy 停监听 |
+| `~/dsh-preset-mobile-use/lib/index.js`（2026-10-24） | 三级通道（TCP → 6 个候选目录 → `su` 中继）；心跳三态；全断时逐条报原因；动作后 `RELEASE`；`DSH_BALL_GATE_PORT`/`DSH_BALL_GUARD_DIRS`/`DSH_BALL_PKG` |
+| `android/tools/ball-guard-plugin-e2e.mjs` | 改成新代码切段；测 TCP 握手 / 窗口 notTouchable / RELEASE / 文件通道 / 全断诊断 |
+| `android/docs/BALL_GUARD_CROSS_DEVICE.md` | 跨机型根因与证据、部署三步、排错表 |
 
 ## 8. 还没做的
 

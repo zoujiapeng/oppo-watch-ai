@@ -130,6 +130,30 @@ public class FloatingBallService extends Service {
     private static final long ALIVE_EVERY_MS = 2000;
     private static final String SKIP_ACK_PREFIX = "!skip:";       // 让位关掉时回给插件的"立刻放行"
 
+    // ═══════════ 跨机型：文件协议之外再开一条回环 TCP 通道（2026-10-24）═══════════
+    //
+    // 根因（实测，见 BALL_GUARD_CROSS_DEVICE.md）：`/sdcard/Android/data/<球包名>/files`
+    // 在 Android 11+ 上**只有属主 App 自己能进**。本机的 DSH 进程是 root 起的
+    // （`ps` 里 uid=0），所以插件读写信号文件一直通。换一台手机如果 DSH 是普通 Termux
+    // 用户起的，插件 `statSync(dsh-ball-alive)` 直接 EACCES → `ballRunning()` 返回 false
+    // → **一个信号都不发**（而且是 fail-silent，结果里连 `[ball]` 都不打）→ 球永远不让路
+    // → agent 的点击落在球上。真机实测（本机，降到 Termux uid 10326）：
+    //     cat  dsh-ball-alive            → Permission denied
+    //     echo > .probe-termux           → Permission denied
+    //     stat /sdcard/Android/data/...  → Permission denied
+    //
+    // 回环 TCP 不受 FUSE / 分区别名 / SELinux 文件标签影响，两个 App 都只需要 INTERNET。
+    // 行协议（UTF-8，一行一条，服务端回一行就断开）：
+    //     PING                     → ALIVE <pid> <yield 0|1> <port>
+    //     YIELD <nonce> [holdMs]   → OK <nonce>        （球让路，默认 4000ms）
+    //     RELEASE <nonce>          → RELEASED <nonce>  （agent 动作做完，立刻恢复；nonce 对不上不理）
+    //     STATUS                   → STATE <yield 0|1> <untilMs>
+    // 文件协议原样保留做兜底（老插件 / vd CLI 补丁 / DSH 以 root 跑的情况）。
+    static final String PREF_GATE_PORT = "float_gate_port";       // 设置页可改，默认 3181
+    private static final int GATE_TCP_PORT_DEFAULT = 3181;
+    private static final String F_GATE_INFO = "dsh-ball-gate";     // 心跳附带端口/状态（JSON）
+    private static final long TCP_HOLD_MS = 4000;
+
     private volatile boolean agentYieldOn = false;   // 让路中（全部球窗口已退出命中测试）
     // 用 WeakHashMap（View 没重写 equals ≈ 身份比较）：审批面板/菜单这类窗口会被反复 removeView
     // + 重建，强引用会把已销毁的 View 连同它挂的监听一起攥住不放。
@@ -143,8 +167,14 @@ public class FloatingBallService extends Service {
     private WindowManager.LayoutParams ballTouchParams;
     private volatile boolean agentActing = false;            // agent 正在发触摸（或刚发完）
     private volatile String lastAckNonce = "";               // 已确认「球已让路」的 nonce
-    private long gateUntilMs = 0;                            // 让路截止时刻（本地时钟，不用文件 mtime）
-    private String lastActNonce = "";                        // 上一次处理过的信号 nonce
+    private volatile long gateUntilMs = 0;                   // 让路截止时刻（本地时钟，不用文件 mtime）
+    private volatile String lastActNonce = "";               // 上一次处理过的信号 nonce
+    private File[] gateDirCache;                             // 全部信号目录（外部私有 + 内部私有）
+    private volatile java.net.ServerSocket gateServer;       // 回环 TCP 门控（跨机型主通道）
+    private Thread gateServerThread;
+    private volatile boolean gateServerRunning = false;
+    private volatile int gateServerPort = 0;
+    private volatile String lastTcpNonce = "";               // 最近一次 TCP YIELD 的 nonce（RELEASE 校验用）
     private File gateDir;                                    // 信号目录（惰性解析）
     private File gateAckFile;
     private File lastActFile;                                // 上一次读到信号的文件（写 ACK 前回读用）
@@ -2675,15 +2705,31 @@ public class FloatingBallService extends Service {
     };
 
     private void pumpAgentGate() {
-        if (wm == null || ballTouch == null) return;
-        File dir = gateDir();
+        if (wm == null) return;
+        File[] dirs = gateDirs();
+        File dir = dirs[0];
         long now = System.currentTimeMillis();
         // 心跳：球在跑就每 2s 写一次。插件靠它判断"球在不在"—— 不在就根本不发信号、
         // 也不白等 500ms（以前球没开时每次注入都要多等半秒，就是这么来的）。
+        //
+        // ⚠️ 心跳**必须在 `ballTouch == null` 之前**（2026-10-24 修）。老版本第一行是
+        // `if (wm == null || ballTouch == null) return;`：代理窗口一旦没加成功（悬浮窗权限被
+        // ROM 拦、addView 失败），心跳也跟着没了 → 插件认定"球没在跑" → 连信号都不发。
+        // 这是"换一台手机就不让路"的第二条死路，而且完全静默（结果里连 `[ball]` 都不出现）。
+        // 现在：只要服务活着就写心跳，心跳里带上 TCP 端口和让位开关状态，插件据此选通道。
         if (now - lastAliveAt > ALIVE_EVERY_MS) {
             lastAliveAt = now;
-            try { writeAtomic(new File(dir, F_ALIVE), Long.toString(now) + "\n"); }
-            catch (Throwable ignored) { }
+            String hb = "{\"ts\":" + now
+                    + ",\"pid\":" + android.os.Process.myPid()
+                    + ",\"port\":" + gateServerPort
+                    + ",\"tcp\":" + gateServerRunning
+                    + ",\"yield\":" + prefs().getBoolean(PREF_AGENT_YIELD, true)
+                    + ",\"touch\":" + (ballTouch != null)
+                    + ",\"dirs\":" + dirs.length + "}\n";
+            for (File d : dirs) {
+                try { writeAtomic(new File(d, F_ALIVE), hb); } catch (Throwable ignored) { }
+                try { writeAtomic(new File(d, F_GATE_INFO), hb); } catch (Throwable ignored) { }
+            }
         }
         // 开关（两个都认）：
         //   · 设置页 →「悬浮水晶球 → DSH 操控时全部 UI 让位」（PREF_AGENT_YIELD，默认开）
@@ -2699,16 +2745,24 @@ public class FloatingBallService extends Service {
             setAgentYield(on);
         }
         boolean allow = prefs().getBoolean(PREF_AGENT_YIELD, true);
-        boolean off = !allow || new File(dir, F_GUARD_OFF).exists()
+        boolean off = !allow
+                || new File(dir, F_GUARD_OFF).exists()
                 || new File(DIR_LEGACY, F_GUARD_OFF).exists();
+        if (!off) {
+            for (File d : dirs) {
+                if (new File(d, F_GUARD_OFF).exists()) { off = true; break; }
+            }
+        }
         String nonce = null;
         File src = null;
-        File[] candidates = {
-                new File(dir, F_ACT),
-                new File(DIR_LEGACY, F_ACT),      // 兼容老插件/老 vd 补丁
-        };
-        for (File c : candidates) {
+        // 先看 App 自己的目录（外部 / 内部），再看 legacy 的 /data/local/tmp（老 vd 补丁）。
+        for (File d : dirs) {
+            File c = new File(d, F_ACT);
             if (c.lastModified() > 0) { src = c; break; }   // 只看"在不在"，不看 mtime
+        }
+        if (src == null) {
+            File c = new File(DIR_LEGACY, F_ACT);
+            if (c.lastModified() > 0) src = c;
         }
         if (src != null) nonce = readSmallString(src, 64);
         if (off) {
@@ -2725,8 +2779,7 @@ public class FloatingBallService extends Service {
                 lastActNonce = nonce;          // 记成已见：重新打开开关时不会当成新信号
                 if (now - lastSkipAckAt >= 200) {
                     lastSkipAckAt = now;
-                    try { writeAtomic(gateAckFile(), SKIP_ACK_PREFIX + nonce + "\n"); }
-                    catch (Throwable ignored) { }
+                    writeAckAll(dirs, SKIP_ACK_PREFIX + nonce + "\n");
                 }
             }
             return;
@@ -2770,12 +2823,11 @@ public class FloatingBallService extends Service {
             }
             if (now - lastAckTryAt >= ACK_RETRY_MS) {   // 失败时退避，别每 60ms 刷一条错误日志
                 lastAckTryAt = now;
-                try {
-                    writeAtomic(gateAckFile(), nonce + "\n");
+                if (writeAckAll(dirs, nonce + "\n")) {
                     lastAckNonce = nonce;
-                    Log.i("FloatingBall", "agent gate ack: " + nonce + " -> " + gateAckFile().getPath());
-                } catch (Throwable e) {
-                    Log.w("FloatingBall", "ack write failed: " + e + " (dir=" + gateAckFile().getPath() + ")");
+                    Log.i("FloatingBall", "agent gate ack: " + nonce + " -> " + dirs.length + " 个目录");
+                } else {
+                    Log.w("FloatingBall", "ack write failed: " + nonce + " (dirs=" + dirs.length + ")");
                 }
             }
         }
@@ -3274,18 +3326,188 @@ public class FloatingBallService extends Service {
     }
 
     /**
-     * 信号目录（App 可写）：App 外部私有目录 /sdcard/Android/data/&lt;pkg&gt;/files，
-     * 拿不到外部存储时退回内部私有目录。两条路 DSH 侧都能读（root 读内部目录也在 SELinux 允许内）。
+     * 信号目录（App 可写）。**两个都写**：
+     *   ① 外部私有目录 /sdcard/Android/data/&lt;pkg&gt;/files —— 老插件、vd CLI 补丁认这个；
+     *   ② 内部私有目录 /data/user/0/&lt;pkg&gt;/files —— **只有 root 读得到**，但它不受
+     *      FUSE / 分区别名 / 挂载命名空间影响，是「DSH 以 root 跑」时最稳的一条。
+     *
+     * 为什么不再只写外部目录：Android 11+ 上 `/sdcard/Android/data/<pkg>` 只对属主 App 开放，
+     * 别的 uid（包括 Termux 本体）读 `/sdcard/Android/data/.../files/dsh-ball-alive` 直接
+     * EACCES。本机 DSH 是 root 起的所以一直没暴露；换机（DSH 以 Termux 用户起）就是
+     * 「插件以为球没在跑 → 一个信号都不发 → 误触玻璃」。多写一份内部目录，root 侧的
+     * `su -c cat /data/user/0/.../files/dsh-ball-alive` 就永远读得到。
+     * 真正跨机型的主通道是回环 TCP（startGateTcpServer），文件只是兜底。
      */
+    private File[] gateDirs() {
+        File[] c = gateDirCache;
+        if (c != null) return c;
+        java.util.ArrayList<File> list = new java.util.ArrayList<>();
+        File ext = getExternalFilesDir(null);
+        if (ext != null) { list.add(ext); }
+        File in = getFilesDir();
+        if (in != null && !list.contains(in)) list.add(in);
+        if (list.isEmpty()) list.add(getCacheDir());
+        c = list.toArray(new File[0]);
+        gateDirCache = c;
+        StringBuilder sb = new StringBuilder();
+        for (File f : c) sb.append(f.getAbsolutePath()).append("  ");
+        Log.i("FloatingBall", "gate dirs = " + sb.toString().trim());
+        return c;
+    }
+
+    /** 主目录（外部优先）：只用于「读」老信号与放调试钩子。 */
     private File gateDir() {
         File d = gateDir;
         if (d != null) return d;
-        File ext = getExternalFilesDir(null);
-        d = (ext != null) ? ext : getFilesDir();
+        d = gateDirs()[0];
         gateDir = d;
-        Log.i("FloatingBall", "gate dir = " + d.getAbsolutePath());
         return d;
     }
+
+    /** ACK 写到**每一个**可写目录；只要有一个人写成功就算交付（插件会各处都找）。 */
+    private boolean writeAckAll(File[] dirs, String body) {
+        boolean ok = false;
+        for (File d : dirs) {
+            try { writeAtomic(new File(d, F_ACK), body); ok = true; }
+            catch (Throwable ignored) { }
+        }
+        return ok;
+    }
+
+    // ═══════════════ 回环 TCP 门控（跨机型主通道，2026-10-24）═══════════════
+    //
+    // 只绑 127.0.0.1。为什么这条通道才是"换机器也对"的那条：
+    //   · 不碰文件系统 —— Android 11+ 的 /sdcard/Android/data/<别的 App> 只对属主开放；
+    //   · 不看挂载命名空间 —— Termux 没跑 termux-setup-storage 时 /sdcard 根本不存在；
+    //   · 不看 SELinux 文件标签 —— 两边都只需要 INTERNET 权限连回环；
+    //   · 顺手消掉 FUSE 的 mtime 缓存和"读到半个 nonce"这两个老坑（一行一条，原子）。
+    // 端口从 prefs 的 float_gate_port 取，默认 3181；被占用就顺延 +1/+2。
+    // 实际端口写进心跳（dsh-ball-alive / dsh-ball-gate 的 "port" 字段），插件自己会读。
+    private void startGateTcpServer() {
+        if (gateServerRunning) return;
+        final int prefPort = prefs().getInt(PREF_GATE_PORT, GATE_TCP_PORT_DEFAULT);
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                java.net.ServerSocket ss = null;
+                int[] tries = {prefPort, GATE_TCP_PORT_DEFAULT, GATE_TCP_PORT_DEFAULT + 1,
+                        GATE_TCP_PORT_DEFAULT + 2};
+                for (int p : tries) {
+                    if (p <= 0 || p > 65535) continue;
+                    try {
+                        java.net.ServerSocket cand = new java.net.ServerSocket();
+                        cand.setReuseAddress(true);
+                        cand.bind(new java.net.InetSocketAddress(
+                                java.net.InetAddress.getByName("127.0.0.1"), p), 8);
+                        ss = cand;
+                        gateServerPort = p;
+                        break;
+                    } catch (Throwable e) {
+                        Log.w("FloatingBall", "gate tcp bind " + p + " failed: " + e);
+                    }
+                }
+                if (ss == null) {
+                    Log.w("FloatingBall", "gate tcp 全部端口都绑不上（插件只能走文件协议）");
+                    return;
+                }
+                gateServer = ss;
+                gateServerRunning = true;
+                Log.i("FloatingBall", "gate tcp listening 127.0.0.1:" + gateServerPort);
+                while (gateServerRunning) {
+                    java.net.Socket s = null;
+                    try {
+                        s = ss.accept();
+                        try {
+                            s.setSoTimeout(400);
+                            handleGateConn(s);
+                        } finally {
+                            try { s.close(); } catch (Throwable ignored) { }
+                        }
+                    } catch (Throwable e) {
+                        if (!gateServerRunning) break;
+                        // accept 被打断（服务在收）或单连接超时：都别把这个线程弄死
+                        try { Thread.sleep(20); } catch (Throwable ignored) { }
+                    }
+                }
+                Log.i("FloatingBall", "gate tcp stopped");
+            }
+        }, "dsh-ball-gate");
+        t.setDaemon(true);
+        gateServerThread = t;
+        t.start();
+    }
+
+    private void stopGateTcpServer() {
+        gateServerRunning = false;
+        java.net.ServerSocket ss = gateServer;
+        gateServer = null;
+        if (ss != null) { try { ss.close(); } catch (Throwable ignored) { } }
+        Thread t = gateServerThread;
+        gateServerThread = null;
+        if (t != null) { try { t.join(300); } catch (Throwable ignored) { } }
+    }
+
+    private void handleGateConn(java.net.Socket s) {
+        try {
+            java.io.BufferedReader in = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+            String line = in.readLine();
+            if (line == null) return;
+            String reply = gateCommand(line.trim());
+            java.io.OutputStream out = s.getOutputStream();
+            out.write((reply + "\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        } catch (Throwable ignored) { }
+    }
+
+    /** 一行命令 → 一行回复。见常量区的协议表。 */
+    private String gateCommand(String line) {
+        String[] a = line.split("\\s+");
+        String cmd = (a.length > 0 && a[0] != null)
+                ? a[0].toUpperCase(java.util.Locale.ROOT) : "";
+        long now = System.currentTimeMillis();
+        boolean yieldPref = prefs().getBoolean(PREF_AGENT_YIELD, true);
+        if ("PING".equals(cmd)) {
+            return "ALIVE " + android.os.Process.myPid() + " " + (now < gateUntilMs ? 1 : 0)
+                    + " " + gateServerPort;
+        }
+        if ("STATUS".equals(cmd)) {
+            return "STATE " + (now < gateUntilMs ? 1 : 0) + " " + gateUntilMs
+                    + " yield=" + (yieldPref ? 1 : 0);
+        }
+        if ("YIELD".equals(cmd)) {
+            String nonce = (a.length > 1 && !a[1].isEmpty()) ? a[1] : ("tcp-" + now);
+            long hold = TCP_HOLD_MS;
+            if (a.length > 2) {
+                try { hold = Math.max(300L, Long.parseLong(a[2])); } catch (Throwable ignored) { }
+            }
+            lastTcpNonce = nonce;
+            if (!yieldPref) {
+                // 设置页把「全部 UI 让位」关了：立刻放行，和文件协议的 !skip ACK 同义
+                return SKIP_ACK_PREFIX + nonce;
+            }
+            lastActNonce = nonce;          // 同一 nonce 别再被文件协议当成新信号处理一遍
+            gateUntilMs = now + hold;
+            main.post(agentGateKick);
+            Log.i("FloatingBall", "tcp yield: " + nonce + " → 让路 " + hold + "ms");
+            return "OK " + nonce;
+        }
+        if ("RELEASE".equals(cmd)) {
+            String nonce = (a.length > 1) ? a[1] : "";
+            if (nonce.isEmpty() || nonce.equals(lastTcpNonce)) {
+                gateUntilMs = 0;
+                main.post(agentGateKick);
+                Log.i("FloatingBall", "tcp release: " + (nonce.isEmpty() ? "(all)" : nonce));
+                return "RELEASED " + nonce;
+            }
+            return "IGNORED " + nonce;
+        }
+        return "ERR unknown";
+    }
+
+    /** TCP 线程改完 gateUntilMs 后立刻在主线程跑一次门控（不用等 60ms 轮询）。 */
+    private final Runnable agentGateKick = new Runnable() {
+        @Override public void run() { pumpAgentGate(); }
+    };
 
     private File gateAckFile() {
         File f = gateAckFile;
@@ -7961,6 +8183,7 @@ public class FloatingBallService extends Service {
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
+            startGateTcpServer();           // 跨机型主通道：回环行协议（不依赖 /sdcard 权限）
         }
         glView.onResume();
         glView.addOnLayoutChangeListener(
@@ -8172,6 +8395,7 @@ public class FloatingBallService extends Service {
     }
 
     @Override public void onDestroy() {
+        stopGateTcpServer();         // 回环门控线程跟着服务一起收
         stopRenderDriver();          // 独立渲染节拍线程跟着服务一起收
         running = false;
         INSTANCE = null;

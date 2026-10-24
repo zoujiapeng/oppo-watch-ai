@@ -1,6 +1,8 @@
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
+import { execFileSync } from "node:child_process";
 
 let defineTool;
 try {
@@ -87,85 +89,242 @@ function factorText(value) {
  * （click / swipe / key），都先请悬浮球暂时退出命中测试，否则注入的 ACTION_DOWN
  * 会被球吃掉 —— 底下 App 收不到 down（滑动半途而废），球还会把它当成用户在操作。
  *
- *   · 写 nonce 进 ACT 文件 → 球在 ~60ms 内把代理触摸窗口设为 NOT_TOUCHABLE，
- *     并把这个 nonce 写进 ACK 文件；
- *   · 本插件轮询 ACK 最多 ~500ms，然后才真正注入触摸；
- *   · 球在 ACT 文件 mtime 之后 ~1.5s 内保持让路，之后自动恢复可触摸。
+ * ⚠️ 2026-10-24：**跨机型**重做。以前只有一条「文件信号」通道，而且是 fail-silent 的，
+ * 于是「本机能用、换台手机就误触玻璃」。两条根因（都实测过，见
+ * android/docs/BALL_GUARD_CROSS_DEVICE.md）：
  *
- * 球没在跑 / 没装 → ACT 没人写 ACK：最多多等 500ms，动作照发（fail-open）。
- * 想临时关掉联动：`touch /data/local/tmp/dsh-ball-guard-off`（两边都会忽略信号）。
+ *  ① 信号目录 /sdcard/Android/data/<球包名>/files 在 Android 11+ 上**只对属主 App 开放**。
+ *     本机 DSH 是 root 起的（uid=0），所以读写一直通；换机后 DSH 是普通 Termux 用户，
+ *     `statSync(dsh-ball-alive)` 直接 EACCES → `ballRunning()` 返回 false → **一个信号都不发**。
+ *     实测（把本机进程降到 Termux uid 10326）：
+ *        cat  dsh-ball-alive          → Permission denied
+ *        echo > .probe-termux         → Permission denied
+ *        stat /sdcard/Android/data/.. → Permission denied
+ *  ② 球侧 `pumpAgentGate()` 第一行是 `if (wm == null || ballTouch == null) return;`：
+ *     代理触摸窗口没加成功（ROM 拦悬浮窗 / addView 失败）时，**连心跳都不写** → 插件永远
+ *     认为"球没在跑"。现在球改成先写心跳再判空。
+ *
+ * 现在的顺序（每条都是"能通就用"，全都失败才报错，而且**不再静默**）：
+ *   1. 回环 TCP（主通道）：127.0.0.1:3181 行协议，不碰文件系统、不看挂载命名空间、
+ *      不看 SELinux 标签，两边只要有 INTERNET 就能通。端口号从球的心跳里读，读不到就试 3181/3182/3183。
+ *   2. 文件（兼容老 APK / vd CLI 补丁）：候选目录依次试
+ *        /sdcard/Android/data/<pkg>/files
+ *        /storage/emulated/0/Android/data/<pkg>/files
+ *        /data/media/0/Android/data/<pkg>/files      ← root 侧绕开 FUSE 的同一份数据
+ *        /data/user/0/<pkg>/files  /data/data/<pkg>/files   ← 球的内部私有目录（球现在也写一份）
+ *   3. 直连读不到就用 `su -c` 中继（目标机是 root 的，这条基本必通）。
+ *
+ * 想临时关掉联动：`touch /data/local/tmp/dsh-ball-guard-off`，或在球设置页关
+ * 「DSH 操控时全部 UI 让位」（球会回 `!skip:<nonce>`，插件立刻放行，不多等）。
  */
-// 信号文件放在**球自己可写**的目录里。踩过的坑：
-//   ✗ /data/local/tmp 根下：shell_data_file 标签，untrusted_app 域能读不能写，球回 ACK 会 EACCES
-//   ✗ /data/local/tmp/dsh-ball（0777）：同样被 SELinux 拒
-//   ✓ 球的外部私有目录 /sdcard/Android/data/<pkg>/files：球免权限可写，root/shell 都读得到
-// 球侧同一份常量在 FloatingBallService（DIR_* / gateDir()）；换 App 包名或路径时两边一起改。
-const BALL_GUARD_DIR =
-	process.env.DSH_BALL_GUARD_DIR || "/sdcard/Android/data/com.glslplayground.app/files";
+const BALL_PKG = process.env.DSH_BALL_PKG || "com.glslplayground.app";
+const BALL_GUARD_DIRS = (process.env.DSH_BALL_GUARD_DIRS || [
+	`/sdcard/Android/data/${BALL_PKG}/files`,
+	`/storage/emulated/0/Android/data/${BALL_PKG}/files`,
+	`/data/media/0/Android/data/${BALL_PKG}/files`,
+	`/data/user/0/${BALL_PKG}/files`,
+	`/data/data/${BALL_PKG}/files`,
+	`/data/user_de/0/${BALL_PKG}/files`,
+].join(":"))
+	.split(":")
+	.map((s) => s.trim())
+	.filter(Boolean);
 
-/** 信号目录（球启动时不用注册；两边默认值一致，换机器时用 DSH_BALL_GUARD_DIR 覆盖）。 */
-function resolveBallGuardDir() {
-	try {
-		if (fs.statSync(BALL_GUARD_DIR).isDirectory()) return BALL_GUARD_DIR;
-	} catch (_) { /* 目录还没建：下面写文件时会给出明确报错 */ }
-	return BALL_GUARD_DIR;
-}
+// 回环门控端口：默认 3181，和球侧 PREF_GATE_PORT 一致；球的握手心跳里会报真实端口。
+const BALL_GATE_PORTS = (process.env.DSH_BALL_GATE_PORT || "3181,3182,3183")
+	.split(",")
+	.map((s) => Number(s.trim()))
+	.filter((n) => Number.isFinite(n) && n > 0 && n < 65536);
 
-// 2026-10-23：让路从「只有注入触摸的动作」扩到**所有会动屏幕的动作** —— 球那边的让位
-// 也升级成了"全部窗口一起退出命中测试"（设置里可关）。observe / set_value / launch_app
-// 不注入触摸，但它们同样是在"操控手机"，让球在这些时刻也让开，界面观感才一致。
 const BALL_GUARD_ACTIONS = new Set(["click", "swipe", "key", "observe", "set_value", "launch_app"]);
 const BALL_GUARD_ACK_TIMEOUT_MS = 500;
-// 球在跑就会每 2s 写一次心跳。没心跳 = 球没开 → 不发信号也不等 ACK（以前白等 500ms）。
 const BALL_ALIVE_FILE = "dsh-ball-alive";
 const BALL_ALIVE_TTL_MS = 8000;
-// 设置里把「全 UI 让位」关掉时，球回这个前缀的 ACK：意思是"这边放行，直接注入"。
 const BALL_GUARD_SKIP_PREFIX = "!skip:";
 
-function ballRunning(dir) {
+let ballGuardSeq = 0;   // 同一毫秒内的连续调用也要有不同 nonce（球靠"内容变了"识别新信号）
+
+/** 单引号安全转义（给 su -c 的 shell 用）。 */
+function shq(s) {
+	return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/** su 中继读：读不到（权限/不存在/su 不可用）一律 null，绝不抛。 */
+function suRead(path) {
 	try {
-		const st = fs.statSync(`${dir}/${BALL_ALIVE_FILE}`);
-		return Date.now() - st.mtimeMs < BALL_ALIVE_TTL_MS;
+		const out = execFileSync("su", ["-c", `cat ${shq(path)} 2>/dev/null || exit 3`], {
+			encoding: "utf8",
+			timeout: 1500,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return out.trim();
+	} catch (_) {
+		return null;
+	}
+}
+
+/** su 中继原子写（base64 过一层，免得 nonce / 路径里的字符被 shell 吃掉）。 */
+function suWriteAtomic(path, body) {
+	try {
+		const b64 = Buffer.from(body, "utf8").toString("base64");
+		const tmp = `${path}.tmp-su-${process.pid}`;
+		execFileSync(
+			"su",
+			["-c", `printf %s ${shq(b64)} | base64 -d > ${shq(tmp)} && mv -f ${shq(tmp)} ${shq(path)}`],
+			{ timeout: 2500, stdio: ["ignore", "ignore", "ignore"] },
+		);
+		return true;
 	} catch (_) {
 		return false;
 	}
 }
 
-let ballGuardSeq = 0;   // 同一毫秒内的连续调用也要有不同 nonce（球靠"内容变了"识别新信号）
+/** 一步 TCP 行请求：连上、发一行、读一行、断开。250ms 没结果就算不通。 */
+function gateTcp(port, line, timeoutMs = 250) {
+	return new Promise((resolve) => {
+		let done = false;
+		let buf = "";
+		let sock;
+		const finish = (v) => {
+			if (done) return;
+			done = true;
+			try { sock.destroy(); } catch (_) {}
+			resolve(v);
+		};
+		try {
+			sock = net.connect({ host: "127.0.0.1", port });
+		} catch (e) {
+			return resolve({ ok: false, reason: `connect:${e.code || e.message}` });
+		}
+		sock.setTimeout(timeoutMs, () => finish({ ok: false, reason: "timeout" }));
+		sock.on("connect", () => { try { sock.write(`${line}\n`); } catch (_) {} });
+		sock.on("data", (d) => {
+			buf += d.toString("utf8");
+			if (buf.includes("\n")) finish({ ok: true, reply: buf.trim() });
+		});
+		sock.on("error", (e) => finish({ ok: false, reason: `tcp:${e.code || e.message}` }));
+		sock.on("close", () => finish({ ok: buf.trim().length > 0, reply: buf.trim(), reason: "closed" }));
+	});
+}
 
-async function waitForBallStandDown(action, signal) {
-	const dir = resolveBallGuardDir();
-	const actPath = `${dir}/dsh-ball-act`;
-	const ackPath = `${dir}/dsh-ball-ack`;
-	// 球没在跑：连信号都不用写。ok=true 表示"不用等"，调用方不会打 [ball] 提示。
-	if (!ballRunning(dir)) return { ok: true, nonce: null, skipped: "ball-not-running" };
-	let nonce;
-	try {
-		nonce = `${Date.now()}-${process.pid}-${++ballGuardSeq}-${action}`;
-		// **必须原子写**：球每 60ms 读一次这个文件，直接 writeFileSync 是先截断再写，
-		// 球很容易读到半个 nonce → 它回的 ACK 永远对不上，表现为"球偶尔让路、偶尔不让路"。
-		// 实测就是这么翻车的（三次探针里有一次拿不到 ACK）。
-		const tmpPath = `${actPath}.tmp-${process.pid}`;
-		fs.writeFileSync(tmpPath, `${nonce}\n`, { mode: 0o666 });
-		fs.renameSync(tmpPath, actPath);
-	} catch (e) {
-		return { ok: false, reason: `write ${actPath} failed: ${e.message}` };
+/** TCP 探活：返回 { port } 或 null。 */
+async function tcpPing() {
+	for (const port of BALL_GATE_PORTS) {
+		const r = await gateTcp(port, "PING", 200);
+		if (r.ok && /^ALIVE\b/.test(r.reply)) return { port, reply: r.reply };
 	}
+	return null;
+}
+
+/** 从球的心跳里读「真实端口 + 让位开关」；任何通道读到都算。 */
+function readHeartbeat() {
+	const dirs = [...BALL_GUARD_DIRS];
+	for (const dir of dirs) {
+		try {
+			const p = `${dir}/${BALL_ALIVE_FILE}`;
+			const st = fs.statSync(p);
+			const body = fs.readFileSync(p, "utf8").trim();
+			let meta = {};
+			try { meta = JSON.parse(body); } catch (_) { meta = { ts: Number(body) || st.mtimeMs }; }
+			const ts = Number(meta.ts) || st.mtimeMs;
+			return { dir, via: "fs", meta, ageMs: Date.now() - ts };
+		} catch (_) { /* 下一条 */ }
+	}
+	for (const dir of dirs) {
+		const body = suRead(`${dir}/${BALL_ALIVE_FILE}`);
+		if (body === null || body === "") continue;
+		let meta = {};
+		try { meta = JSON.parse(body); } catch (_) { meta = {}; }
+		const ts = Number(meta.ts) || 0;
+		return { dir, via: "su", meta, ageMs: ts ? Date.now() - ts : 0 };
+	}
+	return null;
+}
+
+/** 文件通道：写 ACT（候选目录逐个试，直连 → su 中继），再等 ACK。 */
+async function fileChannelStandDown(nonce, signal) {
+	const tried = [];
+	let actedDir = null;
+	for (const dir of BALL_GUARD_DIRS) {
+		const p = `${dir}/dsh-ball-act`;
+		try {
+			const tmp = `${p}.tmp-${process.pid}`;
+			fs.writeFileSync(tmp, `${nonce}\n`, { mode: 0o666 });
+			fs.renameSync(tmp, p);
+			actedDir = dir;
+			break;
+		} catch (e) {
+			tried.push(`${dir}:${e.code || "EIO"}`);
+		}
+		if (suWriteAtomic(p, `${nonce}\n`)) { actedDir = dir; tried.push(`${dir}:via-su`); break; }
+	}
+	if (!actedDir) return { ok: false, reason: `写不进任何信号目录（${tried.join(", ") || "无候选"}）` };
+
 	const deadline = Date.now() + BALL_GUARD_ACK_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		if (signal?.aborted) return { ok: false, reason: "aborted" };
-		try {
-			const ack = fs.readFileSync(ackPath, "utf8").trim();
-			if (ack === nonce || ack === BALL_GUARD_SKIP_PREFIX + nonce) {
-				// 握手成功就把信号文件删掉：球下次重启时就不会读到一个"遗留信号"，
-				// 也就不会出现"首读把它记成已见、真信号被当成旧信号忽略"的坑。
-				try { fs.unlinkSync(actPath); } catch (_) {}
-				return ack === nonce ? { ok: true, nonce } : { ok: true, nonce, skipped: "yield-disabled" };
+		const dirs = [actedDir, ...BALL_GUARD_DIRS.filter((d) => d !== actedDir)];
+		for (const dir of dirs) {
+			let ack = null;
+			try { ack = fs.readFileSync(`${dir}/dsh-ball-ack`, "utf8").trim(); } catch (_) {}
+			if (ack === null) ack = suRead(`${dir}/dsh-ball-ack`);
+			if (ack && (ack === nonce || ack === BALL_GUARD_SKIP_PREFIX + nonce)) {
+				try { fs.unlinkSync(`${actedDir}/dsh-ball-act`); } catch (_) {}
+				suWriteAtomic(`${actedDir}/dsh-ball-act`, "");   // 清空也算清：老插件下次不会读到遗留 nonce
+				return ack === nonce
+					? { ok: true, nonce, via: "file", dir }
+					: { ok: true, nonce, via: "file", dir, skipped: "yield-disabled" };
 			}
-		} catch (_) { /* 球还没写 ACK */ }
+		}
 		await new Promise((r) => setTimeout(r, 20));
 	}
-	return { ok: false, reason: "no ack within timeout" };
+	return { ok: false, nonce, reason: `文件通道 ${actedDir} 500ms 内没有 ACK` };
+}
+
+/**
+ * 注入前请球让路。返回 { ok, nonce, via, reason? }：
+ *   ok=true  → 球已确认让路（或让位开关关着，回 !skip），调用方直接注入；
+ *   ok=false → 没拿到确认，动作照发（fail-open），但**一定会带一行 [ball] 提示**，
+ *              并说明三条通道各是怎么失败的 —— 换机型排错就靠这一行。
+ */
+async function waitForBallStandDown(action, signal) {
+	const nonce = `${Date.now()}-${process.pid}-${++ballGuardSeq}-${action}`;
+
+	// ① TCP（主通道）
+	const ping = await tcpPing();
+	if (ping) {
+		const r = await gateTcp(ping.port, `YIELD ${nonce}`, 400);
+		if (r.ok && (r.reply === `OK ${nonce}` || r.reply === BALL_GUARD_SKIP_PREFIX + nonce)) {
+			return r.reply === `OK ${nonce}`
+				? { ok: true, nonce, via: `tcp:${ping.port}` }
+				: { ok: true, nonce, via: `tcp:${ping.port}`, skipped: "yield-disabled" };
+		}
+		return { ok: false, nonce, reason: `tcp:${ping.port} YIELD 未确认（${r.reply || r.reason || "无回复"}）` };
+	}
+
+	// ② 文件 / su 中继（老 APK、vd CLI 补丁、以及球没开 TCP 端口的情况）
+	const hb = readHeartbeat();
+	if (!hb) {
+		return {
+			ok: false,
+			nonce,
+			reason: `tcp 端口 ${BALL_GATE_PORTS.join("/")} 都没人应答，文件心跳在 ${BALL_GUARD_DIRS.length} 个候选目录里也读不到`
+				+ `（常见原因：球没在跑 / 目标机没装本插件 / DSH 以普通用户跑且没有 su 中继 / 球的 APK 还是老版本没有心跳）`,
+		};
+	}
+	if (hb.ageMs > BALL_ALIVE_TTL_MS) {
+		return { ok: false, nonce, reason: `心跳太旧（${Math.round(hb.ageMs / 1000)}s，${hb.dir}，via ${hb.via}）：球可能刚被杀` };
+	}
+	return fileChannelStandDown(nonce, signal);
+}
+
+/** 动作发完之后立刻放行（TCP 通道才有效；文件通道靠 ACT_HOLD_MS 自然过期）。 */
+async function releaseBallStandDown(nonce) {
+	if (!nonce) return;
+	for (const port of BALL_GATE_PORTS) {
+		const r = await gateTcp(port, `RELEASE ${nonce}`, 200);
+		if (r.ok && /^RELEASED\b/.test(r.reply)) return;
+	}
 }
 
 function planScreenshotDelivery(width, height) {
@@ -200,7 +359,7 @@ const MOBILE_AGENT_GUIDANCE = `<mobile_agent_guidance>
 ### 1. Closed-Loop Verification
 - Every physical action (\`click\`, \`swipe\`, \`set_value\`, \`key\`, \`launch_app\`) automatically captures and returns the updated accessibility tree. Pass \`screenshot=true\` to attach an image.
 - Never perform blind consecutive actions without verifying the updated state. After each action, inspect the returned UI tree or image to confirm the intended transition (e.g., page navigated, dialog dismissed, field populated) before deciding your next step.
-- A floating overlay ball may be running on this device, together with its own sub-panels (text layer, hold-menu cards, input row, approval panel). Before any screen action (\`click\`/\`swipe\`/\`key\`/\`observe\`/\`set_value\`/\`launch_app\`) this plugin asks that UI to stand down — every one of its windows stops accepting touches, so your injected gesture always reaches the app underneath. That handshake adds ~60-100ms and is expected; do not retry an action just because it took slightly longer. If a result contains a \`[ball]\` line, the UI did not confirm in time and your gesture may have been swallowed by it. If the user turned the stand-down switch off in the ball settings, the handshake is skipped silently.
+- A floating overlay ball may be running on this device, together with its own sub-panels (text layer, hold-menu cards, input row, approval panel). Before any screen action (\`click\`/\`swipe\`/\`key\`/\`observe\`/\`set_value\`/\`launch_app\`) this plugin asks that UI to stand down over a localhost socket (falling back to signal files), so every one of its windows stops accepting touches and your injected gesture reaches the app underneath. That handshake adds ~10-100ms and is expected; do not retry an action just because it took slightly longer. If a result contains a \`[ball]\` line, the UI did not confirm and the reason names the channel that failed — your gesture may have been swallowed by it, so prefer element targets or re-issue the action once. If the user turned the stand-down switch off in the ball settings, the handshake is skipped and reported as such.
 
 ### 2. Grounding Priority: Element Target vs. Coordinates
 - Strongly prefer element-targeted interactions using \`target='<id>'\` from the accessibility dump. Target IDs are resilient to resolution differences, orientation changes, layout shifts, and scrolling.
@@ -460,14 +619,19 @@ export function apply(ctx) {
 						// 注入触摸前先请悬浮球让路（详见 waitForBallStandDown 的注释）。
 						// 只有真的会注入触摸的动作要等，observe/set_value/launch_app 不需要。
 						let ballGuard = "";
+						let ballGuardNonce = null;
 						if (BALL_GUARD_ACTIONS.has(args.action)) {
 							const guard = await waitForBallStandDown(args.action, signal);
+							ballGuardNonce = guard?.nonce || null;
 							if (!guard.ok && guard.reason !== "aborted") {
+								// fail-open 但**绝不静默**：换机型排错全靠这一行（哪条通道、怎么失败的）。
 								ballGuard = `\n\n[ball] 让路确认未收到（${guard.reason}）：动作已照发，若这次触摸没落到目标上，多半是悬浮球吃掉了手势。`;
 							}
 						}
 						try {
 							const res = await postJson("/api/action", args, signal);
+							// 动作已经发完：TCP 通道立刻放行（文件通道靠 ACT_HOLD_MS 自然过期）
+							await releaseBallStandDown(ballGuardNonce);
 							if (!res.success) {
 								return { message: `Action '${args.action}' failed: ${res.message || "unknown error"}${ballGuard}` };
 							}
@@ -485,6 +649,7 @@ export function apply(ctx) {
 								message: `[${res.message}]\n\n${res.data || ""}${ballGuard}`,
 							};
 						} catch (err) {
+							await releaseBallStandDown(ballGuardNonce);
 							rethrowIfAborted(signal, err);
 							return { message: `Execution error (${args.action}): ${err.message}` };
 						}
