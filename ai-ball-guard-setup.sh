@@ -72,7 +72,7 @@ case "$HOME" in
   /data/data/com.termux/files/home) ok "HOME 是标准 Termux 路径" ;;
   *) bad "HOME=$HOME 不是标准路径（App 读 token 会失败，球的助手功能不完整）" ;;
 esac
-for c in git node nc pnpm; do have "$c" && ok "有 $c" || bad "缺 $c（pkg install ${c/nc/netcat-openbsd}）"; done
+for c in git node nc pnpm python3; do have "$c" && ok "有 $c" || bad "缺 $c（pkg install ${c/nc/netcat-openbsd}）"; done
 if is_root; then ok "root 可用（su 正常）"; else inf "没有 root：能装插件，但起服务/读内部目录会退化"; fi
 if [ -f "$APK" ]; then ok "仓库里有 APK（$(du -h "$APK" | cut -f1)）"; else bad "缺 $APK（这个仓库没同步全？先 git pull）"; fi
 

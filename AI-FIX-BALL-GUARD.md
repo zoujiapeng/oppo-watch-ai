@@ -82,7 +82,7 @@ bash ~/oppo-watch-ai/android/tools/ball-gate-doctor.sh | tail -3
 
 ### F0 · `缺 <工具>`
 ```bash
-pkg install git nodejs netcat-openbsd pnpm        # 缺哪个装哪个；nc 的包名是 netcat-openbsd
+pkg install git nodejs netcat-openbsd pnpm python  # 缺哪个装哪个；nc 的包名是 netcat-openbsd
 ```
 
 ### F1 · 插件补丁/注册失败（脚本第 ② 步）
