@@ -971,8 +971,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx * k, hy * k);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uCenter"), cx, cy);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"), refraction * master * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"), band * master * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"), refraction * k);   // 亮度不再乘 master：小球不该把折射光一起调暗
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"), band * k);               // 同上：Siri 波/处理中动画的亮度与球体大小解耦
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), master * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), dome);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), aberration);
