@@ -1919,7 +1919,8 @@ public class FloatingBallService extends Service {
      * 无障碍服务没连上时退回普通系统悬浮窗（那时"让开"必须把窗口挪开，见 applyBallTouchability）。
      */
     private int overlayType() {
-        if (!a11yOverlayBroken && BallA11yService.connected && a11yOverlayAllowed()) {
+        if (!a11yOverlayBroken && BallA11yService.connected
+                && BallA11yService.overlayWm != null && a11yOverlayAllowed()) {
             return WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
         }
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -8246,7 +8247,11 @@ public class FloatingBallService extends Service {
 
     // ───────────────────────── 悬浮窗 ─────────────────────────
     private void setupOverlay() {
-        wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        // 优先用"无障碍窗口 Context"里的 WindowManager：它自带 token，能让
+        // TYPE_ACCESSIBILITY_OVERLAY 被 WMS 接受（受信任 overlay → 触摸不被遮挡拦截）。
+        WindowManager a11yWm = BallA11yService.overlayWm;
+        wm = a11yWm != null ? a11yWm : (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        Log.i("FloatingBall", "setupOverlay: wm=" + (a11yWm != null ? "a11y-window-context" : "app"));
         DisplayMetrics dm = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(dm);
         screenW = dm.widthPixels;

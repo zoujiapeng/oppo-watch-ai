@@ -7,68 +7,57 @@
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
-## 2026-10-29（续）：为什么澎湃/HyperOS 不让球"当无事发生"——根因已查清
+## 2026-10-29（续）：让球"当无事发生"到底卡在哪 —— 已解决
 
-目标：AI 点击时**玻璃一个像素都不动**，下面的 App 照常被操控。真机上三条路都试了，
-结论是"App 侧无解，只能系统级 hook"，证据如下。
+目标：AI 点击时**玻璃一个像素都不动**，下面的 App 照常被操控。结论先说：
+**卡在 `TYPE_ACCESSIBILITY_OVERLAY` 缺 window token**；补上 token 之后，澎湃也会把窗口
+认成**受信任 overlay**，遮挡拦截不再生效，球只需要把触摸区置空——窗口一动不动。
 
-### 1. `TYPE_ACCESSIBILITY_OVERLAY`（受信任 overlay）——被 WMS 挡在 token 上
+### 1. 关键证据链
+
+| 尝试 | 结果 |
+|---|---|
+| `TYPE_APPLICATION_OVERLAY`（普通系统悬浮窗） | 会被 WMS 收下，但**不受信任**：跨 App 注入被"触摸穿过不受信任悬浮窗"整串丢弃（同 App 的目标不拦——以前的验收一直被这条盖住） |
+| `TYPE_ACCESSIBILITY_OVERLAY`（裸加） | `W WindowManager: Attempted to add Accessibility overlay window with unknown token null. Aborting.` → 要求 token |
+| 同上 + `createWindowContext(int, Bundle)` | `UnsupportedOperationException: Tried to obtain display from a Context not associated with one` → 服务的 Context 没绑 display |
+| **同上 + `createWindowContext(Display, int, Bundle)`** | ✅ 通过。`dumpsys input` 里窗口变成 `inputConfig=... TRUSTED_OVERLAY` |
+| `PRIVATE_FLAG_TRUSTED_OVERLAY`（0x20000000） | ❌ `SecurityException: DisplayPolicy: uid ... does not have INTERNAL_SYSTEM_WINDOW`（该权限 `prot=signature`，priv-app 白名单也没用），且是在 addWindow 里抛，会把进程带崩 → 代码已改成先 `checkSelfPermission` |
+
+### 2. 所以"一加 9 Pro（同样 Android 13）为什么可以"
+
+它的 ROM 沿用了 AOSP 的宽松行为：无障碍服务直接加 `TYPE_ACCESSIBILITY_OVERLAY` 就收，
+窗口天生是受信任 overlay，遮挡拦截对它不生效 —— 球原地不动也能点中。
+澎湃在这条路上多要了一个 token，我们没给 → 掉回普通 overlay → 被拦 → 只能挪球。
+
+### 3. 现在的实现
+
+`BallA11yService.onServiceConnected()` 里：
+```java
+Display d = DisplayManager.getDisplay(DEFAULT_DISPLAY);
+Context ctx = createWindowContext(d, TYPE_ACCESSIBILITY_OVERLAY, null);   // 带 token
+overlayWm = (WindowManager) ctx.getSystemService(WINDOW_SERVICE);
 ```
-W WindowManager: Attempted to add Accessibility overlay window with unknown token null.  Aborting.
-BadTokenException: Unable to add window -- token null is not valid; is your activity running?
+`FloatingBallService.setupOverlay()` 优先用这个 `overlayWm` 加所有悬浮窗；
+`overlayType()` 在有 `overlayWm` 时返回 `TYPE_ACCESSIBILITY_OVERLAY`；
+`trustedOverlayNow()` 为真 → **让开时只把触摸区置空，窗口不挪、不隐藏**。
+
+真机实测（系统设置，点在球正中央 540,630）：
 ```
-这种窗口必须带一个由系统无障碍框架签发的 `WindowToken`；App 手里没有，`null` 直接被 abort。
-（无障碍服务开着也没用：`dumpsys accessibility` 里服务已 bound，照样 abort。）
-
-### 2. `PRIVATE_FLAG_TRUSTED_OVERLAY`（0x20000000）——被 DisplayPolicy 挡在权限上
+D0: blind=false parked=false glassParked=false trusted=1
+D1: blind=false parked=false glassParked=false trusted=1  nonce=sh-...   ← 走完了门控
+界面：设置首页  →  小米账号（点中了）
 ```
-E AndroidRuntime: java.lang.SecurityException: DisplayPolicy: uid 10286
-    does not have android.permission.INTERNAL_SYSTEM_WINDOW.
-```
-而这条权限本身：
-```
-Permission [android.permission.INTERNAL_SYSTEM_WINDOW] ... prot=signature
-```
-**signature 级** —— 只有平台签名的 App 才可能持有，`priv-app` 白名单也救不了（不是 privileged 级）。
-（顺带：这个 SecurityException 是在 `addWindow` 里抛的，会直接把进程带崩 —— 所以代码里
-`markTrustedOverlay()` 现在会先 `checkSelfPermission`，没权限绝不打这个标志。）
+即：**跨 App 点中了，球一像素没动、没闪、没隐藏**。
 
-### 3. 于是遮挡拦截必然命中
-`dumpsys input` 里我们的窗口是 `touchOcclusionMode=USE_OPACITY`，系统窗口才是
-`TRUSTED_OVERLAY`。InputDispatcher 的规则是"触摸穿过**不受信任**的悬浮窗就整串丢弃"：
-- 同 App（球自己的设置卡片）：不拦 —— 老验收一直"通过"就是被这条盖住了；
-- 跨 App：一定拦。实测：玻璃不挪 → 点击没反应；玻璃挪走 → 立刻点中。
-- 试过的旁路（都无效）：窗口 alpha=0.99、触摸区置空、`injectInputEvent(event, mode, targetUid)`
-  定向注入（事件确实不再落到球上，但目标窗口仍然被判定为"被遮挡"，照样丢）。
+### 4. 附带影响
 
-### 4. 唯一剩下的路（需要 root + 重启，属于"要不要为它上一个系统模块"的取舍）
-LSPosed/Zygisk 模块 hook `com.android.server.wm.WindowState#getInputInfo()`，对
-`com.glslplayground.app` 的窗口补一句 `info.setTrustedOverlay(true)`（十几行 Java）。
-打完这个补丁，球就永久是"受信任 overlay"：AI 点什么都不用让开，玻璃真正零变化。
-（本机当前 **没有装 LSPosed**；Zygisk 是开的：`ro.dalvik.vm.native.bridge=libzygisk.so`。）
-
-### 4.5 为什么"一加 9 Pro 就可以"
-
-"触摸穿过不受信任悬浮窗就丢弃"这条规则是 **Android 12（S）** 才有的
-（`Settings.Secure.block_untrusted_touches` / InputDispatcher 的 touch occlusion）。
-一加 9 Pro 出厂是 Android 11（ColorOS/OxygenOS 11），**根本没有这条规则** ——
-球停在原地、任何 overlay 都挡不住注入，当然"什么都不用做"。
-
-这台是 Android 13（HyperOS 13 底包），规则默认开；而且实测：
-```
-settings put secure block_untrusted_touches 0   →  依然被丢弃
-```
-即小米把这条拦截硬编码了，连系统设置都关不掉（`dumpsys input` 里也找不到可关的开关）。
-
-顺手做了个自适应：App 每次判断让开方式时读一次 `block_untrusted_touches`，
-**读到 0 就只置空触摸区、窗口一动不动**（等价于 ColorOS 上的效果）。所以万一哪天
-（比如重启后）系统认了这个设置，球会自动变成"零闪烁"，不用改代码。
-
-### 5. 在那之前，App 侧能做到的"最接近无事发生"
-- 机器人的触摸**不驱动任何手势**（不拖球、不弹四区、不弹搜索框）—— 已经做到；
-- **只有点真的落在球上**才让开（点球外 111ms、零握手、零位移）—— 已经做到；
-- 让开的停留时间砍到最短：`GATE_SETTLE_MS=90`、点击的 `DONE_GRACE_TAP_MS=80`
-  （滑动仍是 300ms，避免掐断还在路上的 MOVE/UP）→ 实测"点球上"整条 375ms，肉眼是"闪一下"。
+- 无障碍服务必须保持启用（`settings put secure enabled_accessibility_services
+  com.glslplayground.app/com.glslplayground.app.BallA11yService`）。它只为拿"受信任窗口"资格，
+  不读屏幕内容、不收事件。
+- 开着这个服务时，`uiautomator dump` 会和它抢 UiAutomation 槽位（报
+  `UiAutomationService already registered`）。vd 的 `observe` 不受影响（实测 38 节点正常）。
+  自己写脚本要 dump 界面时，先 `settings put secure enabled_accessibility_services null`。
+- 服务没启用 / 被系统踢掉时自动退回：普通 overlay + 挪窗口让开（会闪一下），功能不丢。
 
 ## 2026-10-29：防误触 v2（球的触摸来源判定 + 按需让开）
 
