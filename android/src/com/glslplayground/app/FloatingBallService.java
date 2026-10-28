@@ -177,6 +177,7 @@ public class FloatingBallService extends Service {
     private long lastAckAt = 0;
     private long lastDiagAt = 0;
     private boolean proxyParked = false;           // 代理窗口已被缩成 1×1 挪到屏外
+    private boolean lastActWasDrag = false;   // 这一下是“拖”还是“点”（拖才需要整窗让开）
     private long blindStartMs = 0;                 // 让开动作开始的时间（ACK 要等窗口稳定再回）
     private boolean glassParked = false;           // 玻璃窗也被挪到屏外（注入那一刻，避免遮挡判定）
     private int glassSavedX = 0, glassSavedY = 0;
@@ -2654,7 +2655,7 @@ public class FloatingBallService extends Service {
             proxyParked = false;
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
-        applyGlassParkRaw(agentBlind && legacyGlassPark());
+        applyGlassParkRaw(agentBlind && (legacyGlassPark() || lastActWasDrag));
     }
 
     /**
@@ -2670,7 +2671,7 @@ public class FloatingBallService extends Service {
 
     private void applyGlassParkRaw(boolean on) {
         if (glView == null || params == null || wm == null) return;
-        if (on && !legacyGlassPark()) return;          // 默认零闪烁
+        if (on && !(legacyGlassPark() || lastActWasDrag)) return;   // 只有“拖”才整窗让开
         if (on == glassParked) return;
         try {
             if (on) {
@@ -2763,10 +2764,13 @@ public class FloatingBallService extends Service {
             line = line.trim();
             if (line.isEmpty()) continue;
             if (line.startsWith("ACT")) {
-                final String nonce = line.length() > 3 ? line.substring(3).trim() : "";
+                String[] actParts = line.substring(3).trim().split("\\s+");
+                final String nonce = actParts.length > 0 ? actParts[0] : "";
+                final boolean actDrag = actParts.length > 1 && actParts[1].startsWith("drag");
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                 main.post(new Runnable() {
                     @Override public void run() {
+                        lastActWasDrag = actDrag;
                         beginAgentWindow(nonce);
                         latch.countDown();
                     }
@@ -2801,20 +2805,32 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 这一下注入完了：立刻把触摸区还给球。 */
+    /**
+     * 这一下注入完了：把触摸区还给球 —— 但留一点尾巴。
+     *
+     * 触摸/滑动的注入是异步的：DONE 到达时最后几个 MOVE/UP 可能还在路上，
+     * 代理窗口这时候回来会把正在进行的滑动手势掐断（表现为"拖不动前台"）。
+     * 所以延后 DONE_GRACE_MS 再还原；点击也只多藏这一小会儿，肉眼看不出来。
+     */
     private void endAgentWindow() {
         blindUntilMs = 0;
-        if (agentBlind) {
-            agentBlind = false;
-            lastBlindApplied = false;
-            applyBallTouchability();
-            Log.i("FloatingBall", "gate(DONE) -> 恢复触摸区");
-        }
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (System.currentTimeMillis() < blindUntilMs) return;   // 期间又来了新的 ACT
+                if (!agentBlind) return;
+                agentBlind = false;
+                lastBlindApplied = false;
+                applyBallTouchability();
+                Log.i("FloatingBall", "gate(DONE) -> 恢复触摸区");
+            }
+        }, DONE_GRACE_MS);
     }
 
     private static final String SHELL_DIR = "/data/local/tmp";
     /** 让开之后要等一帧多，窗口位置对 InputDispatcher 才真的生效（不等就会丢点击）。 */
-    private static final long GATE_SETTLE_MS = 45;
+    private static final long GATE_SETTLE_MS = 120;
+    /** DONE 之后再等一小会儿才还原，避免掐断还在路上的滑动。 */
+    private static final long DONE_GRACE_MS = 300;
 
     /** 两个候选里取修改时间更新的那个（都不存在就返回第一个）。 */
     private static File freshest(File a, File b) {
@@ -2832,6 +2848,13 @@ public class FloatingBallService extends Service {
         File act = freshest(new File(dir, F_ACT), new File(SHELL_DIR, F_ACT));
         String nonce = (act != null && act.exists()) ? readSmallString(act, 64) : "";
         if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
+            String[] np = nonce.split("\\s+");
+            if (np.length > 1) {
+                lastActWasDrag = np[1].startsWith("drag");
+                nonce = np[0];
+            } else {
+                lastActWasDrag = false;
+            }
             lastActNonce = nonce;
             blindStartMs = now;
             blindUntilMs = now + AGENT_MAX_MS;
