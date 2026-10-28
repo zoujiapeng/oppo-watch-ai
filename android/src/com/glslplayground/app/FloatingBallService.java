@@ -2904,6 +2904,12 @@ public class FloatingBallService extends Service {
                 long age = renderer != null ? now - renderer.lastFrameAtMs : -1;
                 writeAtomic(new File(dir, "ball-diag"), "blind=" + want
                         + " parked=" + proxyParked
+                        + " glassParked=" + glassParked
+                        + " agent=" + agentBlind
+                        + " kind=" + (lastActWasDrag ? "drag" : "tap")
+                        + " fullscreen=" + glassFullscreen
+                        + " search=" + searchActive
+                        + " menu=" + menuShown
                         + " nonce=" + (nonce.isEmpty() ? "-" : nonce)
                         + " ageMs=" + age + "\n");
             } catch (Throwable ignored) { }
