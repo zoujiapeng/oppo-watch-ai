@@ -999,7 +999,7 @@ public class FloatingBallService extends Service {
         if (renderer != null) renderer.panelMode = 0f;   // 交还给普通球（纯黑区）
         hideApprovalWindows();
         // 收球动画：这一次才允许动 Siri 那套目标（面板已不再需要它们）
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         main.postDelayed(new Runnable() {
             @Override public void run() { finishApprovalClose(); }
         }, 280);
@@ -2204,7 +2204,9 @@ public class FloatingBallService extends Service {
     private float textMeasuredPx = -1f, textTopGap = 0f;
     private int textMeasuredMaxW = -1, textMeasuredW = -1;
     private float aMaster = 1f, aHalfX = 0.30f, aHalfY = 0.30f, aCorner = 1f;
-    private float tMaster = 1f, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
+    /** 用户在设置页选的「球体大小」（1.0=原始）。任何“回到初始形状”都要用它，别写死 1f。 */
+    private volatile float userMaster = 1f;
+    private float tMaster = userMaster, tHalfX = 0.30f, tHalfY = 0.30f, tCorner = 1f;
     private float siriTextPx;
     private long siriTickLast = 0;
     /** 几何缓动时间常数（秒）：生长 0.06 跟手，收起 0.22 从容。 */
@@ -2404,7 +2406,7 @@ public class FloatingBallService extends Service {
                 minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
             }
             // 初始形态必须是"原来的水晶球"，避免用默认值(0.30/0.30 → 圆形)一闪
-            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
+            tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner;
             if (siriText == null) setupSiriText();
             measureSiriTargets(siriStr);
@@ -3313,7 +3315,7 @@ public class FloatingBallService extends Service {
         releasingHold = true;
         holdHalfX = holdHalfY = 0f;
         siriEaseTau = 0.22f;
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         if (renderer != null) {
             renderer.waveInGlass = 0f;
             renderer.orbOffset = renderer.orbOffsetDefault;
@@ -3703,7 +3705,7 @@ public class FloatingBallService extends Service {
         forceHideAllText();          // ★ 先隐藏一切文字
         if (!textHold) {
             // 没在保持：只需把几何落回初始形态（可能是文字被清空后残留的大几何）
-            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+            tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             float bb = winSize * 0.9f;
             updateSiriWindow(bb * minHalfX, bb * minHalfY);
             return;
@@ -3715,7 +3717,7 @@ public class FloatingBallService extends Service {
         Log.i("FloatingBall", "text hold: off（本轮结束，回初始圆球）");
         // 直接落回初始形态，**不要**拿残留文字再量一遍 —— 那会量出「按最后那段文字算的方形」
         // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字已在方法开头彻底隐藏。
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         if (renderer != null) renderer.waveInGlass = 0f;   // 球底那截波跟着收掉
         if (glView != null) {                              // 回最小形态 → 恢复全分辨率渲染
             glassBufW = glassBufH = -1;
@@ -3732,7 +3734,7 @@ public class FloatingBallService extends Service {
         if (tHalfY < holdHalfY) tHalfY = holdHalfY;
         tCorner = Math.min(tCorner, holdCorner);      // 更小 = 更方
         if (tBlack < holdBlack) tBlack = holdBlack;
-        tMaster = 1f;
+        tMaster = userMaster;
         float base = winSize * 0.9f;
         updateSiriWindow(base * tHalfX, base * tHalfY);
     }
@@ -3780,7 +3782,7 @@ public class FloatingBallService extends Service {
                 applyHoldGeometry();
                 return;
             }
-            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
+            tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             tBlack = 0f;
             float b0 = winSize * 0.9f;
             updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
@@ -3858,7 +3860,7 @@ public class FloatingBallService extends Service {
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
-        tMaster = 1f;
+        tMaster = userMaster;
 
         // 本轮出现过文字 → 进入保持，并累计最大几何（保持期间只增不减）
         if (releasingHold) {
@@ -3934,7 +3936,7 @@ public class FloatingBallService extends Service {
         if (!textHold && (winW > restW + dp(8) || winH > restH + dp(8))) {
             Log.i("FloatingBall", "window audit: 球已回最小形态，窗口 " + winW + "x" + winH
                     + " → " + restW + "x" + restH + "（触摸有效区域跟着缩）");
-            tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+            tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             updateSiriWindow(base * minHalfX, base * minHalfY);
         }
     }
@@ -3984,7 +3986,7 @@ public class FloatingBallService extends Service {
             // 新一轮提问）随时可能调 measureSiriTargets() 把 tHalf* 改成小球尺寸，
             // 这里不许它影响面板 —— 面板撤走时才把控制权交还（approvalShown=false）。
             if (approvalShown) {
-                tMaster = 1f;
+                tMaster = userMaster;
                 tHalfX = aprHalfX; tHalfY = aprHalfY;
                 tCorner = aprCorner; tBlack = aprBlack;
             }
@@ -5961,7 +5963,7 @@ public class FloatingBallService extends Service {
         }
         if (glView != null) glView.setAlpha(1f);         // 退出状态 3：玻璃层回来
         // 回到球：几何/文字按当前状态重排（和搜索层收起时同一套收尾）
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
         if (siriEnabled) {
             float base = winSize * 0.9f;
@@ -6007,7 +6009,7 @@ public class FloatingBallService extends Service {
         if (!glassFullscreen) return;
         glassFullscreen = false;
         if (renderer != null) renderer.zoneMode = false;
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
         if (params != null) {
             params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED;
@@ -7331,7 +7333,7 @@ public class FloatingBallService extends Service {
         glassFullscreen = false;                       // ★ 面板标志不清，updateSiriWindow 会一直早退 → 球窗停在全屏、样式全变
         if (renderer != null) { renderer.searchMode = false; renderer.sValid = 0f; }
         float base = winSize * 0.9f;
-        tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
+        tMaster = userMaster; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
         aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED;
         updateSiriWindow(base * minHalfX, base * minHalfY);   // 窗口从整屏收回球窗
@@ -8046,6 +8048,7 @@ public class FloatingBallService extends Service {
         glView.queueEvent(new Runnable() {
             @Override public void run() {
                 renderer.master     = f(o, "master", renderer.master);
+                userMaster          = renderer.master;
                 renderer.posX       = f(o, "posX", renderer.posX);
                 renderer.posY       = f(o, "posY", renderer.posY);
                 renderer.halfX      = f(o, "halfX", renderer.halfX);
