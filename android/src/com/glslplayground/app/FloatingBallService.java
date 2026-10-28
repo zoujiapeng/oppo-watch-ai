@@ -169,6 +169,7 @@ public class FloatingBallService extends Service {
     private static final String F_ACK = "dsh-ball-ack";
     private static final String F_DONE = "dsh-ball-done";
     private static final long AGENT_MAX_MS = 1200;
+    private static final long GATE_ACT_TTL_MS = 10000;   // 超过 10s 的 ACT 当残留，不认
     private static final long GATE_POLL_MS = 40;
     private volatile boolean agentBlind = false;   // 正在让开（只在这一下触摸注入期间）
     private long blindUntilMs = 0;
@@ -185,6 +186,27 @@ public class FloatingBallService extends Service {
     private boolean lastBlindApplied = false;      // 上一次真正下发的"别接触摸"状态
     private long lastProxySyncAt = 0;              // 上一次对账代理窗口几何
     private long surfaceReadyAtMs = 0;             // GL surface 就绪时刻（抓帧看门狗用它判"首帧一直没来"）
+
+    // ── 触摸来源判定：这一次触摸是「人」还是「机器」──────────────────────────────
+    // 注入的触摸（input / uiautomator / InputManager.injectInputEvent / vd 自己的注入器）
+    // 带的 deviceId 不是任何真实触摸屏的 id。把真实触摸屏的白名单记下来，不在表里的一律当"机器"：
+    //   · 不执行任何用户手势（不拖球、不进状态 3、不弹搜索框）—— 以前 agent 一点，球就跑了；
+    //   · 立刻自动让开 SYNTHETIC_DUCK_MS —— 门控全挂了也能自愈，下一拍就能穿过去。
+    private final java.util.HashSet<Integer> realTouchDevices = new java.util.HashSet<>();
+    private volatile long syntheticDuckUntil = 0;
+    private volatile int swallowedCount = 0;       // 机器人的触摸落在球上、被兜住的累计次数
+    private volatile long lastSyntheticAt = 0;
+    private static final long SYNTHETIC_DUCK_MS = 1500;
+
+    // ── 「让开」的新实现：改可触摸区域（Region），窗口一个像素都不动 ──────────────
+    // 老办法是把窗口缩成 1×1 挪到屏外再挪回来：每次点击 8~12 次 updateViewLayout，
+    // 会重建缓冲（玻璃发白）、还会抖。改 Region 只走一次 traversal，肉眼看不到。
+    private volatile boolean blindNow = false;     // 当前是否处于"让开"状态
+    private boolean regionMode = false;            // 反射挂 InternalInsets 监听成功（能改 Region）
+    private boolean a11yOverlayBroken = false;     // 受信任 overlay 被系统拒过（退回普通悬浮窗）
+    private final java.util.Set<View> regionInstalled =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<View, Boolean>());
+    private long lastRectAt = 0;
 
     private int screenW, screenH, winSize, winW, winH;
     private int resultCode;
@@ -1773,10 +1795,41 @@ public class FloatingBallService extends Service {
 
     // ── 窗口 ──────────────────────────────────────────────────────────
 
-    private WindowManager.LayoutParams overlayParams(int w, int h, int flags) {
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+    /**
+     * 悬浮窗类型。
+     *
+     * 优先 {@code TYPE_ACCESSIBILITY_OVERLAY}（**受信任** overlay）：Android 12+ 的
+     * InputDispatcher 有一条 tap-jacking 拦截 —— 触摸要"穿过"一个**不受信任**的悬浮窗
+     * 落到别的 App 上时会被整串丢弃（实测：点在球上的位置去点系统设置，完全没反应；
+     * 目标窗口和悬浮窗同属一个 App 时例外）。受信任 overlay 不受这条规则约束，
+     * 于是球可以**原地不动、只把触摸区置空**就让点击穿过去，既不用挪窗口（会闪）也不用把球藏起来。
+     *
+     * 无障碍服务没连上时退回普通系统悬浮窗（那时"让开"必须把窗口挪开，见 applyBallTouchability）。
+     */
+    private int overlayType() {
+        if (!a11yOverlayBroken && BallA11yService.connected && a11yOverlayAllowed()) {
+            return WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+        }
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
+    }
+
+    /** 受信任 overlay 模式是否允许（`files/glasspark` = 强制回老路，排查用）。 */
+    private boolean a11yOverlayAllowed() {
+        if (legacyGlassPark()) return false;
+        try { return prefs().getBoolean("ball_a11y", true); } catch (Throwable t) { return true; }
+    }
+
+    /** 当前窗口是不是"受信任"的（决定让开要不要挪窗口）。 */
+    private boolean trustedOverlayNow() {
+        return BallA11yService.connected && a11yOverlayAllowed() && glView != null
+                && params != null
+                && params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+    }
+
+    private WindowManager.LayoutParams overlayParams(int w, int h, int flags) {
+        int type = overlayType();
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(w, h, type, flags, PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.START;
         return p;
@@ -2458,9 +2511,7 @@ public class FloatingBallService extends Service {
                 mdScrollAt = android.os.SystemClock.uptimeMillis();
             }
         });
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
+        int type = overlayType();
         siriParams = new WindowManager.LayoutParams(
                 2, 2, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -2555,9 +2606,7 @@ public class FloatingBallService extends Service {
         View v = new View(this);
         v.setBackgroundColor(0x00000000);      // 透明，但可触摸
         v.setClickable(true);
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
+        int type = overlayType();
         siriTouchParams = new WindowManager.LayoutParams(
                 2, 2, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -2586,6 +2635,8 @@ public class FloatingBallService extends Service {
             @Override public boolean onTouch(View view, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        // 机器人的触摸不执行任何手势（钉住/解除/拖球都不做）
+                        if (isSyntheticTouch(e)) { onSyntheticDown(e); return true; }
                         touchDownRawX = e.getRawX(); touchDownRawY = e.getRawY();
                         touchStartX = params.x; touchStartY = params.y;
                         touchDragging = false;
@@ -2628,17 +2679,180 @@ public class FloatingBallService extends Service {
         }
     }
 
+    // ══ 触摸来源：这一次触摸是「人」还是「机器」═══════════════════════════════
+
+    /** 记下真实触摸屏的 deviceId 白名单（注入事件的 deviceId 不在里面）。 */
+    private void refreshTouchDevices() {
+        realTouchDevices.clear();
+        try {
+            for (int id : android.view.InputDevice.getDeviceIds()) {
+                android.view.InputDevice d = android.view.InputDevice.getDevice(id);
+                if (d == null) continue;
+                int src = d.getSources();
+                if ((src & android.view.InputDevice.SOURCE_TOUCHSCREEN) != 0
+                        || (src & android.view.InputDevice.SOURCE_STYLUS) != 0) {
+                    realTouchDevices.add(id);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "refreshTouchDevices failed: " + t);
+        }
+        // 万一 0 号就是主触摸屏 → 判据失效。宁可漏判机器，也不能把真手指当机器（球会点不动）。
+        if (realTouchDevices.contains(0)) {
+            Log.w("FloatingBall", "输入设备 0 是触摸屏 → 触摸来源判定关闭（区分不了人/机器）");
+            realTouchDevices.clear();
+        }
+        Log.i("FloatingBall", "真实触摸设备 = " + realTouchDevices);
+    }
+
+    /** 这一次触摸是不是注入的（机器人）。白名单为空时一律当"人"。 */
+    private boolean isSyntheticTouch(MotionEvent e) {
+        if (realTouchDevices.isEmpty()) return false;
+        return !realTouchDevices.contains(e.getDeviceId());
+    }
+
+    /**
+     * 机器人的触摸落在球上：**不做任何用户手势**，并且立刻自动让开一段。
+     *
+     * 这一层不依赖任何协议：即使门控 socket、包装器、插件全部失联，
+     * 也只会"少点中一下"，不会出现"点一下球被拖走 / 弹出四区 / 蹦出搜索框"。
+     */
+    private void onSyntheticDown(MotionEvent e) {
+        swallowedCount++;
+        lastSyntheticAt = System.currentTimeMillis();
+        syntheticDuckUntil = lastSyntheticAt + SYNTHETIC_DUCK_MS;
+        Log.i("FloatingBall", "synthetic touch dev=" + e.getDeviceId()
+                + " @" + Math.round(e.getRawX()) + "," + Math.round(e.getRawY())
+                + " → 不执行手势，自动让开 " + SYNTHETIC_DUCK_MS + "ms");
+        applyBallTouchability();
+        lastDiagAt = 0;          // 下一拍（≤40ms）就把计数写进 ball-diag，别等 2s
+    }
+
+    // ══ 可触摸区域（Region）：让开的真身 ═════════════════════════════════════
+
+    /** 给窗口挂「可触摸区域」计算器。成功返回 true（之后让开就只改 Region，不搬窗口）。 */
+    private boolean installTouchRegion(final View v) {
+        if (v == null) return false;
+        if (regionInstalled.contains(v)) return true;
+        try {
+            final Class<?> listenerCls = Class.forName(
+                    "android.view.ViewTreeObserver$OnComputeInternalInsetsListener");
+            final Class<?> infoCls = Class.forName("android.view.ViewTreeObserver$InternalInsetsInfo");
+            final Method setTouchableInsets = infoCls.getMethod("setTouchableInsets", int.class);
+            final java.lang.reflect.Field regionField = infoCls.getField("touchableRegion");
+            final int TOUCHABLE_INSETS_REGION = 3;   // InternalInsetsInfo.TOUCHABLE_INSETS_REGION
+            Object listener = java.lang.reflect.Proxy.newProxyInstance(
+                    listenerCls.getClassLoader(), new Class<?>[]{listenerCls},
+                    new java.lang.reflect.InvocationHandler() {
+                        @Override public Object invoke(Object proxy, Method m, Object[] a) {
+                            if (a != null && a.length == 1 && a[0] != null) {
+                                try {
+                                    setTouchableInsets.invoke(a[0], TOUCHABLE_INSETS_REGION);
+                                    Object region = regionField.get(a[0]);
+                                    if (region instanceof android.graphics.Region) {
+                                        buildTouchRegion(v, (android.graphics.Region) region);
+                                    }
+                                } catch (Throwable ignored) { }
+                            }
+                            return null;
+                        }
+                    });
+            android.view.ViewTreeObserver.class
+                    .getMethod("addOnComputeInternalInsetsListener", listenerCls)
+                    .invoke(v.getViewTreeObserver(), listener);
+            regionInstalled.add(v);
+            return true;
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "installTouchRegion failed: " + t);
+            return false;
+        }
+    }
+
+    /** 代理窗口建好之后，把之前就存在的触摸窗口（文字层等）补挂一遍。 */
+    private void backfillTouchRegions() {
+        for (View v : allTouchViews()) {
+            if (v == ballTouch) continue;
+            installTouchRegion(v);
+        }
+    }
+
+    /**
+     * 当前该给这个窗口多大的可触摸区。
+     *   · 让开中        → 空（触摸直接穿到下面的 App）
+     *   · 球是圆的/胶囊 → 内切圆角矩形（方角那圈"看不见的死区"从此归下面的 App）
+     *   · 其它形态      → 整矩形（卡片/六区/搜索胶囊不能切，切了会点不到）
+     */
+    private void buildTouchRegion(View v, android.graphics.Region out) {
+        int w = v.getWidth(), h = v.getHeight();
+        if (w <= 0 || h <= 0 || blindNow) { out.setEmpty(); return; }
+        if (v == ballTouch && roundishOk(w, h)) {
+            android.graphics.Path p = new android.graphics.Path();
+            float r = Math.min(w, h) / 2f;
+            p.addRoundRect(new android.graphics.RectF(0, 0, w, h), r, r,
+                    android.graphics.Path.Direction.CW);
+            if (!out.setPath(p, new android.graphics.Region(0, 0, w, h))) out.set(0, 0, w, h);
+            return;
+        }
+        out.set(0, 0, w, h);
+    }
+
+    /** 只有"球就是圆的/胶囊"的形态才用圆角区域；大方框、卡片、菜单一律整矩形。 */
+    private boolean roundishOk(int w, int h) {
+        if (zonesActive || searchActive || menuShown || approvalShown
+                || glassFullscreen || siriTextShown || convoOpen) return false;
+        float mx = Math.max(w, h), mn = Math.min(w, h);
+        return mx > 0 && (mx - mn) < mx * 0.35f;
+    }
+
+    /** 本 App 所有"接触摸的窗口"。 */
+    private List<View> allTouchViews() {
+        List<View> out = new ArrayList<>();
+        if (ballTouch != null) out.add(ballTouch);
+        if (siriTouch != null) out.add(siriTouch);
+        out.addAll(gateWindows);
+        return out;
+    }
+
+    /** 让每个窗口重新算一次可触摸区（一帧生效，窗口不动、不重建缓冲）。 */
+    private void nudgeRegions() {
+        for (View v : allTouchViews()) {
+            if (v == null || v.getParent() == null) continue;
+            try { v.requestLayout(); v.invalidate(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 球的"可触摸矩形"（屏幕坐标），给门控/插件判断"这一点会不会落到球上"。 */
+    private int[] ballTouchRect() {
+        if (ballTouchParams == null) return null;
+        return new int[]{
+                ballTouchParams.x,
+                ballTouchParams.y + Math.round(winY0()),
+                ballTouchParams.width,
+                ballTouchParams.height};
+    }
+
     /**
      * 代理窗口（唯一接用户手势的窗口）什么时候接管触摸：
      *   · 搜索胶囊、卡片菜单、整屏玻璃 —— 这些状态本来就不该由它抢手势；
-     *   · agent 注入触摸的**那一下**（ACT 到 DONE 之间）。
-     * 让开时除了加 FLAG_NOT_TOUCHABLE，还把窗口缩成 1×1 挪到 (-8,-8)：
-     * 有些 ROM 对悬浮窗 flag 处理不干净，缩到屏幕外才是物理上的兜底。
-     * 这一段只覆盖"点击/滑动正在注入"的几十毫秒，注入一结束立刻还原。
+     *   · agent 注入触摸的**那一下**（ACT 到 DONE 之间）；
+     *   · 刚被机器人的触摸砸中过（SYNTHETIC_DUCK_MS 内自愈让开）。
+     * 让开 = **把可触摸区域置空**（Region 方案），窗口本身不动；反射挂不上时才退回
+     * 老的 flag + 1×1 挪屏外兜底。
      */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
         boolean blind = agentBlind || blindWanted();
+        blindNow = blind;
+        if (regionMode) nudgeRegions();            // 圆角区域 / 置空，都要重新算一次
+
+        if (regionMode && trustedOverlayNow()) {
+            // 受信任 overlay：region 置空就够了 —— 系统不会因为"有东西挡着"把点击丢掉。
+            // 零位移、零重建缓冲、零闪烁；球一直在原地。
+            if (proxyParked) { proxyParked = false; syncBallTouchWindow(); }
+            applyGlassParkRaw(false);
+            lastBlindApplied = blind;
+            return;
+        }
         int flags = ballTouchParams.flags;
         if (blind) {
             flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -2657,8 +2871,10 @@ public class FloatingBallService extends Service {
             proxyParked = false;
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
-        applyGlassParkRaw(agentBlind && (legacyGlassPark() || lastActWasDrag));
-        parkAllOverlays(agentBlind);
+        // 走到这里说明窗口**不是受信任 overlay**：跨 App 时系统的遮挡拦截只看窗口框，
+        // 光把触摸区置空不够 —— 必须把玻璃和代理窗一起挪出屏幕（会闪一下，但只在这一下）。
+        applyGlassParkRaw(blind);
+        parkAllOverlays(blind);
     }
 
     /**
@@ -2680,7 +2896,10 @@ public class FloatingBallService extends Service {
         // 球本身（玻璃窗 + 触摸代理窗）有自己的让开逻辑，别在这里重复挪：
         // 两个地方各自保存/还原坐标会打架，玻璃还会因为二次挪动重建缓冲（画面发白）。
         if (v == null || v == glView || v == ballTouch) return;
-        if (!gateWindows.contains(v)) gateWindows.add(v);
+        if (!gateWindows.contains(v)) {
+            gateWindows.add(v);
+            if (regionMode) installTouchRegion(v);   // 每个窗口都自带"可触摸区"计算器
+        }
     }
 
     /**
@@ -2713,7 +2932,8 @@ public class FloatingBallService extends Service {
 
     private void applyGlassParkRaw(boolean on) {
         if (glView == null || params == null || wm == null) return;
-        if (on && !(legacyGlassPark() || lastActWasDrag)) return;   // 只有“拖”才整窗让开
+        // 注意：调用方（applyBallTouchability）已经判过"要不要让开"——
+        // 受信任 overlay 不挪，非受信任（含点击）一律挪，否则跨 App 的触摸会被遮挡拦截丢掉。
         if (on == glassParked) return;
         try {
             if (on) {
@@ -2740,11 +2960,12 @@ public class FloatingBallService extends Service {
 
     /**
      * 是否要让代理窗口退出命中测试（不含 agent 那一下）。
-     * 只保留原本就该让位的状态：搜索胶囊 / 卡片菜单 / 整屏玻璃。
+     * 三类：搜索胶囊/卡片菜单/整屏玻璃这些"本来就不该接手势"的状态；
+     * 以及**刚被机器人的触摸砸中**之后的自愈让开窗口（SYNTHETIC_DUCK_MS）。
      * 「球没画出来」不再参与判断 —— 那个判据会把菜单态误判成隐形，反而把球点死。
      */
     private boolean blindWanted() {
-        return overlayTouchState();
+        return overlayTouchState() || System.currentTimeMillis() < syntheticDuckUntil;
     }
 
     // 门控轮询：40ms 看一次 ACT / DONE 文件（root 侧会用；普通 Termux 写不进
@@ -2783,7 +3004,19 @@ public class FloatingBallService extends Service {
                         java.net.Socket c = null;
                         try {
                             c = ss.accept();
-                            serveGateClient(c);
+                            // 每个连接一个线程：ACT 的 socket 要一直开到 DONE，
+                            // 单线程串行会让"注入后的对账查询"排在它后面超时。
+                            final java.net.Socket cc = c;
+                            c = null;
+                            Thread t = new Thread(new Runnable() {
+                                @Override public void run() {
+                                    try { serveGateClient(cc); }
+                                    catch (Throwable ignored) { }
+                                    finally { try { cc.close(); } catch (Throwable ignored) { } }
+                                }
+                            }, "ball-gate-conn");
+                            t.setDaemon(true);
+                            t.start();
                         } catch (Throwable ignored) {
                         } finally {
                             if (c != null) try { c.close(); } catch (Throwable ignored) { }
@@ -2831,6 +3064,15 @@ public class FloatingBallService extends Service {
                 out.flush();
             } else if (line.startsWith("PING")) {
                 out.write("PONG\n".getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } else if (line.startsWith("STAT")) {
+                // 门控状态查询：让注入方在**注入之前**就知道"这一点会不会落到球上"、
+                // 以及"上一次点击是不是被球吞了"（吞了就重试，球此刻正让开）。
+                int[] rr = ballTouchRect();
+                String stat = "STAT blind=" + ((agentBlind || blindWanted()) ? 1 : 0)
+                        + " rect=" + (rr == null ? "0,0,0,0" : rr[0] + "," + rr[1] + "," + rr[2] + "," + rr[3])
+                        + " swallowed=" + swallowedCount + "\n";
+                out.write(stat.getBytes(StandardCharsets.UTF_8));
                 out.flush();
             }
         }
@@ -2890,19 +3132,25 @@ public class FloatingBallService extends Service {
         // 两路文件信号：App 自己的外部目录（root 写）+ /data/local/tmp（shell/root 的 input 包装器写）。
         // untrusted_app 能读 /data/local/tmp（shell_data_file），写不了 —— 所以只有读这一半。
         File act = freshest(new File(dir, F_ACT), new File(SHELL_DIR, F_ACT));
-        String nonce = (act != null && act.exists()) ? readSmallString(act, 64) : "";
+        String actRaw = (act != null && act.exists()) ? readSmallString(act, 64) : "";
+        // ⚠️ 先切出 nonce 再比较：ACT 文件里是 "nonce kind" 两段，拿整行去比会让
+        //    "同一个 nonce" 每一拍都被当成新的（表现为 act/done 每 40ms 抽搐一次）。
+        String nonce = "";
+        boolean actDrag = false;
+        if (!actRaw.isEmpty()) {
+            String[] np = actRaw.split("\\s+");
+            nonce = np.length > 0 ? np[0] : "";
+            actDrag = np.length > 1 && np[1].startsWith("drag");
+        }
+        // 只认 10s 内的信号：重启后残留的旧 ACT 不该把球重新拽进"让开"
+        if (!nonce.isEmpty() && act != null
+                && now - act.lastModified() > GATE_ACT_TTL_MS) nonce = "";
         if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
-            String[] np = nonce.split("\\s+");
-            if (np.length > 1) {
-                lastActWasDrag = np[1].startsWith("drag");
-                nonce = np[0];
-            } else {
-                lastActWasDrag = false;
-            }
+            lastActWasDrag = actDrag;
             lastActNonce = nonce;
             blindStartMs = now;
             blindUntilMs = now + AGENT_MAX_MS;
-            Log.i("FloatingBall", "agent act: " + nonce + " → 触摸区让开");
+            Log.i("FloatingBall", "agent act: " + nonce + (actDrag ? " (drag)" : " (tap)") + " → 触摸区让开");
         }
         // DSH 注入完这一下就写 DONE（同一个 nonce）→ 立刻还原，不等兜底超时。
         if (blindUntilMs > 0 && !nonce.isEmpty()) {
@@ -2941,11 +3189,25 @@ public class FloatingBallService extends Service {
                 lastAckNonce = nonce;
             } catch (Throwable ignored) { }
         }
+        // 球的矩形心跳（400ms）：包装器/插件靠它判断"这一点会不会落到球上"，
+        // 落在球外就直接注入、连让开都省了（0 延迟、0 抖动）。
+        if (now - lastRectAt >= 400) {
+            lastRectAt = now;
+            try {
+                int[] rr = ballTouchRect();
+                if (rr != null) {
+                    writeAtomic(new File(dir, "ball-rect"),
+                            rr[0] + " " + rr[1] + " " + rr[2] + " " + rr[3]
+                                    + " " + ((want || blindNow) ? 1 : 0) + " " + now + "\n");
+                }
+            } catch (Throwable ignored) { }
+        }
         // 诊断口子（2s 一次）：门控状态。排查"球点不动 / 让不开"时先看它。
         if (now - lastDiagAt >= 2000) {
             lastDiagAt = now;
             try {
                 long age = renderer != null ? now - renderer.lastFrameAtMs : -1;
+                int[] rr = ballTouchRect();
                 writeAtomic(new File(dir, "ball-diag"), "blind=" + want
                         + " parked=" + proxyParked
                         + " glassParked=" + glassParked
@@ -2954,6 +3216,12 @@ public class FloatingBallService extends Service {
                         + " fullscreen=" + glassFullscreen
                         + " search=" + searchActive
                         + " menu=" + menuShown
+                        + " region=" + (regionMode ? 1 : 0)
+                        + " a11y=" + (BallA11yService.connected ? 1 : 0)
+                        + " trusted=" + (trustedOverlayNow() ? 1 : 0)
+                        + " duck=" + (now < syntheticDuckUntil ? Math.max(0, syntheticDuckUntil - now) : 0)
+                        + " synthetic=" + swallowedCount
+                        + " rect=" + (rr == null ? "-" : rr[0] + "," + rr[1] + "," + rr[2] + "," + rr[3])
                         + " nonce=" + (nonce.isEmpty() ? "-" : nonce)
                         + " ageMs=" + age + "\n");
             } catch (Throwable ignored) { }
@@ -3006,8 +3274,9 @@ public class FloatingBallService extends Service {
      */
     private void syncBallTouchWindow() {
         if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
-        // 让路 / 兜底期间窗口被缩成 1×1 挪到屏外，别在这里又把它算回球的位置（否则兜底就失效了）
-        if (agentBlind || proxyParked) return;
+        // 兜底（反射挂不上监听）时窗口会被缩成 1×1 挪到屏外，别在这里又把它算回球的位置。
+        // Region 模式下窗口不动，几何照常同步 —— 球在让开期间也可能被拖走。
+        if (!regionMode && (agentBlind || proxyParked)) return;
         float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
         float bhx, bhy;
         if (zonesActive) {
@@ -3078,9 +3347,7 @@ public class FloatingBallService extends Service {
         View v = new View(this);
         v.setBackgroundColor(0x00000000);   // 透明但可触摸
         v.setClickable(true);
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
+        int type = overlayType();
         ballTouchParams = new WindowManager.LayoutParams(
                 2, 2, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -3141,6 +3408,8 @@ public class FloatingBallService extends Service {
                         }
                         return true;
                     case MotionEvent.ACTION_DOWN:
+                        // 机器人的触摸：一律不执行用户手势（以前会把球拖走/弹四区/开搜索框）
+                        if (isSyntheticTouch(e)) { onSyntheticDown(e); return true; }
                         // 审批球挂着时不抢手势：屏幕这时候归审批球用
                         if (approvalShown) return false;
                         if (searchActive) return false;         // 搜索胶囊期间屏幕归胶囊
@@ -3274,7 +3543,10 @@ public class FloatingBallService extends Service {
             wm.addView(v, ballTouchParams);
             ballTouch = v;
             trackWindow(v);
-            Log.i("FloatingBall", "ball touch proxy added");
+            // 让开从此走"可触摸区域置空"：窗口不动、不重建缓冲、也不触发 OEM 的 alpha 0.80 规则
+            regionMode = installTouchRegion(v);
+            if (regionMode) backfillTouchRegions();
+            Log.i("FloatingBall", "ball touch proxy added (regionMode=" + regionMode + ")");
         } catch (Throwable e) {
             Log.w("FloatingBall", "add ball touch proxy failed: " + e);
         }
@@ -4286,6 +4558,7 @@ public class FloatingBallService extends Service {
         running = true;
         INSTANCE = this;
         exemptHiddenApis();
+        refreshTouchDevices();
         createChannel();
         // DSH 文本助手：同时起一条常驻镜像流，
         // DSH 里只要 AI 在回话（不管是谁问的），球就逐字出字。
@@ -7933,9 +8206,7 @@ public class FloatingBallService extends Service {
         startRenderDriver();
         glView.setFocusable(false);
 
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
+        int type = overlayType();
         // 液态玻璃这一层只负责画：所有用户手势都交给 setupBallTouchLayer() 的代理窗口。
         // 这样窗口里那圈「看不见的透明边」（FLAG_LAYOUT_NO_LIMITS 下会真的铺开）不再吞触摸。
         // ⚠️ 这里**不能**用 FLAG_NOT_TOUCHABLE：一加/OPPO 的 WindowManager 会把带这个 flag 的
@@ -7956,7 +8227,22 @@ public class FloatingBallService extends Service {
         renderer.winY = params.y;
 
         if (wm != null) {
-            wm.addView(glView, params);
+            try {
+                wm.addView(glView, params);
+            } catch (Throwable t) {
+                // 受信任 overlay 被系统拒绝（无障碍没真正生效等）→ 退回普通悬浮窗，
+                // 后面 applyBallTouchability() 会走"挪窗口"的老路，功能不丢，只是会闪。
+                if (params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) {
+                    Log.w("FloatingBall", "TYPE_ACCESSIBILITY_OVERLAY 被拒 → 退回普通悬浮窗: " + t);
+                    a11yOverlayBroken = true;
+                    params.type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                            : WindowManager.LayoutParams.TYPE_PHONE;
+                    wm.addView(glView, params);
+                } else {
+                    throw t;
+                }
+            }
             trackWindow(glView);
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
             homeCy = params.y + winH * 0.5f + winY0();

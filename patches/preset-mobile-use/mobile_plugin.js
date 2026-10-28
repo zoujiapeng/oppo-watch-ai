@@ -158,6 +158,68 @@ function ballDone(handle) {
 	try { handle.sock.write(`DONE ${handle.nonce}\n`); handle.sock.end(); } catch (_) { }
 }
 
+/** 问球三个数：它在哪儿、现在让没让开、累计被吞了几次。连不上就返回 null。 */
+function ballStat(timeoutMs = 300) {
+	return new Promise((resolve) => {
+		let done = false, buf = "";
+		const sock = net.connect({ host: "127.0.0.1", port: BALL_GATE_PORT });
+		const timer = setTimeout(() => fin(null), timeoutMs);
+		function fin(v) {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			try { sock.destroy(); } catch (_) { }
+			resolve(v);
+		}
+		sock.setNoDelay(true);
+		sock.on("connect", () => { try { sock.write("STAT\n"); } catch (_) { fin(null); } });
+		sock.on("data", (d) => {
+			buf += d.toString("utf8");
+			const line = buf.split("\n")[0];
+			if (!line.startsWith("STAT ")) return;
+			const m = /rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)/.exec(line);
+			const b = /blind=(\d)/.exec(line);
+			const s = /swallowed=(\d+)/.exec(line);
+			fin({
+				rect: m ? [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])] : null,
+				blind: b ? b[1] === "1" : false,
+				swallowed: s ? Number(s[1]) : 0,
+			});
+		});
+		sock.on("error", () => fin(null));
+		sock.on("close", () => fin(null));
+	});
+}
+
+function pointInRect(r, x, y) {
+	return Array.isArray(r) && r.length === 4
+		&& Number.isFinite(x) && Number.isFinite(y)
+		&& x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+}
+
+/**
+ * 注入前的准备：**只有这一点真的会落到球上**才握手让开。
+ *   · 球没在跑 / 没有坐标（元素级点击）/ 点在球外 → 直接注入，0 延迟、0 抖动；
+ *   · 球已经让开着 → 直接注入；
+ *   · 点在球上 → ACT/ACK 握手，拿不到 ACK 就 skip（不把点击喂给球）。
+ */
+async function prepareBallGate(args) {
+	if (args.action !== "click") return null;
+	const stat = await ballStat();
+	if (!stat) return null;
+	const pt = args.coordinate || [];
+	if (!(pt.length >= 2)) return null;                 // 元素级点击不经过触摸
+	if (stat.blind) return { stat };                    // 球已经让开着
+	if (!pointInRect(stat.rect, Number(pt[0]), Number(pt[1]))) {
+		ballLog(`stat: point (${pt[0]},${pt[1]}) outside ball (${stat.rect || "-"}), no gate`);
+		return { stat };
+	}
+	ballLog(`stat: point (${pt[0]},${pt[1]}) inside ball (${stat.rect.join(",")}), gating`);
+	const handle = await signalBall("click");
+	if (handle && handle.skip) return { skip: true, stat };
+	return { handle, stat };
+}
+
 const SERVER_BASE = process.env.AGENT_VD_SERVER || "http://127.0.0.1:3070";
 
 const MOBILE_AGENT_GUIDANCE = `<mobile_agent_guidance>
@@ -419,25 +481,30 @@ export function apply(ctx) {
 								return { message: `[${sw.message}]` };
 							}
 						}
-						let ballHandle = null;
+						const ballGate = await prepareBallGate(args);
+						if (ballGate && ballGate.skip) {
+							ballLog(`gate missed, click skipped`);
+							return { message: "防误触：球没能在注入前让开触摸区，这次点击已跳过（避免点到球上）。" };
+						}
 						let ballTimer = null;
-						if (args.action === "click") {
-							ballHandle = await signalBall(args.action);
-							if (ballHandle && ballHandle.skip) {
-								ballLog(`gate missed, click skipped`);
-								return { message: "防误触：球没能在注入前让开触摸区，这次点击已跳过（避免点到球上）。" };
-							}
-							if (ballHandle) {
-								// 注入本身很快，慢的是后面的无障碍 dump（1~2s）。所以按时长自己放行，
-								// 别等 /api/action 返回 —— 否则玻璃会消失一整秒多（肉眼就是"闪一下"）。
-								const holdMs = args.action === "click"
-									? 130
-									: Math.min(4000, Number(args.duration_ms ?? args.duration ?? 300) + 130);
-								ballTimer = setTimeout(() => { ballTimer = null; ballDone(ballHandle); }, holdMs);
-							}
+						if (ballGate && ballGate.handle) {
+							// 注入本身很快，慢的是后面的无障碍 dump（1~2s）。所以按时长自己放行，
+							// 别等 /api/action 返回 —— 否则玻璃会消失一整秒多（肉眼就是"闪一下"）。
+							ballTimer = setTimeout(() => { ballTimer = null; ballDone(ballGate.handle); },
+								Math.min(4000, Number(args.duration_ms ?? args.duration ?? 300) + 130));
 						}
 						try {
-							const res = await postJson("/api/action", args);
+							let res = await postJson("/api/action", args);
+							// 事后对账：球要是把这一下吞了（swallowed 增加），立刻重试一次 ——
+							// 此刻球正处在"被机器摸到就自愈让开"的 1.5s 窗口里，重试必中。
+							if (ballGate && ballGate.stat && args.action === "click") {
+								const after = await ballStat();
+								if (after && after.swallowed > ballGate.stat.swallowed) {
+									ballLog(`swallowed +${after.swallowed - ballGate.stat.swallowed} → retry`);
+									await new Promise((r) => setTimeout(r, 70));
+									res = await postJson("/api/action", args);
+								}
+							}
 							if (!res.success) {
 								return { message: `Action '${args.action}' failed: ${res.message || "unknown error"}` };
 							}
@@ -458,7 +525,7 @@ export function apply(ctx) {
 							return { message: `Execution error (${args.action}): ${err.message}` };
 						} finally {
 							if (ballTimer) { clearTimeout(ballTimer); ballTimer = null; }
-							ballDone(ballHandle);
+							if (ballGate) ballDone(ballGate.handle);
 						}
 					}
 				}

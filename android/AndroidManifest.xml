@@ -56,6 +56,19 @@
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- 空壳无障碍服务：只为拿到 TYPE_ACCESSIBILITY_OVERLAY 的资格（见 BallA11yService） -->
+        <service
+            android:name=".BallA11yService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/ball_a11y" />
+        </service>
+
         <service
             android:name=".FloatingBallService"
             android:exported="false"

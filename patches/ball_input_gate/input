@@ -1,21 +1,79 @@
 #!/system/bin/sh
-# 球触摸门控：所有 input 注入（插件、shell、任何自动化）都先让球把触摸区挪开，注入完还原。
+# 球触摸门控 v2 —— 装在 /system/bin/input 上的包装器（Magisk 模块 ball_input_gate）。
+#
+# 和 v1 的区别：
+#   · **只有这一点真的会落到球上**才让球让开；球外直接注入（0 延迟、0 抖动）。
+#   · 让不开就**拒绝注入**（fail-closed），返回 3 —— 上层会重试，而不是把点击喂给球。
+#   · 球已经让开着（blind=1）就直接注入，不再握手。
+#
+# 球的状态由 App 每 400ms 写进 files/ball-rect：
+#   x y w h blind ts      （屏幕像素坐标 + 时间戳毫秒，ts 只给排查用，新鲜度看 mtime）
 # 调试关闭：touch /data/local/tmp/ball-gate-off
 D=/data/local/tmp
 APP=/sdcard/Android/data/com.glslplayground.app/files
 if [ -e "$D/ball-gate-off" ]; then exec cmd input "$@"; fi
+
 KIND=tap
 case "$1" in swipe|drag|roll) KIND=drag ;; esac
-N="sh-$(date +%s%N)-$$"
-printf "%s %s\n" "$N" "$KIND" > "$D/.ball-act.tmp" 2>/dev/null && mv "$D/.ball-act.tmp" "$D/dsh-ball-act" 2>/dev/null
-i=0
-while [ $i -lt 15 ]; do
-  A=$(cat "$APP/dsh-ball-ack" 2>/dev/null)
-  [ "$A" = "$N" ] && break
-  sleep 0.02
-  i=$((i+1))
+
+# 目标点（tap/swipe/drag 的前两个参数；其它命令没有坐标，直接放行）
+X=""; Y=""
+case "$1" in
+  tap|swipe|drag) X="$2"; Y="$3" ;;
+esac
+case "$X" in (*[!0-9-]*|"") X="";; esac
+case "$Y" in (*[!0-9-]*|"") Y="";; esac
+if [ -z "$X" ] || [ -z "$Y" ]; then exec cmd input "$@"; fi
+
+# 球的矩形（球没在跑 / 文件太旧 → 不做任何干预）
+COVER=0
+BLIND=0
+BX=""; BY=""; BW=""; BH=""; BBLIND=""; BTS=""
+F="$APP/ball-rect"
+if [ -f "$F" ]; then
+  read BX BY BW BH BBLIND BTS < "$F" 2>/dev/null
+fi
+# ⚠️ 新鲜度必须用 stat 的 mtime（秒）算：epoch 毫秒超出了这个 sh 的整数范围，
+#    $((NOW - BTS/1000)) 会算出垃圾值（实测 AGE=1795296329 → 门控永远不生效）。
+MTIME=$(stat -c %Y "$F" 2>/dev/null)
+NOW=$(date +%s)
+if [ -n "$MTIME" ] && [ -n "$BX" ]; then
+  AGE=$((NOW - MTIME))
+  if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 2 ]; then
+    BLIND="$BBLIND"
+    if [ "$X" -ge "$BX" ] && [ "$X" -lt $((BX + BW)) ] \
+       && [ "$Y" -ge "$BY" ] && [ "$Y" -lt $((BY + BH)) ]; then
+      COVER=1
+    fi
+  fi
+fi
+
+# 球不挡路 / 已经让开着 → 直接注入
+if [ "$COVER" = "0" ] || [ "$BLIND" = "1" ]; then exec cmd input "$@"; fi
+
+# 让球让开：ACT → 等 ACK（最多 300ms）
+N="sh-$(date +%s)-$$-${RANDOM:-0}"
+ACKED=0
+for try in 1 2; do
+  printf "%s %s\n" "$N" "$KIND" > "$D/.ball-act.tmp" 2>/dev/null && mv "$D/.ball-act.tmp" "$D/dsh-ball-act" 2>/dev/null
+  i=0
+  while [ $i -lt 15 ]; do
+    A=$(cat "$APP/dsh-ball-ack" 2>/dev/null)
+    [ "$A" = "$N" ] && { ACKED=1; break; }
+    sleep 0.02
+    i=$((i+1))
+  done
+  [ "$ACKED" = "1" ] && break
+  N="sh-$(date +%s)-$$-${RANDOM:-0}"
 done
-if [ $i -ge 15 ]; then sleep 0.06; else sleep 0.04; fi
+
+if [ "$ACKED" = "0" ]; then
+  # fail-closed：球没让开，这一下打过去只会被球吃掉 → 交回去让上层重试
+  echo "ball-gate: no ACK ($N), click at $X,$Y refused" >&2
+  exit 3
+fi
+
+sleep 0.04
 cmd input "$@"
 rc=$?
 printf "%s\n" "$N" > "$D/.ball-done.tmp" 2>/dev/null && mv "$D/.ball-done.tmp" "$D/dsh-ball-done" 2>/dev/null

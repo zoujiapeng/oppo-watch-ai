@@ -7,6 +7,73 @@
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
+## 2026-10-29：防误触 v2（球的触摸来源判定 + 按需让开）
+
+上一版的问题是**只挡合作方**：`/system/bin/input` 包装器和插件 socket 之外的一切注入
+（`cmd input`、uiautomator、别的自动化、vd 自己的注入器）都直接打在球上；而且门控是
+"每一下都握手"，21.6% 的点击连门控都没连上（`~/.cache/ball-plugin.log` 里 171 次里 37 次
+`ECONNREFUSED`）。这一版把"防误触"拆成四层，任何一层挂了都不会出现"点一下球被拖走/弹出菜单"。
+
+**1. 球认得"这不是人"**（`FloatingBallService.refreshTouchDevices/isSyntheticTouch`）
+把真实触摸屏的 deviceId 记成白名单，不在表里的一律当机器：**不执行任何用户手势**，
+只记账并自动让开 `SYNTHETIC_DUCK_MS=1500`。
+真机实测：`input tap` / `cmd input tap` 到代理窗口时 `deviceId=-1`，真手指是白名单里的设备号。
+（万一把 0 号设备也认成触摸屏，会整体关闭判据 —— 宁可漏判机器，不能让球点不动。）
+
+**2. 让开不再搬窗口**（`installTouchRegion/buildTouchRegion`）
+用 `ViewTreeObserver.OnComputeInternalInsetsListener` 的 `TOUCHABLE_INSETS_REGION`
+把窗口的可触摸区设成任意 `Region`：让开 = 置空，平时 = 内切圆角矩形（球是圆/胶囊，
+方角那圈"看不见的死区"从此归下面的 App）。窗口位置、尺寸一个像素都不动。
+反射挂不上时自动退回老的 `FLAG_NOT_TOUCHABLE + 1×1 挪屏外`。
+
+**3. 只在"这一点真的会落到球上"时握手**（包装器 + 插件）
+App 每 400ms 写 `files/ball-rect`（`x y w h blind ts`）：
+- `/system/bin/input` 包装器先看点在不在矩形里：**在外面直接注入**（实测 ~100ms，零握手、零抖动）；
+  在里面才 ACT/ACK；等不到 ACK 就**拒绝注入**（fail-closed，exit 3），不再把点击喂给球。
+- 插件改成先 `STAT` 问球（返回 `blind/rect/swallowed`），注入后对账 `swallowed`，
+  被吞就**立刻重试一次**（此刻球正在自愈窗口里，必中）。`STAT` 是同一个 socket 上的新命令。
+
+**4. 受信任 overlay（跨 ROM 的根治手段，本机 MIUI 不给用）**
+新增空壳 `BallA11yService`：无障碍服务连着时窗口用 `TYPE_ACCESSIBILITY_OVERLAY`，
+系统就不会因为"有东西挡着"把跨 App 的触摸丢掉，于是"原地不动 + 区域置空"就够，零闪烁。
+**本机实测 MIUI 拒绝**：
+`WindowManager$BadTokenException: Unable to add window -- token null is not valid` →
+代码自动退回普通悬浮窗（`a11yOverlayBroken=true`），让开改走"挪窗口"（会闪一下，只在这一下）。
+换 ROM 或哪天 MIUI 放行，这段会自动生效。
+
+**必须知道的一条**：Android 12+ 的遮挡拦截看的是**窗口框**，不是可触摸区 ——
+目标窗口和悬浮窗**同属一个 App** 时不拦（所以老验收"点自己的设置卡片"一直是通的，
+把这个问题盖住了）。跨 App（微信/系统设置）必须让窗口真的离开那个点。
+实测：玻璃不挪 → 点击完全没反应；玻璃挪走 → 立刻点中。
+
+### 验收（`tools/`，都跑在真机上）
+
+```bash
+bash tools/restart-ball.sh          # 拉起球（含无障碍授权、打开「悬浮于桌面」）
+bash tools/e2e-ball-gate.sh         # 12 项：球外零开销 / 球上让开 / 机器触摸不执行手势 / 自愈 / 球被杀
+node tools/e2e-gate-protocol.mjs    # 8 项：STAT/ACT/ACK/DONE 协议 + 裸注入（模拟 vd）路径
+```
+
+本机实测（2026-10-29 04:0x，小米 M2007J1SC / Android 13）：
+```
+12 通过 / 0 失败      e2e-ball-gate.sh
+ 8 通过 / 0 失败      e2e-gate-protocol.mjs
+球外点击  109ms（非门控路径）
+球上点击  458ms（120ms 让开 + 40ms + 300ms 尾巴）
+ball-diag 新增字段：region= a11y= trusted= duck= synthetic= rect=
+```
+
+### 回退
+
+- 想让开逻辑退回"每一下都挪窗口"：`touch files/glasspark`（同时关掉受信任 overlay）。
+- 想彻底关掉门控：`touch /data/local/tmp/ball-gate-off`（包装器直接 `exec cmd input`）。
+- 关掉无障碍：`settings put secure enabled_accessibility_services null`。
+
+### 插件改动怎么生效
+
+DSH 加载的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin.js`（不是仓库里的 `patches/` 副本）。
+改完执行 `bash patches/sync-ball-gate.sh`（拿 git 里的上一版做基底打 diff），**重启 DSH** 才生效。
+
 ## 2026-10-28：防误触——只在注入触摸的那一下让开
 
 早先那套（ACT/ACK + 全 UI 让位 + LSPosed 模块）整体删掉了（`f8356bb`）；这里是最新一版

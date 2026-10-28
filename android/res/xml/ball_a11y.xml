@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只为了拿到「受信任悬浮窗」的身份：
+  有这个服务在跑，本 App 才能加 TYPE_ACCESSIBILITY_OVERLAY 窗口，
+  而受信任 overlay **不会被 Android 12+ 的 tap-jacking 拦截**——
+  于是"球原地不动、只把触摸区置空"就能让点击干净地穿到下面的 App（零闪烁）。
+  服务本身不做任何事，不读内容、不监听事件。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="200"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/a11y_desc" />
