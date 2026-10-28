@@ -1598,3 +1598,12 @@ DSH 的 `mobile` 工具用的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin
 - 默认：注入时只把代理窗口收成 1×1，玻璃原样（不闪）。
 - 兼容开关：放一个 `files/glasspark` 文件 → 回到"整窗挪出屏幕"的老办法（个别 ROM 需要，代价是闪）。
 - 验收：`proxy` 1×1（`[-1,130][0,131]`）期间玻璃帧不动 `[144,1499][937,2078]`，点击照样打开 DshSettingsActivity。
+
+## 2026-10-28（四）：滑动改走 /system/bin/input
+
+实测（微信消息列表，球代理覆盖下拉起点 540,350）：
+- `input swipe …`（包装器路径）→ 稳定拉出小程序面板；之后上拉回消息页正常
+- vd 的 `/api/action swipe` → 微信毫无反应（手势太"轻"，面板/长按类阈值识别不到）
+
+所以插件里 `action == "swipe"` 不再走 vd 注入：直接 `su -c "input swipe x1 y1 x2 y2 dur"`
+（`/system/bin/input` 已是门控包装器），随后用 vd 的 `observe` 取无障碍树。点击仍走 vd。
