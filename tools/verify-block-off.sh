@@ -39,22 +39,20 @@ CX=$((BX + BW/2)); CY=$((BY + BH/2))
 echo "  球矩形=$RECT → 注入 ($CX,$CY)"
 
 echo "=== 4. YIELD → 立刻注入 ==="
-N="vb-$(date +%s)-$$"
-printf "%s tap\n" "$N" > /data/local/tmp/.vb.tmp && mv /data/local/tmp/.vb.tmp /data/local/tmp/dsh-ball-act
+rm -f /data/local/tmp/vb.out
+/data/data/com.termux/files/usr/bin/node "$(dirname "$0")/../.build/hold.mjs" 6000 > /data/local/tmp/vb.out 2>&1 &
 OK=0
 i=0
 while [ $i -lt 25 ]; do
-  A=$(cat "$ACKF" 2>/dev/null)
-  [ "$A" = "$N" ] && { OK=1; break; }
-  sleep 0.02
+  sleep 0.1
+  grep -q "acked" /data/local/tmp/vb.out 2>/dev/null && { OK=1; break; }
   i=$((i+1))
 done
-if [ "$OK" != "1" ]; then echo "  ❌ 门控没 ACK → 判定无效"; rm -f "$FLAG"; exit 3; fi
-echo "  ACK ok，注入"
+if [ "$OK" != "1" ]; then echo "  ❌ 门控 socket 没 ACK → 判定无效"; rm -f "$FLAG"; exit 3; fi
+echo "  ACK ok，立刻注入（让开窗口只有 1.2s）"
 logcat -c
 cmd input tap $CX $CY
 sleep 0.8
-printf "%s\n" "$N" > /data/local/tmp/.vb.tmp && mv /data/local/tmp/.vb.tmp /data/local/tmp/dsh-ball-done
 
 DROP=$(logcat -d | grep -c "Dropping untrusted")
 LINE=$(logcat -d | grep -m1 "Untrusted touch due to occlusion by" | sed 's/^.*InputDispatcher: //')
