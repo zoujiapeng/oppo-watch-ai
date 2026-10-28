@@ -176,7 +176,9 @@ public class FloatingBallService extends Service {
     private long lastAckAt = 0;
     private long lastDiagAt = 0;
     private boolean proxyParked = false;           // 代理窗口已被缩成 1×1 挪到屏外
-    private boolean lastDrawn = false;             // 上一次判定"球画出来了没有"
+    private boolean lastDrawn = false;             // 上一次判定"球画出来了没有"（诊断用）
+    private boolean lastBlindApplied = false;      // 上一次真正下发的"别接触摸"状态
+    private long lastProxySyncAt = 0;              // 上一次对账代理窗口几何
     private long surfaceReadyAtMs = 0;             // GL surface 就绪时刻（抓帧看门狗用它判"首帧一直没来"）
 
     private int screenW, screenH, winSize, winW, winH;
@@ -2629,8 +2631,7 @@ public class FloatingBallService extends Service {
      */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
-        boolean blind = agentBlind || !ballDrawnNow()
-                || searchActive || searchClosing || menuShown || glassFullscreen;
+        boolean blind = agentBlind || blindWanted();
         int flags = ballTouchParams.flags;
         if (blind) {
             flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -2649,6 +2650,24 @@ public class FloatingBallService extends Service {
             proxyParked = false;
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
+    }
+
+    /** 搜索胶囊 / 卡片菜单 / 整屏玻璃：这几态本来就不该由代理窗口接手势。 */
+    private boolean overlayTouchState() {
+        return searchActive || searchClosing || menuShown || glassFullscreen;
+    }
+
+    /**
+     * 是否要让代理窗口退出命中测试（不含 agent 让路）。
+     *
+     * ⚠️ 状态 3（圆区菜单）里球本身是**不画**的（屏幕上是环+卡片，球心是空的），
+     * 这时候"球的像素不可见"是正常的，绝不能因此把触摸关掉 —— 用户还要在环上滑动选。
+     * 所以 `zonesActive` 一律不参与"看不见就别接触摸"的判断。
+     */
+    private boolean blindWanted() {
+        if (overlayTouchState()) return true;
+        if (zonesActive) return false;
+        return !ballDrawnNow();
     }
 
     /** 球此刻是不是真的画在屏幕上（第一帧还没来 / 抓帧断了 = 看不见）。 */
@@ -2678,15 +2697,25 @@ public class FloatingBallService extends Service {
             blindUntilMs = now + AGENT_HOLD_MS;
             Log.i("FloatingBall", "agent act: " + nonce + " → 让路 " + AGENT_HOLD_MS + "ms");
         }
-        boolean blind = now < blindUntilMs;
-        boolean drawn = ballDrawnNow();
-        if (blind != agentBlind || drawn != lastDrawn) {
-            agentBlind = blind;
-            lastDrawn = drawn;
+        boolean signalBlind = now < blindUntilMs;
+        boolean want = signalBlind || blindWanted();
+        if (want != lastBlindApplied) {
+            lastBlindApplied = want;
+            agentBlind = signalBlind;
             applyBallTouchability();
-            Log.i("FloatingBall", "agent gate -> " + (blind ? "只显示（不接触摸）"
-                    : (drawn ? "可触摸" : "球未画出，暂不接管触摸")));
+            Log.i("FloatingBall", "agent gate -> " + (want ? "不接触摸（让路 / 球不可见）" : "可触摸"));
+        } else if (signalBlind != agentBlind) {
+            agentBlind = signalBlind;
         }
+        // 兜底对账：菜单/卡片/搜索这些状态是别处收尾的，万一哪条路径忘了把代理窗口叫回来
+        // （典型症状：选完菜单、面板收起、球也画出来了，但球点不动），这里每 50ms 拉平一次。
+        if (!want && proxyParked) {
+            applyBallTouchability();
+        } else if (!want && now - lastProxySyncAt >= 300) {
+            lastProxySyncAt = now;
+            syncBallTouchWindow();     // 数值没变就什么都不做
+        }
+        boolean blind = signalBlind;
         if (blind && !nonce.isEmpty() && !nonce.equals(lastAckNonce) && now - lastAckAt >= 200) {
             lastAckAt = now;
             try {
@@ -2703,7 +2732,7 @@ public class FloatingBallService extends Service {
                         + (renderer != null && renderer.hasDrawnFrame())
                         + " cov=" + (renderer != null ? renderer.coverageAlpha() : -1)
                         + " diff=" + (renderer != null ? renderer.visibilityDiff() : -1)
-                        + " ageMs=" + age + " blind=" + blind + " drawn=" + drawn + "\n");
+                        + " ageMs=" + age + " blind=" + want + " drawn=" + ballDrawnNow() + "\n");
             } catch (Throwable ignored) { }
         }
     }
@@ -2754,8 +2783,8 @@ public class FloatingBallService extends Service {
      */
     private void syncBallTouchWindow() {
         if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
-        // 让路期间窗口被缩成 1×1 挪到屏外，别在这里又把它算回球的位置（否则兜底就失效了）
-        if (agentBlind) return;
+        // 让路 / 兜底期间窗口被缩成 1×1 挪到屏外，别在这里又把它算回球的位置（否则兜底就失效了）
+        if (agentBlind || proxyParked) return;
         float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
         float bhx, bhy;
         if (zonesActive) {

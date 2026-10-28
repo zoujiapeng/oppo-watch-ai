@@ -216,6 +216,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     private void probeCoverage() {
         if (++probeTick % 20 != 0) return;
         if (winW < 16 || winH < 16) return;
+        // 状态 3 的圆环菜单 / 搜索层：屏幕上是环和卡片、球心本来就是空的，
+        // 这里的"看不见"是正常现象 —— 别把它当成"球没画出来"，否则触摸区会被收走。
+        if (zoneMode || searchMode) {
+            lastCoverage = sawFrame ? 255 : 0;
+            lastVisDiff = -1;
+            return;
+        }
         try {
             float sx = lastCx + Math.max(4f, lastHx * 0.6f);   // 折射最强的那圈
             float sy = lastCy;
