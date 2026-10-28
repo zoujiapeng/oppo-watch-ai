@@ -2667,7 +2667,8 @@ public class FloatingBallService extends Service {
         return overlayTouchState();
     }
 
-    // 门控轮询：40ms 看一次 ACT / DONE 文件。
+    // 门控轮询：40ms 看一次 ACT / DONE 文件（root 侧会用；普通 Termux 写不进
+    // /sdcard/Android/data/<别的包>/files —— Android 11+ 的分区存储，所以主通道是下面的 socket）。
     private final Runnable gateTick = new Runnable() {
         @Override public void run() {
             pumpGate();
@@ -2675,6 +2676,104 @@ public class FloatingBallService extends Service {
             main.postDelayed(this, GATE_POLL_MS);
         }
     };
+
+    // ── 门控主通道：127.0.0.1 上的一个迷你 socket 服务 ─────────────────────────
+    // 为什么不用文件：插件跑在 Termux（自己的 uid），Android 11+ 下它**读写不了**
+    // /sdcard/Android/data/com.glslplayground.app/files（实测 EACCES）。所以改成回环 socket：
+    //   ACT <nonce>   → 主线程把触摸区挪走，然后回 "ACK <nonce>"
+    //   DONE <nonce>  → 立刻还原，回 "OK"
+    //   PING          → "PONG"
+    // 只绑 127.0.0.1，不对外；连不上就 fail-open（插件照发，球最多被吃一次）。
+    private static final int GATE_PORT = 38721;
+    private volatile java.net.ServerSocket gateServer;
+    private Thread gateThread;
+
+    private void startGateServer() {
+        if (gateThread != null) return;
+        gateThread = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    java.net.ServerSocket ss = new java.net.ServerSocket();
+                    ss.setReuseAddress(true);
+                    ss.bind(new java.net.InetSocketAddress(
+                            java.net.InetAddress.getByName("127.0.0.1"), GATE_PORT), 4);
+                    gateServer = ss;
+                    Log.i("FloatingBall", "gate socket listening on 127.0.0.1:" + GATE_PORT);
+                    while (!ss.isClosed()) {
+                        java.net.Socket c = null;
+                        try {
+                            c = ss.accept();
+                            serveGateClient(c);
+                        } catch (Throwable ignored) {
+                        } finally {
+                            if (c != null) try { c.close(); } catch (Throwable ignored) { }
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w("FloatingBall", "gate socket failed: " + t);
+                }
+            }
+        }, "ball-gate");
+        gateThread.setDaemon(true);
+        gateThread.start();
+    }
+
+    private void serveGateClient(java.net.Socket c) throws Exception {
+        c.setSoTimeout(3000);
+        java.io.BufferedReader in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+        java.io.OutputStream out = c.getOutputStream();
+        String line;
+        while ((line = in.readLine()) != null) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            if (line.startsWith("ACT")) {
+                final String nonce = line.length() > 3 ? line.substring(3).trim() : "";
+                final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        beginAgentWindow(nonce);
+                        latch.countDown();
+                    }
+                });
+                latch.await(150, java.util.concurrent.TimeUnit.MILLISECONDS);   // 等窗口真的挪开再回 ACK
+                out.write(("ACK " + nonce + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } else if (line.startsWith("DONE")) {
+                main.post(new Runnable() {
+                    @Override public void run() { endAgentWindow(); }
+                });
+                out.write("OK\n".getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } else if (line.startsWith("PING")) {
+                out.write("PONG\n".getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
+        }
+    }
+
+    /** 注入要开始了：把代理窗口挪到屏外（40ms 内生效）。 */
+    private void beginAgentWindow(String nonce) {
+        blindUntilMs = System.currentTimeMillis() + AGENT_MAX_MS;
+        if (nonce != null && !nonce.isEmpty()) lastActNonce = nonce;
+        if (!agentBlind) {
+            agentBlind = true;
+            lastBlindApplied = true;
+            applyBallTouchability();
+            Log.i("FloatingBall", "gate(ACT) -> 触摸区让开");
+        }
+    }
+
+    /** 这一下注入完了：立刻把触摸区还给球。 */
+    private void endAgentWindow() {
+        blindUntilMs = 0;
+        if (agentBlind) {
+            agentBlind = false;
+            lastBlindApplied = false;
+            applyBallTouchability();
+            Log.i("FloatingBall", "gate(DONE) -> 恢复触摸区");
+        }
+    }
 
     private void pumpGate() {
         long now = System.currentTimeMillis();
@@ -7732,7 +7831,8 @@ public class FloatingBallService extends Service {
             homeCy = params.y + winH * 0.5f + winY0();
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
-            main.post(gateTick);            // agent 门控：DSH 注入触摸前先让路
+            main.post(gateTick);            // agent 门控（文件通道，root 调试用）
+            startGateServer();              // agent 门控主通道：127.0.0.1 socket
         }
         glView.onResume();
         glView.addOnLayoutChangeListener(
