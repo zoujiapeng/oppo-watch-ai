@@ -1563,3 +1563,10 @@ vec2  duv = (qs - q) * uHalf * uPxToScreen / uScreen;  // 往外采样 → 圆�
 
 ⚠️ 这份截图是 `show-glass` 打开时拍的（所以有水珠自采样的放射纹）；正常运行时玻璃不留在抓屏里，
 `files/ballshot` 拍到的画面里没有那些纹路。
+
+
+## 2026-10-28：球让路改成 socket（附：真正被加载的是预设副本）
+
+DSH 的 `mobile` 工具用的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin.js`；
+`~/dsh-preset-mobile-use/lib/index.js` 改了不生效。补丁：`python3 patches/patch-mobile-preset.py`，
+通道是 `127.0.0.1:38721` 的 `ACT`/`DONE` 回环 socket（文件通道在 Android 11+ 被分区存储挡死）。
