@@ -156,20 +156,21 @@ public class FloatingBallService extends Service {
 
     private String rootError;
 
-    // ── agent 触摸门控（DSH 要注入触摸时，球让路）──────────────────────────────
+    // ── agent 触摸门控（DSH 注入触摸的那一下，球让开）────────────────────────────
     //
     // DSH 的 mobile 工具用 `input` 注入点击/滑动，走的是和真手指**同一套**窗口命中测试。
     // 球常驻屏幕中间，注入的 DOWN 落在球上就被球吃掉（底下 App 收不到、球还会被拖着走）。
-    // 协议：DSH 动手前把 nonce 写进 ACT 文件 → 球看到内容变了，进入 1500ms 让路窗口：
-    //   · 代理触摸窗口加 FLAG_NOT_TOUCHABLE；
-    //   · 同时把窗口缩成 1×1、挪到 (-8,-8)（ROM 忽略 flag 时的兜底）；
-    //   · 回写同一个 nonce 到 ACK，DSH 读到就立刻注入（最多等 300ms，收不到也照发）。
-    // 窗口从"球自己看到信号的那一刻"用**本地时钟**起算（/sdcard 是 FUSE，mtime 不可信）。
+    //
+    // 协议（只覆盖"那一下"，不做整段让路）：
+    //   1. DSH 动手前把 nonce 写进 ACT → 球立刻把代理触摸窗口挪走（NOT_TOUCHABLE + 1×1 到屏外），回 ACK；
+    //   2. DSH 注入完这次点击/滑动后，把同一个 nonce 写进 DONE → 球**立刻**把触摸区还原；
+    //   3. 兜底：最多 1200ms 没等到 DONE 也自动还原（插件崩了/被杀也不会让球一直点不动）。
     private static final String F_ACT = "dsh-ball-act";
     private static final String F_ACK = "dsh-ball-ack";
-    private static final long AGENT_HOLD_MS = 1500;
-    private static final long GATE_POLL_MS = 50;
-    private volatile boolean agentBlind = false;   // 让路中
+    private static final String F_DONE = "dsh-ball-done";
+    private static final long AGENT_MAX_MS = 1200;
+    private static final long GATE_POLL_MS = 40;
+    private volatile boolean agentBlind = false;   // 正在让开（只在这一下触摸注入期间）
     private long blindUntilMs = 0;
     private String lastActNonce = "";
     private String lastAckNonce = "";
@@ -2623,11 +2624,11 @@ public class FloatingBallService extends Service {
 
     /**
      * 代理窗口（唯一接用户手势的窗口）什么时候接管触摸：
-     *   · agent 让路窗口内（DSH 正要注入点击/滑动）；
-     *   · 球还没画出第一帧 / 抓帧断了 —— 球看不见时绝不能留一块"看不见但吃触摸"的死区；
-     *   · 搜索胶囊、卡片菜单、整屏玻璃这些本来就不该抢手势的状态。
-     * 让路除了加 FLAG_NOT_TOUCHABLE，还把窗口缩成 1×1 挪到 (-8,-8)：
+     *   · 搜索胶囊、卡片菜单、整屏玻璃 —— 这些状态本来就不该由它抢手势；
+     *   · agent 注入触摸的**那一下**（ACT 到 DONE 之间）。
+     * 让开时除了加 FLAG_NOT_TOUCHABLE，还把窗口缩成 1×1 挪到 (-8,-8)：
      * 有些 ROM 对悬浮窗 flag 处理不干净，缩到屏幕外才是物理上的兜底。
+     * 这一段只覆盖"点击/滑动正在注入"的几十毫秒，注入一结束立刻还原。
      */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
@@ -2658,27 +2659,15 @@ public class FloatingBallService extends Service {
     }
 
     /**
-     * 是否要让代理窗口退出命中测试（不含 agent 让路）。
-     *
-     * ⚠️ 状态 3（圆区菜单）里球本身是**不画**的（屏幕上是环+卡片，球心是空的），
-     * 这时候"球的像素不可见"是正常的，绝不能因此把触摸关掉 —— 用户还要在环上滑动选。
-     * 所以 `zonesActive` 一律不参与"看不见就别接触摸"的判断。
+     * 是否要让代理窗口退出命中测试（不含 agent 那一下）。
+     * 只保留原本就该让位的状态：搜索胶囊 / 卡片菜单 / 整屏玻璃。
+     * 「球没画出来」不再参与判断 —— 那个判据会把菜单态误判成隐形，反而把球点死。
      */
     private boolean blindWanted() {
-        if (overlayTouchState()) return true;
-        if (zonesActive) return false;
-        return !ballDrawnNow();
+        return overlayTouchState();
     }
 
-    /** 球此刻是不是真的画在屏幕上（第一帧还没来 / 抓帧断了 = 看不见）。 */
-    private boolean ballDrawnNow() {
-        if (renderer == null) return false;
-        if (!renderer.hasDrawnFrame()) return false;   // 抓屏帧没被真正上传 = 窗口里什么都没有
-        long t = renderer.lastFrameAtMs;
-        return t > 0 && System.currentTimeMillis() - t < 3000;
-    }
-
-    // 门控轮询：50ms 看一次 ACT 文件；内容变了就开 1500ms 让路窗口并回 ACK。
+    // 门控轮询：40ms 看一次 ACT / DONE 文件。
     private final Runnable gateTick = new Runnable() {
         @Override public void run() {
             pumpGate();
@@ -2694,8 +2683,17 @@ public class FloatingBallService extends Service {
         String nonce = act.exists() ? readSmallString(act, 64) : "";
         if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
             lastActNonce = nonce;
-            blindUntilMs = now + AGENT_HOLD_MS;
-            Log.i("FloatingBall", "agent act: " + nonce + " → 让路 " + AGENT_HOLD_MS + "ms");
+            blindUntilMs = now + AGENT_MAX_MS;
+            Log.i("FloatingBall", "agent act: " + nonce + " → 触摸区让开");
+        }
+        // DSH 注入完这一下就写 DONE（同一个 nonce）→ 立刻还原，不等兜底超时。
+        if (blindUntilMs > 0 && !nonce.isEmpty()) {
+            String done = readSmallString(new File(dir, F_DONE), 64);
+            if (nonce.equals(done)) {
+                blindUntilMs = 0;
+                lastAckNonce = "";          // 下一次点击重新握手
+                Log.i("FloatingBall", "agent done: " + nonce + " → 恢复触摸区");
+            }
         }
         boolean signalBlind = now < blindUntilMs;
         boolean want = signalBlind || blindWanted();
@@ -2703,12 +2701,12 @@ public class FloatingBallService extends Service {
             lastBlindApplied = want;
             agentBlind = signalBlind;
             applyBallTouchability();
-            Log.i("FloatingBall", "agent gate -> " + (want ? "不接触摸（让路 / 球不可见）" : "可触摸"));
+            Log.i("FloatingBall", "agent gate -> " + (want ? "不接触摸" : "可触摸"));
         } else if (signalBlind != agentBlind) {
             agentBlind = signalBlind;
         }
-        // 兜底对账：菜单/卡片/搜索这些状态是别处收尾的，万一哪条路径忘了把代理窗口叫回来
-        // （典型症状：选完菜单、面板收起、球也画出来了，但球点不动），这里每 50ms 拉平一次。
+        // 兜底对账：菜单/卡片/搜索这些状态由别处收尾，万一哪条路径忘了把代理窗口叫回来
+        // （症状：面板收起、球也画出来了，但球点不动），这里每 40ms 拉平一次。
         if (!want && proxyParked) {
             applyBallTouchability();
         } else if (!want && now - lastProxySyncAt >= 300) {
@@ -2723,16 +2721,15 @@ public class FloatingBallService extends Service {
                 lastAckNonce = nonce;
             } catch (Throwable ignored) { }
         }
-        // 诊断口子（2s 一次）：球到底画出来没有 / 让路状态。排查"球看不见但吃掉触摸"时先看它。
+        // 诊断口子（2s 一次）：门控状态。排查"球点不动 / 让不开"时先看它。
         if (now - lastDiagAt >= 2000) {
             lastDiagAt = now;
             try {
                 long age = renderer != null ? now - renderer.lastFrameAtMs : -1;
-                writeAtomic(new File(dir, "ball-diag"), "saw="
-                        + (renderer != null && renderer.hasDrawnFrame())
-                        + " cov=" + (renderer != null ? renderer.coverageAlpha() : -1)
-                        + " diff=" + (renderer != null ? renderer.visibilityDiff() : -1)
-                        + " ageMs=" + age + " blind=" + want + " drawn=" + ballDrawnNow() + "\n");
+                writeAtomic(new File(dir, "ball-diag"), "blind=" + want
+                        + " parked=" + proxyParked
+                        + " nonce=" + (nonce.isEmpty() ? "-" : nonce)
+                        + " ageMs=" + age + "\n");
             } catch (Throwable ignored) { }
         }
     }
