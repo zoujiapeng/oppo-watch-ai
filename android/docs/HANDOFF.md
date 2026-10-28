@@ -7,33 +7,38 @@
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
-## 2026-10-28：防误触 / 球让路门控已整体移除（等重新设计）
+## 2026-10-28：防误触重做了一版（球在 DSH 动手前让开）
 
-用户要求把「agent 注入的触摸别被球吃掉」这套机制删干净、重新设计。已删：
+早先那套（ACT/ACK + 全 UI 让位 + LSPosed 模块）先整体删掉了（见 `f8356bb`），
+当天按用户的新要求重做成下面这样（`e04dcc8`）。
 
-- **App 侧**：`pumpAgentGate()` / `agentGateTick` / `applyAgentYield()` / `yieldFlag()` /
-  `yieldRegion()` / `setAgentYield()` / `getAgentYield()`、ACT/ACK 信号文件、`dsh-ball-alive`
-  心跳、`float_agent_yield` 开关、代理窗口的 `dsh-ball-proxy` 标题、设置页
-  「DSH 操控时全部 UI 让位」。
-- **DSH 插件**：`~/dsh-preset-mobile-use/lib/index.js` 的 `waitForBallStandDown()` /
-  `BALL_GUARD_DIR` / guidance 里那句 stand-down 说明 / `/api/action` 前的调用点。
-- **验证与补丁**：`android/tools/ball-guard-verify.sh`、`ball-yield-verify.sh`、
-  `ball-guard-plugin-e2e.mjs`、`ball-proxy-state.py`、`patches/apply-vd-ball-guard-patch.sh`、
-  `patches/preset-mobile-use/`。
-- **LSPosed 模块**：`~/ball-trusted`（`com.pj.balltrusted`，在 system_server 里把球窗口标成
-  `trustedOverlay` / `TOUCH_OCCLUSION_NONE`）整目录删除。
-- **文档**：`BALL_TOUCH_GUARD.md` 删除；README / HANDOFF / DEPLOY_OTHER_PHONE / OPERATIONS
-  里相关段落一并清掉。
+**协议**（`FloatingBallService` + `~/dsh-preset-mobile-use/lib/index.js`）：
 
-**保留的底座**（这些不是防误触，删了球就不工作）：
+1. DSH 要发 `click` / `swipe` 之前，把 nonce **原子写**进 `files/dsh-ball-act`；
+2. 球每 **50ms** 读一次，内容变了 → 开一个 **1500ms** 让路窗口（本地时钟计时，不信 FUSE 的 mtime）：
+   - 代理窗口 `|= FLAG_NOT_TOUCHABLE`；
+   - **并且**把窗口缩成 **1×1 挪到 (-8,-8)** —— 用户要求的兜底：ROM 不认 flag 时，物理上也摸不到；
+   - 把同一个 nonce 写进 `files/dsh-ball-ack`；
+3. DSH 读到 ACK 立即注入（最多等 250ms，读不到也照发：fail-open）；
+4. 窗口到期自动还原（`syncBallTouchWindow()` 在让路期间直接 return，免得把 1×1 又算回球的位置）。
 
-- 玻璃层只画不摸 —— `makeTouchTransparent()` 用**空可触摸区域**实现（不是 `FLAG_NOT_TOUCHABLE`，
-  那会被 ColorOS 压成 alpha 0.80，见下文那一节）；
-- 贴身代理窗口 `ballTouch`：唯一接用户手势的窗口（单击/长按取消/拖动）；
-- `applyBallTouchability()`：搜索胶囊 / 卡片菜单 / 整屏玻璃这些状态下代理窗口不接管触摸。
+**顺手修的死区**（用户报的「程序一运行屏幕中间触屏失效」）：球的代理窗口以前
+**不管球画没画出来都接管触摸** —— 抓屏没帧 / 首帧没来的时候就是一块"看不见但吃触摸"的死区。
+现在 `applyBallTouchability()` 多了一条：`!ballDrawnNow()` 时不接管（且同样的 1×1 + 屏外兜底）。
 
-**当前基线**：agent 注入的触摸落在球上时会被球当成用户手势（拖球、弹输入框）—— 这正是重设计
-要解决的问题。构建与装机已验证（`bash android/build.sh` → `pm install`），球可正常拖。
+`ballDrawnNow()` 的判据（`GlassRenderer`）：
+- `sawFrame`：抓屏帧真的被上传过；
+- 每 20 帧 `glReadPixels` 读回球面 8×8 像素，`coverageAlpha() > 8`；
+- 而且这块像素要和**同位置的抓屏帧**有差别（`visibilityDiff() > 4`）——防"球把背景原样画了一遍"的隐形状态。
+
+**诊断口子**：`files/ball-diag`（2s 刷新，内容 `saw= cov= diff= ageMs= blind= drawn=`）。
+排查"球看不见 / 死区"先看它：`cov=0` 或 `diff<=4` 说明球那一帧确实是空的/隐形的。
+
+**抓帧看门狗**：以前只有"有帧但停了"才重启采集；首帧一直没来（su 被拒、管道断）**永远不重启**，
+球就一直是透明的 —— 现在加了这个分支（`surfaceReadyAtMs` 起 4s 无首帧就重启）。
+
+**DSH 侧**：`signalBall(action)` 只对 `click` / `swipe` 调用，失败静默。
+插件是启动时加载的，**改完要重启 DSH 才生效**。
 
 ## 一句话现状
 
