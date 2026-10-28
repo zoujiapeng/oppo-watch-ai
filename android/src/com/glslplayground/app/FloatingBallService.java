@@ -1845,15 +1845,15 @@ public class FloatingBallService extends Service {
         // 面板的三层窗口也要排除出抓屏（否则玻璃会折射面板自己的按钮，见 applySkipScreenshotTo）
         scheduleApprovalSkipScreenshot();
         if (approvalContent != null && approvalContent.getParent() == null) {
-            try { wm.addView(approvalContent, approvalContentParams); }
+            try { wm.addView(approvalContent, approvalContentParams); trackWindow(approvalContent); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval content failed: " + t); }
         }
         if (approvalActionsScroll != null && approvalActionsScroll.getParent() == null) {
-            try { wm.addView(approvalActionsScroll, approvalActionsParams); }
+            try { wm.addView(approvalActionsScroll, approvalActionsParams); trackWindow(approvalActionsScroll); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval actions failed: " + t); }
         }
         if (approvalInputRow != null && approvalInputRow.getParent() == null) {
-            try { wm.addView(approvalInputRow, approvalInputParams); }
+            try { wm.addView(approvalInputRow, approvalInputParams); trackWindow(approvalInputRow); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval input failed: " + t); }
         }
         if (approvalContent != null) approvalContent.setVisibility(View.VISIBLE);
@@ -1874,7 +1874,7 @@ public class FloatingBallService extends Service {
                     return onApprovalTouch(e);
                 }
             });
-            try { wm.addView(v, approvalTouchParams); approvalTouch = v; }
+            try { wm.addView(v, approvalTouchParams); approvalTouch = v; trackWindow(v); }
             catch (Throwable t) { Log.w("FloatingBall", "add approval touch failed: " + t); }
         }
     }
@@ -2474,6 +2474,7 @@ public class FloatingBallService extends Service {
         siriParams.gravity = Gravity.TOP | Gravity.START;
         try {
             wm.addView(sv, siriParams);
+            trackWindow(sv);
             siriText = sv;
             mdBuiltFor = "";
             sv.post(this::applyTextSkipScreenshot);
@@ -2620,6 +2621,7 @@ public class FloatingBallService extends Service {
         try {
             wm.addView(v, siriTouchParams);
             siriTouch = v;
+            trackWindow(v);
             Log.i("FloatingBall", "touch layer added");
         } catch (Exception e) {
             Log.w("FloatingBall", "add siri touch layer failed: " + e);
@@ -2656,6 +2658,7 @@ public class FloatingBallService extends Service {
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
         applyGlassParkRaw(agentBlind && (legacyGlassPark() || lastActWasDrag));
+        parkAllOverlays(agentBlind);
     }
 
     /**
@@ -2667,6 +2670,42 @@ public class FloatingBallService extends Service {
      */
     private boolean legacyGlassPark() {
         try { return new File(gateDir(), "glasspark").exists(); } catch (Throwable t) { return false; }
+    }
+
+    /** 本 App 所有悬浮窗口（球/胶囊/菜单/卡片/审批/文字层…）。注入那一刻要全部让开。 */
+    private final java.util.List<View> gateWindows = new java.util.ArrayList<>();
+    private final java.util.Map<View, int[]> gateWindowSaved = new java.util.IdentityHashMap<>();
+
+    private void trackWindow(View v) {
+        if (v != null && !gateWindows.contains(v)) gateWindows.add(v);
+    }
+
+    /**
+     * 把本 App 的**每一个**悬浮窗口都挪到屏幕外（或在 DONE 后原样还回来）。
+     * 只收触摸区不够：点击一旦落在任何一个悬浮界面上（胶囊、卡片、审批、输入框…）就被吃掉了。
+     */
+    private void parkAllOverlays(boolean on) {
+        if (wm == null) return;
+        for (int i = 0; i < gateWindows.size(); i++) {
+            View v = gateWindows.get(i);
+            if (v == null || v.getParent() == null) continue;
+            WindowManager.LayoutParams p;
+            try { p = (WindowManager.LayoutParams) v.getLayoutParams(); } catch (Throwable t) { continue; }
+            if (p == null) continue;
+            try {
+                if (on) {
+                    if (!gateWindowSaved.containsKey(v)) gateWindowSaved.put(v, new int[]{p.x, p.y});
+                    p.x = -screenW * 4;
+                    p.y = -screenH * 4;
+                } else {
+                    int[] old = gateWindowSaved.remove(v);
+                    if (old == null) continue;
+                    p.x = old[0];
+                    p.y = old[1];
+                }
+                wm.updateViewLayout(v, p);
+            } catch (Throwable ignored) { }
+        }
     }
 
     private void applyGlassParkRaw(boolean on) {
@@ -3231,6 +3270,7 @@ public class FloatingBallService extends Service {
             // 加在玻璃层刚出现之后 → z 最低的触摸层：审批面板 / 文字层 / 输入行都压在它上面
             wm.addView(v, ballTouchParams);
             ballTouch = v;
+            trackWindow(v);
             Log.i("FloatingBall", "ball touch proxy added");
         } catch (Throwable e) {
             Log.w("FloatingBall", "add ball touch proxy failed: " + e);
@@ -4875,6 +4915,7 @@ public class FloatingBallService extends Service {
             zonesParams.y = params.y;
             try {
                 wm.addView(v, zonesParams);
+                trackWindow(v);
                 zonesView = v;
                 // 只画不摸（不用 FLAG_NOT_TOUCHABLE：那会被 OEM 把 alpha 压到 0.8）
                 makeTouchTransparent(v);
@@ -6116,7 +6157,7 @@ public class FloatingBallService extends Service {
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
             convoBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
-            try { wm.addView(bar, convoBarParams); convoBar = bar; }
+            try { wm.addView(bar, convoBarParams); convoBar = bar; trackWindow(bar); }
             catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
         }
         // 宽度跟"大方形"同宽（玻璃宽度 = 2 × glassHalfW），不再固定 560dp
@@ -6341,7 +6382,7 @@ public class FloatingBallService extends Service {
                     }
                 }
             });
-            try { wm.addView(v, menuOutsideParams); menuOutside = v; }
+            try { wm.addView(v, menuOutsideParams); menuOutside = v; trackWindow(v); }
             catch (Throwable t) { Log.w("FloatingBall", "add menu outside failed: " + t); }
         }
         if (menuView == null) {
@@ -6355,7 +6396,7 @@ public class FloatingBallService extends Service {
                 @Override public void onRow(int index) { onMenuRow(index); }
                 @Override public void onDismiss() { hideMenu("面板返回"); }
             });
-            try { wm.addView(m, menuViewParams); menuView = m; }
+            try { wm.addView(m, menuViewParams); menuView = m; trackWindow(m); }
             catch (Throwable t) { Log.w("FloatingBall", "add menu view failed: " + t); }
         }
     }
@@ -7393,7 +7434,7 @@ public class FloatingBallService extends Service {
                     }
                 }
             });
-            try { wm.addView(v, searchOutsideParams); searchOutside = v; }
+            try { wm.addView(v, searchOutsideParams); searchOutside = v; trackWindow(v); }
             catch (Throwable t) { Log.w("FloatingBall", "add search outside failed: " + t); }
         }
         if (searchBar == null) {
@@ -7471,6 +7512,7 @@ public class FloatingBallService extends Service {
             bar.setVisibility(View.INVISIBLE);
             try {
                 wm.addView(bar, searchBarParams);
+                trackWindow(bar);
                 searchBar = bar;
                 Log.i("FloatingBall", "search: 输入行窗口已建");
             } catch (Throwable t) {
@@ -7912,6 +7954,7 @@ public class FloatingBallService extends Service {
 
         if (wm != null) {
             wm.addView(glView, params);
+            trackWindow(glView);
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
             homeCy = params.y + winH * 0.5f + winY0();
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
