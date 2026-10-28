@@ -2775,11 +2775,23 @@ public class FloatingBallService extends Service {
         }
     }
 
+    private static final String SHELL_DIR = "/data/local/tmp";
+
+    /** 两个候选里取修改时间更新的那个（都不存在就返回第一个）。 */
+    private static File freshest(File a, File b) {
+        boolean ea = a != null && a.exists(), eb = b != null && b.exists();
+        if (ea && eb) return (b.lastModified() > a.lastModified()) ? b : a;
+        if (eb) return b;
+        return a;
+    }
+
     private void pumpGate() {
         long now = System.currentTimeMillis();
         File dir = gateDir();
-        File act = new File(dir, F_ACT);
-        String nonce = act.exists() ? readSmallString(act, 64) : "";
+        // 两路文件信号：App 自己的外部目录（root 写）+ /data/local/tmp（shell/root 的 input 包装器写）。
+        // untrusted_app 能读 /data/local/tmp（shell_data_file），写不了 —— 所以只有读这一半。
+        File act = freshest(new File(dir, F_ACT), new File(SHELL_DIR, F_ACT));
+        String nonce = (act != null && act.exists()) ? readSmallString(act, 64) : "";
         if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
             lastActNonce = nonce;
             blindUntilMs = now + AGENT_MAX_MS;
@@ -2787,7 +2799,8 @@ public class FloatingBallService extends Service {
         }
         // DSH 注入完这一下就写 DONE（同一个 nonce）→ 立刻还原，不等兜底超时。
         if (blindUntilMs > 0 && !nonce.isEmpty()) {
-            String done = readSmallString(new File(dir, F_DONE), 64);
+            File doneFile = freshest(new File(dir, F_DONE), new File(SHELL_DIR, F_DONE));
+            String done = (doneFile != null && doneFile.exists()) ? readSmallString(doneFile, 64) : "";
             if (nonce.equals(done)) {
                 blindUntilMs = 0;
                 lastAckNonce = "";          // 下一次点击重新握手

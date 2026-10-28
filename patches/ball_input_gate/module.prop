@@ -1,0 +1,6 @@
+id=ball_input_gate
+name=Ball Input Touch Gate
+version=1.0
+versionCode=1
+author=pj
+description=每次 input 注入前先让悬浮球把触摸区挪开，注入完立刻还原；调试时 touch /data/local/tmp/ball-gate-off 可关闭。

@@ -1,0 +1,12 @@
+#!/system/bin/sh
+# 球触摸门控：所有 input 注入（不管来自插件、shell 还是别的自动化）都先让球让开触摸区。
+# 调试关闭：touch /data/local/tmp/ball-gate-off
+D=/data/local/tmp
+if [ -e "$D/ball-gate-off" ]; then exec cmd input "$@"; fi
+N="sh-$(date +%s%N)-$$"
+printf "%s\n" "$N" > "$D/.ball-act.tmp" 2>/dev/null && mv "$D/.ball-act.tmp" "$D/dsh-ball-act" 2>/dev/null
+sleep 0.07
+cmd input "$@"
+rc=$?
+printf "%s\n" "$N" > "$D/.ball-done.tmp" 2>/dev/null && mv "$D/.ball-done.tmp" "$D/dsh-ball-done" 2>/dev/null
+exit $rc
