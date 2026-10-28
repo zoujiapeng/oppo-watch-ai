@@ -31,6 +31,19 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
 PY
 fi
 
+# 定向注入守护进程：tools/PointerDaemon.java -> assets/pointer.jar
+# （App 运行期释放到私有目录、用 su 起来常驻；AI 的触摸直接投给目标 App，球完全无感）
+if [ -f "$HERE/tools/PointerDaemon.java" ]; then
+  mkdir -p "$B/pointer"
+  javac --release 8 -classpath "$AJAR" -d "$B/pointer" "$HERE/tools/PointerDaemon.java"
+  d8 --release --min-api 21 --lib "$AJAR" --output "$B/pointer" $(find "$B/pointer" -name '*.class')
+  python3 - "$HERE/assets/pointer.jar" "$B/pointer/classes.dex" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[2], 'classes.dex')
+PY
+fi
+
 aapt2 compile --dir res -o "$B/res.zip"
 aapt2 link -o "$B/app-unsigned.apk" -I "$AJAR" \
   --manifest AndroidManifest.xml -A assets \

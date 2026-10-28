@@ -7,6 +7,52 @@
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
+## 2026-10-29（续）：为什么澎湃/HyperOS 不让球"当无事发生"——根因已查清
+
+目标：AI 点击时**玻璃一个像素都不动**，下面的 App 照常被操控。真机上三条路都试了，
+结论是"App 侧无解，只能系统级 hook"，证据如下。
+
+### 1. `TYPE_ACCESSIBILITY_OVERLAY`（受信任 overlay）——被 WMS 挡在 token 上
+```
+W WindowManager: Attempted to add Accessibility overlay window with unknown token null.  Aborting.
+BadTokenException: Unable to add window -- token null is not valid; is your activity running?
+```
+这种窗口必须带一个由系统无障碍框架签发的 `WindowToken`；App 手里没有，`null` 直接被 abort。
+（无障碍服务开着也没用：`dumpsys accessibility` 里服务已 bound，照样 abort。）
+
+### 2. `PRIVATE_FLAG_TRUSTED_OVERLAY`（0x20000000）——被 DisplayPolicy 挡在权限上
+```
+E AndroidRuntime: java.lang.SecurityException: DisplayPolicy: uid 10286
+    does not have android.permission.INTERNAL_SYSTEM_WINDOW.
+```
+而这条权限本身：
+```
+Permission [android.permission.INTERNAL_SYSTEM_WINDOW] ... prot=signature
+```
+**signature 级** —— 只有平台签名的 App 才可能持有，`priv-app` 白名单也救不了（不是 privileged 级）。
+（顺带：这个 SecurityException 是在 `addWindow` 里抛的，会直接把进程带崩 —— 所以代码里
+`markTrustedOverlay()` 现在会先 `checkSelfPermission`，没权限绝不打这个标志。）
+
+### 3. 于是遮挡拦截必然命中
+`dumpsys input` 里我们的窗口是 `touchOcclusionMode=USE_OPACITY`，系统窗口才是
+`TRUSTED_OVERLAY`。InputDispatcher 的规则是"触摸穿过**不受信任**的悬浮窗就整串丢弃"：
+- 同 App（球自己的设置卡片）：不拦 —— 老验收一直"通过"就是被这条盖住了；
+- 跨 App：一定拦。实测：玻璃不挪 → 点击没反应；玻璃挪走 → 立刻点中。
+- 试过的旁路（都无效）：窗口 alpha=0.99、触摸区置空、`injectInputEvent(event, mode, targetUid)`
+  定向注入（事件确实不再落到球上，但目标窗口仍然被判定为"被遮挡"，照样丢）。
+
+### 4. 唯一剩下的路（需要 root + 重启，属于"要不要为它上一个系统模块"的取舍）
+LSPosed/Zygisk 模块 hook `com.android.server.wm.WindowState#getInputInfo()`，对
+`com.glslplayground.app` 的窗口补一句 `info.setTrustedOverlay(true)`（十几行 Java）。
+打完这个补丁，球就永久是"受信任 overlay"：AI 点什么都不用让开，玻璃真正零变化。
+（本机当前 **没有装 LSPosed**；Zygisk 是开的：`ro.dalvik.vm.native.bridge=libzygisk.so`。）
+
+### 5. 在那之前，App 侧能做到的"最接近无事发生"
+- 机器人的触摸**不驱动任何手势**（不拖球、不弹四区、不弹搜索框）—— 已经做到；
+- **只有点真的落在球上**才让开（点球外 111ms、零握手、零位移）—— 已经做到；
+- 让开的停留时间砍到最短：`GATE_SETTLE_MS=90`、点击的 `DONE_GRACE_TAP_MS=80`
+  （滑动仍是 300ms，避免掐断还在路上的 MOVE/UP）→ 实测"点球上"整条 375ms，肉眼是"闪一下"。
+
 ## 2026-10-29：防误触 v2（球的触摸来源判定 + 按需让开）
 
 上一版的问题是**只挡合作方**：`/system/bin/input` 包装器和插件 socket 之外的一切注入

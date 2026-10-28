@@ -112,6 +112,7 @@ public class FloatingBallService extends Service {
                 }
             }
             applyBallTouchability();   // 球看不见 / 看见了 → 代理窗口的触摸能力跟着变
+            startPointerDaemon();      // 定向注入守护进程（死了自动拉起）
             main.postDelayed(this, CAP_WATCHDOG_MS);
         }
     };
@@ -155,6 +156,75 @@ public class FloatingBallService extends Service {
     }
 
     private String rootError;
+
+    // ── 定向注入守护进程：AI 的点击/滑动直接投给目标 App，球完全无感 ────────────────
+    //
+    // 澎湃/HyperOS 上 `InputManager.injectInputEvent(event, mode, targetUid)` 只把事件投给
+    // 目标 uid 的窗口：球（另一个 uid 的悬浮窗）连事件都收不到，于是**不用让开、不用隐藏、
+    // 不用闪烁**，玻璃"无事发生"，下面的 App 照常被操控（真机已验）。
+    // 守护进程由本 App 用 su 拉起（assets/pointer.jar），死了自动重启。
+    private Process pointerProc;
+    private volatile boolean pointerAlive = false;
+    private long pointerRetryAt = 0;
+
+    private String ensureAssetJar(String name) {
+        try {
+            File f = new File(getFilesDir(), name);
+            // 每次都重写：APK 升级后旧 jar 还躺在私有目录里，'存在就跳过'会一直跑老代码
+            InputStream in = getAssets().open(name);
+            FileOutputStream out = new FileOutputStream(f);
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            out.close();
+            in.close();
+            f.setReadable(true, false);
+            return f.getAbsolutePath();
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "ensureAssetJar(" + name + ") failed: " + t);
+            return null;
+        }
+    }
+
+    /** 拉起（或重启）定向注入守护进程。 */
+    private void startPointerDaemon() {
+        if (pointerAlive) return;
+        // 默认不启用：实测"定向注入"也躲不过跨 App 的遮挡拦截（球在场时一样被丢），
+        // 留在代码里只是给"只想让球收不到事件"的场景用。放 files/pointer-daemon 才开。
+        try {
+            if (!new File(gateDir(), "pointer-daemon").exists()) return;
+        } catch (Throwable ignored) { return; }
+        long now = System.currentTimeMillis();
+        if (now < pointerRetryAt) return;
+        pointerRetryAt = now + 5000;
+        try {
+            String jar = ensureAssetJar("pointer.jar");
+            if (jar == null) return;
+            String cmd = "CLASSPATH=" + jar + " /system/bin/app_process /system/bin PointerDaemon 38722";
+            final Process p = new ProcessBuilder("su", "-c", cmd)
+                    .redirectErrorStream(true).start();
+            pointerProc = p;
+            pointerAlive = true;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try (java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(p.getInputStream()))) {
+                        String line;
+                        while ((line = r.readLine()) != null) {
+                            Log.i("FloatingBall", "pointer: " + line);
+                        }
+                    } catch (Throwable ignored) { }
+                    pointerAlive = false;
+                    pointerProc = null;
+                    Log.w("FloatingBall", "pointer daemon exited");
+                }
+            }, "pointer-watch").start();
+            Log.i("FloatingBall", "pointer daemon started");
+        } catch (Throwable t) {
+            pointerAlive = false;
+            Log.w("FloatingBall", "startPointerDaemon failed: " + t);
+        }
+    }
 
     // ── agent 触摸门控（DSH 注入触摸的那一下，球让开）────────────────────────────
     //
@@ -1796,6 +1866,48 @@ public class FloatingBallService extends Service {
     // ── 窗口 ──────────────────────────────────────────────────────────
 
     /**
+     * `WindowManager.LayoutParams.PRIVATE_FLAG_TRUSTED_OVERLAY`（Android 12+，@hide，值 0x20000000）。
+     *
+     * 系统给的注释是"这个悬浮窗是受信任的"：InputDispatcher 的 tap-jacking 拦截只拦
+     * **不受信任**的悬浮窗（"触摸穿过一个不受信任的悬浮窗"就整串丢弃）。打上这个标志，
+     * 球就能**原地不动**——只把可触摸区置空——让点击干净地穿到下面**别的 App**。
+     * 这是"AI 操作时玻璃无事发生"的关键一枚开关（比无障碍 overlay 轻得多）。
+     */
+    private static final int PFLAG_TRUSTED_OVERLAY = 0x20000000;
+    private boolean trustedFlagApplied = false;
+    private static java.lang.reflect.Field pflagField;
+
+    /**
+     * 给窗口打上"受信任 overlay"私有标志。
+     *
+     * ⚠️ 澎湃/HyperOS 的 DisplayPolicy 会直接拒绝：
+     *   `DisplayPolicy: uid 10286 does not have android.permission.INTERNAL_SYSTEM_WINDOW`
+     * （而且是在 addWindow 里抛 SecurityException，会把进程带崩）。
+     * 所以**默认不打**，只有放了 `files/trusted-overlay` 开关、并且确认这个 App 已经
+     * 被"系统化"（/system/priv-app + privapp-permissions 里给了 INTERNAL_SYSTEM_WINDOW）时才开。
+     */
+    private void markTrustedOverlay(WindowManager.LayoutParams p) {
+        if (p == null) return;
+        // 澎湃/HyperOS：DisplayPolicy 要求 INTERNAL_SYSTEM_WINDOW（signature 级），
+        // 普通 App 永远拿不到 → 没这个权限就绝对不要打，否则 addWindow 抛 SecurityException 把进程带崩。
+        try {
+            if (checkSelfPermission("android.permission.INTERNAL_SYSTEM_WINDOW")
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        } catch (Throwable t) { return; }
+        try {
+            if (pflagField == null) {
+                // privateFlags 是 @hide 字段（SDK 桩里没有），只能反射拿
+                pflagField = WindowManager.LayoutParams.class.getField("privateFlags");
+            }
+            int cur = pflagField.getInt(p);
+            pflagField.setInt(p, cur | PFLAG_TRUSTED_OVERLAY);
+            trustedFlagApplied = true;
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "markTrustedOverlay failed: " + t);
+        }
+    }
+
+    /**
      * 悬浮窗类型。
      *
      * 优先 {@code TYPE_ACCESSIBILITY_OVERLAY}（**受信任** overlay）：Android 12+ 的
@@ -1823,15 +1935,18 @@ public class FloatingBallService extends Service {
 
     /** 当前窗口是不是"受信任"的（决定让开要不要挪窗口）。 */
     private boolean trustedOverlayNow() {
-        return BallA11yService.connected && a11yOverlayAllowed() && glView != null
-                && params != null
-                && params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+        if (glView == null || params == null) return false;
+        if (legacyGlassPark()) return false;                       // 排查开关：强制回"挪窗口"
+        if (params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) return true;
+        // 私有标志 PRIVATE_FLAG_TRUSTED_OVERLAY 打上了就算受信任（本机走的就是这条）
+        return trustedFlagApplied;
     }
 
     private WindowManager.LayoutParams overlayParams(int w, int h, int flags) {
         int type = overlayType();
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(w, h, type, flags, PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.START;
+        markTrustedOverlay(p);
         return p;
     }
 
@@ -2613,6 +2728,7 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
+        markTrustedOverlay(siriTouchParams);
         siriTouchParams.gravity = Gravity.TOP | Gravity.START;
         final android.view.GestureDetector gd = new android.view.GestureDetector(this,
                 new android.view.GestureDetector.SimpleOnGestureListener() {
@@ -3109,14 +3225,15 @@ public class FloatingBallService extends Service {
                 applyBallTouchability();
                 Log.i("FloatingBall", "gate(DONE) -> 恢复触摸区");
             }
-        }, DONE_GRACE_MS);
+        }, lastActWasDrag ? DONE_GRACE_MS : DONE_GRACE_TAP_MS);
     }
 
     private static final String SHELL_DIR = "/data/local/tmp";
     /** 让开之后要等一帧多，窗口位置对 InputDispatcher 才真的生效（不等就会丢点击）。 */
-    private static final long GATE_SETTLE_MS = 120;
+    private static final long GATE_SETTLE_MS = 90;
     /** DONE 之后再等一小会儿才还原，避免掐断还在路上的滑动。 */
-    private static final long DONE_GRACE_MS = 300;
+    private static final long DONE_GRACE_MS = 300;      // 滑动才需要长尾巴（MOVE/UP 还在路上）
+    private static final long DONE_GRACE_TAP_MS = 80;   // 点击：注入完立刻还回来，尽量不让人看见
 
     /** 两个候选里取修改时间更新的那个（都不存在就返回第一个）。 */
     private static File freshest(File a, File b) {
@@ -3217,6 +3334,7 @@ public class FloatingBallService extends Service {
                         + " search=" + searchActive
                         + " menu=" + menuShown
                         + " region=" + (regionMode ? 1 : 0)
+                        + " pointer=" + (pointerAlive ? 1 : 0)
                         + " a11y=" + (BallA11yService.connected ? 1 : 0)
                         + " trusted=" + (trustedOverlayNow() ? 1 : 0)
                         + " duck=" + (now < syntheticDuckUntil ? Math.max(0, syntheticDuckUntil - now) : 0)
@@ -3354,6 +3472,7 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
+        markTrustedOverlay(ballTouchParams);
         ballTouchParams.gravity = Gravity.TOP | Gravity.START;
         v.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
@@ -8219,6 +8338,7 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
+        markTrustedOverlay(params);
         params.gravity = Gravity.TOP | Gravity.START;
         // 启动位置就是"水平居中、贴近屏幕顶端"（用户要求）：不要先放中间再跳上去
         params.x = (screenW - winW) / 2;
@@ -8230,9 +8350,10 @@ public class FloatingBallService extends Service {
             try {
                 wm.addView(glView, params);
             } catch (Throwable t) {
-                // 受信任 overlay 被系统拒绝（无障碍没真正生效等）→ 退回普通悬浮窗，
+                // 受信任 overlay 被系统拒绝（无障碍没真正生效 / OEM 权限校验等）→ 退回普通悬浮窗，
                 // 后面 applyBallTouchability() 会走"挪窗口"的老路，功能不丢，只是会闪。
-                if (params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) {
+                if (params.type != WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        && params.type != WindowManager.LayoutParams.TYPE_PHONE) {
                     Log.w("FloatingBall", "TYPE_ACCESSIBILITY_OVERLAY 被拒 → 退回普通悬浮窗: " + t);
                     a11yOverlayBroken = true;
                     params.type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
