@@ -2677,7 +2677,10 @@ public class FloatingBallService extends Service {
     private final java.util.Map<View, int[]> gateWindowSaved = new java.util.IdentityHashMap<>();
 
     private void trackWindow(View v) {
-        if (v != null && !gateWindows.contains(v)) gateWindows.add(v);
+        // 球本身（玻璃窗 + 触摸代理窗）有自己的让开逻辑，别在这里重复挪：
+        // 两个地方各自保存/还原坐标会打架，玻璃还会因为二次挪动重建缓冲（画面发白）。
+        if (v == null || v == glView || v == ballTouch) return;
+        if (!gateWindows.contains(v)) gateWindows.add(v);
     }
 
     /**
