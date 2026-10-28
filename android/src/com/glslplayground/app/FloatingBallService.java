@@ -94,16 +94,24 @@ public class FloatingBallService extends Service {
     private static final long CAP_STALE_MS = 2500;
     private final Runnable capWatchdog = new Runnable() {
         @Override public void run() {
-            boolean alive = rootCapture != null && rootCapture.isRunning()
-                    && renderer != null && renderer.captureSource == 1;
-            if (alive) {
-                long age = System.currentTimeMillis() - renderer.lastFrameAtMs;
-                if (renderer.lastFrameAtMs > 0 && age > CAP_STALE_MS) {
-                    Log.w("FloatingBall", "抓帧已停 " + age + "ms → 重启采集");
-                    try { rootCapture.stop(); } catch (Throwable ignored) { }
+            boolean rootMode = renderer != null && renderer.captureSource == 1;
+            if (rootMode) {
+                long now = System.currentTimeMillis();
+                long last = renderer.lastFrameAtMs;
+                boolean stale = last > 0 && now - last > CAP_STALE_MS;
+                // 关键：首帧一直没来（su 被拒 / 管道断了）以前是"永远不重启" →
+                // 球其实一帧都没画出来，窗口却照样吃触摸，屏幕中间就成了一块看不见的死区。
+                boolean never = last == 0 && surfaceReadyAtMs > 0
+                        && now - surfaceReadyAtMs > 4000;
+                if (stale || never) {
+                    Log.w("FloatingBall", never ? "抓帧从未到达 → 重启采集"
+                            : "抓帧已停 " + (now - last) + "ms → 重启采集");
+                    try { if (rootCapture != null) rootCapture.stop(); } catch (Throwable ignored) { }
+                    rootCapture = null;
                     startRootCapture();
                 }
             }
+            applyBallTouchability();   // 球看不见 / 看见了 → 代理窗口的触摸能力跟着变
             main.postDelayed(this, CAP_WATCHDOG_MS);
         }
     };
@@ -147,6 +155,29 @@ public class FloatingBallService extends Service {
     }
 
     private String rootError;
+
+    // ── agent 触摸门控（DSH 要注入触摸时，球让路）──────────────────────────────
+    //
+    // DSH 的 mobile 工具用 `input` 注入点击/滑动，走的是和真手指**同一套**窗口命中测试。
+    // 球常驻屏幕中间，注入的 DOWN 落在球上就被球吃掉（底下 App 收不到、球还会被拖着走）。
+    // 协议：DSH 动手前把 nonce 写进 ACT 文件 → 球看到内容变了，进入 1500ms 让路窗口：
+    //   · 代理触摸窗口加 FLAG_NOT_TOUCHABLE；
+    //   · 同时把窗口缩成 1×1、挪到 (-8,-8)（ROM 忽略 flag 时的兜底）；
+    //   · 回写同一个 nonce 到 ACK，DSH 读到就立刻注入（最多等 300ms，收不到也照发）。
+    // 窗口从"球自己看到信号的那一刻"用**本地时钟**起算（/sdcard 是 FUSE，mtime 不可信）。
+    private static final String F_ACT = "dsh-ball-act";
+    private static final String F_ACK = "dsh-ball-ack";
+    private static final long AGENT_HOLD_MS = 1500;
+    private static final long GATE_POLL_MS = 50;
+    private volatile boolean agentBlind = false;   // 让路中
+    private long blindUntilMs = 0;
+    private String lastActNonce = "";
+    private String lastAckNonce = "";
+    private long lastAckAt = 0;
+    private long lastDiagAt = 0;
+    private boolean proxyParked = false;           // 代理窗口已被缩成 1×1 挪到屏外
+    private boolean lastDrawn = false;             // 上一次判定"球画出来了没有"
+    private long surfaceReadyAtMs = 0;             // GL surface 就绪时刻（抓帧看门狗用它判"首帧一直没来"）
 
     private int screenW, screenH, winSize, winW, winH;
     private int resultCode;
@@ -2588,19 +2619,109 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 代理窗口（唯一接用户手势的窗口）：搜索胶囊、卡片/菜单展开期间不接管触摸。 */
+    /**
+     * 代理窗口（唯一接用户手势的窗口）什么时候接管触摸：
+     *   · agent 让路窗口内（DSH 正要注入点击/滑动）；
+     *   · 球还没画出第一帧 / 抓帧断了 —— 球看不见时绝不能留一块"看不见但吃触摸"的死区；
+     *   · 搜索胶囊、卡片菜单、整屏玻璃这些本来就不该抢手势的状态。
+     * 让路除了加 FLAG_NOT_TOUCHABLE，还把窗口缩成 1×1 挪到 (-8,-8)：
+     * 有些 ROM 对悬浮窗 flag 处理不干净，缩到屏幕外才是物理上的兜底。
+     */
     private void applyBallTouchability() {
-        boolean blind = searchActive || searchClosing || menuShown || glassFullscreen;
-        if (ballTouchParams != null && wm != null && ballTouch != null) {
-            int want = blind ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
-            int now = ballTouchParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            if (want != now) {
-                ballTouchParams.flags = blind
-                        ? (ballTouchParams.flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
-                        : (ballTouchParams.flags & ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
-                updateProxyWindow();
-            }
+        if (ballTouchParams == null || wm == null || ballTouch == null) return;
+        boolean blind = agentBlind || !ballDrawnNow()
+                || searchActive || searchClosing || menuShown || glassFullscreen;
+        int flags = ballTouchParams.flags;
+        if (blind) {
+            flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            proxyParked = true;
+            ballTouchParams.width = 1;
+            ballTouchParams.height = 1;
+            ballTouchParams.x = -8;
+            ballTouchParams.y = -8;
+        } else {
+            flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         }
+        boolean flagChanged = flags != ballTouchParams.flags;
+        ballTouchParams.flags = flags;
+        if (flagChanged) updateProxyWindow();
+        if (!blind && proxyParked) {
+            proxyParked = false;
+            syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
+        }
+    }
+
+    /** 球此刻是不是真的画在屏幕上（第一帧还没来 / 抓帧断了 = 看不见）。 */
+    private boolean ballDrawnNow() {
+        if (renderer == null) return false;
+        if (!renderer.hasDrawnFrame()) return false;   // 抓屏帧没被真正上传 = 窗口里什么都没有
+        long t = renderer.lastFrameAtMs;
+        return t > 0 && System.currentTimeMillis() - t < 3000;
+    }
+
+    // 门控轮询：50ms 看一次 ACT 文件；内容变了就开 1500ms 让路窗口并回 ACK。
+    private final Runnable gateTick = new Runnable() {
+        @Override public void run() {
+            pumpGate();
+            main.removeCallbacks(this);
+            main.postDelayed(this, GATE_POLL_MS);
+        }
+    };
+
+    private void pumpGate() {
+        long now = System.currentTimeMillis();
+        File dir = gateDir();
+        File act = new File(dir, F_ACT);
+        String nonce = act.exists() ? readSmallString(act, 64) : "";
+        if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
+            lastActNonce = nonce;
+            blindUntilMs = now + AGENT_HOLD_MS;
+            Log.i("FloatingBall", "agent act: " + nonce + " → 让路 " + AGENT_HOLD_MS + "ms");
+        }
+        boolean blind = now < blindUntilMs;
+        boolean drawn = ballDrawnNow();
+        if (blind != agentBlind || drawn != lastDrawn) {
+            agentBlind = blind;
+            lastDrawn = drawn;
+            applyBallTouchability();
+            Log.i("FloatingBall", "agent gate -> " + (blind ? "只显示（不接触摸）"
+                    : (drawn ? "可触摸" : "球未画出，暂不接管触摸")));
+        }
+        if (blind && !nonce.isEmpty() && !nonce.equals(lastAckNonce) && now - lastAckAt >= 200) {
+            lastAckAt = now;
+            try {
+                writeAtomic(new File(dir, F_ACK), nonce + "\n");
+                lastAckNonce = nonce;
+            } catch (Throwable ignored) { }
+        }
+        // 诊断口子（2s 一次）：球到底画出来没有 / 让路状态。排查"球看不见但吃掉触摸"时先看它。
+        if (now - lastDiagAt >= 2000) {
+            lastDiagAt = now;
+            try {
+                long age = renderer != null ? now - renderer.lastFrameAtMs : -1;
+                writeAtomic(new File(dir, "ball-diag"), "saw="
+                        + (renderer != null && renderer.hasDrawnFrame())
+                        + " cov=" + (renderer != null ? renderer.coverageAlpha() : -1)
+                        + " diff=" + (renderer != null ? renderer.visibilityDiff() : -1)
+                        + " ageMs=" + age + " blind=" + blind + " drawn=" + drawn + "\n");
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 原子写：先写 .tmp 再 rename（DSH 可能正在读）。 */
+    private static void writeAtomic(File dst, String body) throws Exception {
+        File tmp = new File(dst.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(body.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+        try {
+            java.nio.file.Files.move(tmp.toPath(), dst.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable e) {
+            if (!tmp.renameTo(dst)) throw e;
+        }
+        try { dst.setReadable(true, false); dst.setWritable(true, false); } catch (Throwable ignored) { }
     }
 
     /** 统一的代理窗口更新口。 */
@@ -2633,6 +2754,8 @@ public class FloatingBallService extends Service {
      */
     private void syncBallTouchWindow() {
         if (ballTouch == null || ballTouchParams == null || wm == null || glView == null) return;
+        // 让路期间窗口被缩成 1×1 挪到屏外，别在这里又把它算回球的位置（否则兜底就失效了）
+        if (agentBlind) return;
         float pad = Math.min(dp(12), dp(24));           // 外扩，但要**远小于**窗口留白
         float bhx, bhy;
         if (zonesActive) {
@@ -7539,6 +7662,7 @@ public class FloatingBallService extends Service {
             renderer.capH = ch;
             renderer.setOnSurfaceReady(st -> main.post(new Runnable() {
                 @Override public void run() {
+                    surfaceReadyAtMs = System.currentTimeMillis();
                     startRootCapture();
                     main.removeCallbacks(capWatchdog);
                     main.postDelayed(capWatchdog, CAP_WATCHDOG_MS);
@@ -7582,6 +7706,7 @@ public class FloatingBallService extends Service {
             homeCy = params.y + winH * 0.5f + winY0();
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
+            main.post(gateTick);            // agent 门控：DSH 注入触摸前先让路
         }
         glView.onResume();
         glView.addOnLayoutChangeListener(

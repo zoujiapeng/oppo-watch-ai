@@ -186,6 +186,74 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ── root 直采（不经 MediaProjection，直接把原始帧上传成 2D 纹理）──
     public volatile int captureSource = 0;    // 0=OES（投影/录屏） 1=root 原始帧
     private volatile boolean sawFrame = false;
+
+    /** 是否已经真的把一帧抓屏画出来（没画出来时窗口是透明的，不能接手势）。 */
+    public boolean hasDrawnFrame() { return sawFrame && lastCoverage > 8; }
+
+    // ── 可见性自检 ────────────────────────────────────────────────────────
+    // 光有 sawFrame 不够：抓屏帧上传成功、窗口 buffer 也在，但 shader 有可能一个像素都没写入
+    // （几何退化 / 分辨率对不上 / 首帧透明）。那种状态下球是"看不见但照样吃触摸"的死区。
+    // 所以每 20 帧从窗口里读回球心附近 8×8 像素，取最大 alpha：>0 才算球真的画出来了。
+    private volatile int lastCoverage = 0;
+    private volatile int lastVisDiff = -1;
+    private int probeTick = 0;
+    private java.nio.ByteBuffer probeBuf;
+    private float lastCx = 0f, lastCy = 0f, lastHx = 0f, lastHy = 0f;
+
+    /** 球心附近 8×8 像素的最大 alpha（0 = 这一帧其实什么都没画 / 画出来的就是背景本身）。 */
+    public int coverageAlpha() { return lastCoverage; }
+
+    /** 球面像素和它背后抓屏像素的平均差（越小越"隐形"；-1 = 还没量到）。 */
+    public int visibilityDiff() { return lastVisDiff; }
+
+    /**
+     * 可见性自检：读回球面一小块，和**同一位置的抓屏帧**比。
+     *
+     * 只测 alpha 不够 —— 有一种"看不见但吃触摸"的状态：球把背后桌面原样画了一遍
+     * （几何太大 / 折射失效），alpha 是 255，但屏幕上它和背景一模一样。
+     * 所以再加一步"跟背景差多少"：差得太少就当成看不见，让服务把触摸区收走。
+     */
+    private void probeCoverage() {
+        if (++probeTick % 20 != 0) return;
+        if (winW < 16 || winH < 16) return;
+        try {
+            float sx = lastCx + Math.max(4f, lastHx * 0.6f);   // 折射最强的那圈
+            float sy = lastCy;
+            int bx = Math.max(0, Math.min(winW - 8, Math.round(sx) - 4));
+            int by = Math.max(0, Math.min(winH - 8, Math.round(winH - sy) - 4));
+            int[] ball = readBlock(bx, by, 0);
+            int maxA = 0;
+            for (int i = 3; i < ball.length; i += 4) maxA = Math.max(maxA, ball[i]);
+
+            int diff = -1;
+            if (full != null && full.fbo != 0) {
+                int gx = Math.max(0, Math.min(full.w - 8, Math.round(winX + sx) - 4));
+                int gy = Math.max(0, Math.min(full.h - 8, Math.round(full.h - (winY + sy)) - 4));
+                int[] bg = readBlock(gx, gy, full.fbo);
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                int sum = 0;
+                for (int i = 0; i < 8 * 8; i++) {
+                    int o = i * 4;
+                    sum += Math.abs(ball[o] - bg[o]) + Math.abs(ball[o + 1] - bg[o + 1])
+                            + Math.abs(ball[o + 2] - bg[o + 2]);
+                }
+                diff = sum / (8 * 8 * 3);
+            }
+            lastVisDiff = diff;
+            boolean indistinguishable = diff >= 0 && diff <= 4;
+            lastCoverage = (maxA > 8 && !indistinguishable) ? maxA : 0;
+        } catch (Throwable ignored) { }
+    }
+
+    private int[] readBlock(int x, int y, int fbo) {
+        if (probeBuf == null) probeBuf = java.nio.ByteBuffer.allocateDirect(8 * 8 * 4);
+        probeBuf.clear();
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo);
+        GLES20.glReadPixels(x, y, 8, 8, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, probeBuf);
+        int[] out = new int[8 * 8 * 4];
+        for (int i = 0; i < out.length; i++) out[i] = probeBuf.get(i) & 0xFF;
+        return out;
+    }
     private final java.util.concurrent.ConcurrentLinkedQueue<byte[]> framePool =
             new java.util.concurrent.ConcurrentLinkedQueue<byte[]>();
     private final java.util.concurrent.atomic.AtomicReference<byte[]> readyFrame =
@@ -818,6 +886,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     @Override public void onDrawFrame(GL10 gl) {
+        drawFrame(gl);
+        probeCoverage();
+    }
+
+    private void drawFrame(GL10 gl) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glViewport(0, 0, winW, winH);
         GLES20.glClearColor(0f, 0f, 0f, 0f);
@@ -855,6 +928,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             cy = winH * (1.0f - svPosY);
             cr = base * svHalfY * svCorner * svMaster;
         }
+        lastCx = cx;
+        lastCy = cy;
+        lastHx = hx;
+        lastHy = hy;
 
         if (captureSource == 1) {
             // root 直采：把原始帧上传进 full（行序已翻转），不经 MediaProjection
