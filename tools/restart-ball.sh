@@ -16,10 +16,10 @@ echo "[2/6] 启动 App"
 am start -n $PKG/.MainActivity >/dev/null 2>&1
 sleep 3
 
-echo "[3/6] 打开无障碍（受信任 overlay 资格）"
-settings put secure enabled_accessibility_services $A11Y 2>/dev/null
-settings put secure accessibility_enabled 1 2>/dev/null
-sleep 3
+echo "[3/6] 清理无障碍（受信任 overlay 那条路已废弃，不再需要它）"
+settings put secure enabled_accessibility_services null 2>/dev/null
+settings put secure accessibility_enabled 0 2>/dev/null
+sleep 1
 
 echo "[4/6] 进入设置页"
 input tap 541 1987      # 首页「设置」卡片
