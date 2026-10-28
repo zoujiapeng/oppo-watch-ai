@@ -138,18 +138,19 @@ function signalBall(action) {
 		const nonce = `${Date.now()}-${process.pid}-${++ballSeq}-${action}`;
 		let settled = false;
 		const sock = net.connect({ host: "127.0.0.1", port: BALL_GATE_PORT });
-		const timer = setTimeout(() => finish(null), 500);
+		let connected = false;
+		const timer = setTimeout(() => finish(connected ? { skip: true } : null), 500);
 		function finish(v) { if (settled) return; settled = true; clearTimeout(timer); resolve(v); }
 		let buf = "";
 		sock.setNoDelay(true);
 		const kind = action === "swipe" ? "drag" : "tap";     // 拖才需要球整个让开
-		sock.on("connect", () => { ballLog(`act start ${nonce} ${kind}`); sock.write(`ACT ${nonce} ${kind}\n`); });
+		sock.on("connect", () => { connected = true; ballLog(`act start ${nonce} ${kind}`); sock.write(`ACT ${nonce} ${kind}\n`); });
 		sock.on("data", (d) => {
 			buf += d.toString("utf8");
 			if (buf.includes(`ACK ${nonce}`)) { ballLog(`ack ok ${nonce}`); finish({ sock, nonce }); }
 		});
-		sock.on("error", (e) => { ballLog(`act error ${e.message}`); finish(null); });
-		sock.on("close", () => finish(null));
+		sock.on("error", (e) => { ballLog(`act error ${e.message}`); finish(connected ? { skip: true } : null); });
+		sock.on("close", () => finish(connected ? { skip: true } : null));
 	});
 }
 function ballDone(handle) {
@@ -422,6 +423,10 @@ export function apply(ctx) {
 						let ballTimer = null;
 						if (args.action === "click") {
 							ballHandle = await signalBall(args.action);
+							if (ballHandle && ballHandle.skip) {
+								ballLog(`gate missed, click skipped`);
+								return { message: "防误触：球没能在注入前让开触摸区，这次点击已跳过（避免点到球上）。" };
+							}
 							if (ballHandle) {
 								// 注入本身很快，慢的是后面的无障碍 dump（1~2s）。所以按时长自己放行，
 								// 别等 /api/action 返回 —— 否则玻璃会消失一整秒多（肉眼就是"闪一下"）。

@@ -4,19 +4,18 @@
 D=/data/local/tmp
 APP=/sdcard/Android/data/com.glslplayground.app/files
 if [ -e "$D/ball-gate-off" ]; then exec cmd input "$@"; fi
-pidof com.glslplayground.app >/dev/null 2>&1 || exec cmd input "$@"
 KIND=tap
 case "$1" in swipe|drag|roll) KIND=drag ;; esac
 N="sh-$(date +%s%N)-$$"
 printf "%s %s\n" "$N" "$KIND" > "$D/.ball-act.tmp" 2>/dev/null && mv "$D/.ball-act.tmp" "$D/dsh-ball-act" 2>/dev/null
 i=0
-while [ $i -lt 10 ]; do
+while [ $i -lt 15 ]; do
   A=$(cat "$APP/dsh-ball-ack" 2>/dev/null)
   [ "$A" = "$N" ] && break
   sleep 0.02
   i=$((i+1))
 done
-if [ $i -ge 10 ]; then sleep 0.05; else sleep 0.04; fi
+if [ $i -ge 15 ]; then sleep 0.06; else sleep 0.04; fi
 cmd input "$@"
 rc=$?
 printf "%s\n" "$N" > "$D/.ball-done.tmp" 2>/dev/null && mv "$D/.ball-done.tmp" "$D/dsh-ball-done" 2>/dev/null
