@@ -7,45 +7,42 @@
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
 
-## 2026-10-28：防误触重做了一版（球在 DSH 动手前让开）
+## 2026-10-28：防误触——只在注入触摸的那一下让开
 
-早先那套（ACT/ACK + 全 UI 让位 + LSPosed 模块）先整体删掉了（见 `f8356bb`），
-当天按用户的新要求重做成下面这样（`e04dcc8`）。
+早先那套（ACT/ACK + 全 UI 让位 + LSPosed 模块）整体删掉了（`f8356bb`）；这里是最新一版
+（`e98942a`），语义只有一句：**mobile use 发 click/swipe 的那一下，把球的触摸区藏起来；
+注入完立刻还回去**，别的状态一概不管。
 
 **协议**（`FloatingBallService` + `~/dsh-preset-mobile-use/lib/index.js`）：
 
-1. DSH 要发 `click` / `swipe` 之前，把 nonce **原子写**进 `files/dsh-ball-act`；
-2. 球每 **50ms** 读一次，内容变了 → 开一个 **1500ms** 让路窗口（本地时钟计时，不信 FUSE 的 mtime）：
-   - 代理窗口 `|= FLAG_NOT_TOUCHABLE`；
-   - **并且**把窗口缩成 **1×1 挪到 (-8,-8)** —— 用户要求的兜底：ROM 不认 flag 时，物理上也摸不到；
+1. 插件要发 `click` / `swipe` → 把 nonce **原子写**进 `files/dsh-ball-act`；
+2. 球每 **40ms** 读一次，看到内容变了：
+   - 代理窗口 `|= FLAG_NOT_TOUCHABLE`，**并且**缩成 **1×1** 挪到屏幕边（ROM 忽略 flag 时的物理兜底）；
    - 把同一个 nonce 写进 `files/dsh-ball-ack`；
-3. DSH 读到 ACK 立即注入（最多等 250ms，读不到也照发：fail-open）；
-4. 窗口到期自动还原（`syncBallTouchWindow()` 在让路期间直接 return，免得把 1×1 又算回球的位置）。
+3. 插件收到 ACK（最多等 200ms，收不到也照发：fail-open）→ `POST /api/action` 真正注入；
+4. 注入返回（成功/失败都一样，`finally`）→ 把同一个 nonce 写进 `files/dsh-ball-done`；
+5. 球看到 `ACT == DONE` → **下一拍（≤40ms）就把触摸区还原**，回到球的几何。
+6. 兜底：插件没写 DONE（崩了/被杀）时，最多 **1200ms** 自动还原，不会把球一直晾着。
 
-**顺手修的死区**（用户报的「程序一运行屏幕中间触屏失效」）：球的代理窗口以前
-**不管球画没画出来都接管触摸** —— 抓屏没帧 / 首帧没来的时候就是一块"看不见但吃触摸"的死区。
-现在 `applyBallTouchability()` 多了一条：`!ballDrawnNow()` 时不接管（且同样的 1×1 + 屏外兜底）。
+代理窗口唯一的另外两个让开理由是原本就有的：搜索胶囊 / 卡片菜单 / 整屏玻璃这几态本来就不该
+抢手势（`overlayTouchState()`）。
 
-`ballDrawnNow()` 的判据（`GlassRenderer`）：
-- `sawFrame`：抓屏帧真的被上传过；
-- 每 20 帧 `glReadPixels` 读回球面 8×8 像素，`coverageAlpha() > 8`；
-- 而且这块像素要和**同位置的抓屏帧**有差别（`visibilityDiff() > 4`）——防"球把背景原样画了一遍"的隐形状态。
+**对账**：`pumpGate()` 每 40ms 检查一次；`want=false` 但窗口还停着就立刻 `applyBallTouchability()`，
+否则每 300ms `syncBallTouchWindow()` 拉一次几何 —— 任何路径忘了收尾都会在 300ms 内被拉回来。
 
-**诊断口子**：`files/ball-diag`（2s 刷新，内容 `saw= cov= diff= ageMs= blind= drawn=`）。
-排查"球看不见 / 死区"先看它：`cov=0` 或 `diff<=4` 说明球那一帧确实是空的/隐形的。
+**诊断口子**：`files/ball-diag`（2s 刷新）：`blind= parked= nonce= ageMs=`。
+`blind=true` + `parked=true` 就是"触摸区正藏着"；`nonce` 是最近一次信号。
 
-**抓帧看门狗**：以前只有"有帧但停了"才重启采集；首帧一直没来（su 被拒、管道断）**永远不重启**，
-球就一直是透明的 —— 现在加了这个分支（`surfaceReadyAtMs` 起 4s 无首帧就重启）。
+**抓帧看门狗**：首帧一直没来（su 被拒 / 管道断）也会重启采集（`surfaceReadyAtMs` 起 4s），
+不然球会一直是透明的。
 
-**DSH 侧**：`signalBall(action)` 只对 `click` / `swipe` 调用，失败静默。
+实测（真机）：
+```
+ACT → 代理窗口 frame=[37,454][38,455]（1×1，触摸区没了）
+     input tap 落在玻璃背后的「设置」卡片 → DshSettingsActivity 打开
+DONE → 40ms 内 frame 回到球的 [177,1622][904,2135]，可正常拖动
+```
 
-**2026-10-28 补丁（菜单收起后球点不动）**：让路的兜底会把代理窗口缩成 1×1 挪到屏外，
-但"球可见性"判据在菜单/卡片态会误判成"球没画出来"（球心那块被菜单替换、是空的），于是
-`exitZones()` 之后没人把 1×1 还原 —— 球看着回来了、其实触摸区还在屏外。
-现在：① 状态 3 一律不参与"看不见就别接触摸"；② `probeCoverage()` 在 `zoneMode`/`searchMode`
-直接跳过；③ `pumpGate()` 每 50ms 对账（`want=false` 且 `proxyParked` 就强制 `apply`，否则
-每 300ms `syncBallTouchWindow()`）；④ `syncBallTouchWindow()` 在 `parked` 时也跳过。
-实测：搜索开 → `blind=true` + 屏外 1×1；搜索关 → 300ms 内恢复 `[177,303][904,816]` 且可拖动。
 插件是启动时加载的，**改完要重启 DSH 才生效**。
 
 ## 一句话现状
