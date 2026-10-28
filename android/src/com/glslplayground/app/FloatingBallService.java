@@ -1938,6 +1938,14 @@ public class FloatingBallService extends Service {
         if (glView == null || params == null) return false;
         if (legacyGlassPark()) return false;                       // 排查开关：强制回"挪窗口"
         if (params.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) return true;
+        // 系统要是关掉了"不受信任触摸拦截"（settings put secure block_untrusted_touches 0），
+        // 球就只需要把触摸区置空、窗口一动不用动 —— 这就是一加/ColorOS 上的效果。
+        try {
+            if (android.provider.Settings.Secure.getInt(getContentResolver(),
+                    "block_untrusted_touches", 1) == 0) return true;
+        } catch (Throwable ignored) { }
+        // 调试开关：放 files/region-only 强制走"只置空、不挪窗"
+        try { if (new File(gateDir(), "region-only").exists()) return true; } catch (Throwable ignored) { }
         // 私有标志 PRIVATE_FLAG_TRUSTED_OVERLAY 打上了就算受信任（本机走的就是这条）
         return trustedFlagApplied;
     }

@@ -47,6 +47,23 @@ LSPosed/Zygisk 模块 hook `com.android.server.wm.WindowState#getInputInfo()`，
 打完这个补丁，球就永久是"受信任 overlay"：AI 点什么都不用让开，玻璃真正零变化。
 （本机当前 **没有装 LSPosed**；Zygisk 是开的：`ro.dalvik.vm.native.bridge=libzygisk.so`。）
 
+### 4.5 为什么"一加 9 Pro 就可以"
+
+"触摸穿过不受信任悬浮窗就丢弃"这条规则是 **Android 12（S）** 才有的
+（`Settings.Secure.block_untrusted_touches` / InputDispatcher 的 touch occlusion）。
+一加 9 Pro 出厂是 Android 11（ColorOS/OxygenOS 11），**根本没有这条规则** ——
+球停在原地、任何 overlay 都挡不住注入，当然"什么都不用做"。
+
+这台是 Android 13（HyperOS 13 底包），规则默认开；而且实测：
+```
+settings put secure block_untrusted_touches 0   →  依然被丢弃
+```
+即小米把这条拦截硬编码了，连系统设置都关不掉（`dumpsys input` 里也找不到可关的开关）。
+
+顺手做了个自适应：App 每次判断让开方式时读一次 `block_untrusted_touches`，
+**读到 0 就只置空触摸区、窗口一动不动**（等价于 ColorOS 上的效果）。所以万一哪天
+（比如重启后）系统认了这个设置，球会自动变成"零闪烁"，不用改代码。
+
 ### 5. 在那之前，App 侧能做到的"最接近无事发生"
 - 机器人的触摸**不驱动任何手势**（不拖球、不弹四区、不弹搜索框）—— 已经做到；
 - **只有点真的落在球上**才让开（点球外 111ms、零握手、零位移）—— 已经做到；
