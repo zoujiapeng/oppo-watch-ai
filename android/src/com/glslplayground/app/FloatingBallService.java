@@ -2675,17 +2675,19 @@ public class FloatingBallService extends Service {
         if (on == glassParked) return;
         try {
             if (on) {
-                glassSavedX = params.x;
-                glassSavedY = params.y;
+                int sx = params.x, sy = params.y;
                 params.x = -screenW * 3;
                 params.y = -screenH * 3;
+                wm.updateViewLayout(glView, params);
+                glassSavedX = sx;               // 只有窗口真的挪成功才记状态
+                glassSavedY = sy;
                 glassParked = true;
             } else {
                 params.x = glassSavedX;
                 params.y = glassSavedY;
-                glassParked = false;
+                wm.updateViewLayout(glView, params);
+                glassParked = false;            // 只有真的还回去才清标志
             }
-            wm.updateViewLayout(glView, params);
         } catch (Throwable ignored) { }
     }
 
