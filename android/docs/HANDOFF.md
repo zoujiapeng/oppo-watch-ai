@@ -38,6 +38,14 @@
 球就一直是透明的 —— 现在加了这个分支（`surfaceReadyAtMs` 起 4s 无首帧就重启）。
 
 **DSH 侧**：`signalBall(action)` 只对 `click` / `swipe` 调用，失败静默。
+
+**2026-10-28 补丁（菜单收起后球点不动）**：让路的兜底会把代理窗口缩成 1×1 挪到屏外，
+但"球可见性"判据在菜单/卡片态会误判成"球没画出来"（球心那块被菜单替换、是空的），于是
+`exitZones()` 之后没人把 1×1 还原 —— 球看着回来了、其实触摸区还在屏外。
+现在：① 状态 3 一律不参与"看不见就别接触摸"；② `probeCoverage()` 在 `zoneMode`/`searchMode`
+直接跳过；③ `pumpGate()` 每 50ms 对账（`want=false` 且 `proxyParked` 就强制 `apply`，否则
+每 300ms `syncBallTouchWindow()`）；④ `syncBallTouchWindow()` 在 `parked` 时也跳过。
+实测：搜索开 → `blind=true` + 屏外 1×1；搜索关 → 300ms 内恢复 `[177,303][904,816]` 且可拖动。
 插件是启动时加载的，**改完要重启 DSH 才生效**。
 
 ## 一句话现状
