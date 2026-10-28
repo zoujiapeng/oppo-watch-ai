@@ -177,6 +177,8 @@ public class FloatingBallService extends Service {
     private long lastAckAt = 0;
     private long lastDiagAt = 0;
     private boolean proxyParked = false;           // 代理窗口已被缩成 1×1 挪到屏外
+    private boolean glassParked = false;           // 玻璃窗也被挪到屏外（注入那一刻，避免遮挡判定）
+    private int glassSavedX = 0, glassSavedY = 0;
     private boolean lastDrawn = false;             // 上一次判定"球画出来了没有"（诊断用）
     private boolean lastBlindApplied = false;      // 上一次真正下发的"别接触摸"状态
     private long lastProxySyncAt = 0;              // 上一次对账代理窗口几何
@@ -2651,6 +2653,33 @@ public class FloatingBallService extends Service {
             proxyParked = false;
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
+        applyGlassPark(agentBlind);
+    }
+
+    /**
+     * 注入那一刻把**玻璃窗本身**也挪出屏幕。
+     *
+     * 为什么必须这么做：ColorOS/Android 的 InputDispatcher 有一条 tap-jacking 保护 ——
+     * 触摸要"穿过"一个不受信任的悬浮窗时会被整串丢弃（即便那个窗口的可触摸区域是空的）。
+     * 球压在目标上时正是这种情况，所以只把触摸区收起来还不够，玻璃窗口本身也得让开。
+     */
+    private void applyGlassPark(boolean on) {
+        if (glView == null || params == null || wm == null) return;
+        if (on == glassParked) return;
+        try {
+            if (on) {
+                glassSavedX = params.x;
+                glassSavedY = params.y;
+                params.x = -screenW * 3;
+                params.y = -screenH * 3;
+                glassParked = true;
+            } else {
+                params.x = glassSavedX;
+                params.y = glassSavedY;
+                glassParked = false;
+            }
+            wm.updateViewLayout(glView, params);
+        } catch (Throwable ignored) { }
     }
 
     /** 搜索胶囊 / 卡片菜单 / 整屏玻璃：这几态本来就不该由代理窗口接手势。 */
@@ -7908,6 +7937,7 @@ public class FloatingBallService extends Service {
 
     private void syncWinPos() {
         if (glView == null || renderer == null) return;
+        if (glassParked) return;                 // 注入那一刻玻璃被挪出屏幕，别把它算回来
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
         renderer.winX = loc[0];
