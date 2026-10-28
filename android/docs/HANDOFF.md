@@ -1588,3 +1588,13 @@ DSH 的 `mobile` 工具用的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin
 | 门控开 + `input tap`（走 /system/bin/input 包装器） | DshSettingsActivity 打开，球零位移 |
 | 门控开 + `mobile click`（插件 socket） | DshSettingsActivity 打开 |
 | 门控关（`touch /data/local/tmp/ball-gate-off`）+ `input tap` | 停在首页（球把点击吃掉） |
+
+
+## 2026-10-28（三）：默认零闪烁
+
+实测：**这台 ROM 并不会拦"穿过悬浮窗"的触摸** —— 之前点击丢失的真正原因是 ACK 回得太早（窗口还没挪完），
+加 `GATE_SETTLE_MS=45` 之后就通了。所以玻璃窗口根本不用挪。
+
+- 默认：注入时只把代理窗口收成 1×1，玻璃原样（不闪）。
+- 兼容开关：放一个 `files/glasspark` 文件 → 回到"整窗挪出屏幕"的老办法（个别 ROM 需要，代价是闪）。
+- 验收：`proxy` 1×1（`[-1,130][0,131]`）期间玻璃帧不动 `[144,1499][937,2078]`，点击照样打开 DshSettingsActivity。

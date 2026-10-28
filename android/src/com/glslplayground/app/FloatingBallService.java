@@ -2654,18 +2654,23 @@ public class FloatingBallService extends Service {
             proxyParked = false;
             syncBallTouchWindow();          // 把 1×1 的窗口还原成球的尺寸/位置
         }
-        applyGlassPark(agentBlind);
+        applyGlassParkRaw(agentBlind && legacyGlassPark());
     }
 
     /**
-     * 注入那一刻把**玻璃窗本身**也挪出屏幕。
+     * 玻璃窗口要不要在注入那一刻挪出屏幕。
      *
-     * 为什么必须这么做：ColorOS/Android 的 InputDispatcher 有一条 tap-jacking 保护 ——
-     * 触摸要"穿过"一个不受信任的悬浮窗时会被整串丢弃（即便那个窗口的可触摸区域是空的）。
-     * 球压在目标上时正是这种情况，所以只把触摸区收起来还不够，玻璃窗口本身也得让开。
+     * 默认**不挪**（零闪烁）：只把代理窗口收成 1×1，玻璃原样留着。这台 ROM 实测够用。
+     * 个别 ROM 的 InputDispatcher 会把"穿过不受信任悬浮窗"的触摸整串丢掉（tap-jacking 保护），
+     * 那种情况下放一个 files/glasspark 文件即可回到"整窗挪开"的老办法——代价是操控时玻璃闪一下。
      */
-    private void applyGlassPark(boolean on) {
+    private boolean legacyGlassPark() {
+        try { return new File(gateDir(), "glasspark").exists(); } catch (Throwable t) { return false; }
+    }
+
+    private void applyGlassParkRaw(boolean on) {
         if (glView == null || params == null || wm == null) return;
+        if (on && !legacyGlassPark()) return;          // 默认零闪烁
         if (on == glassParked) return;
         try {
             if (on) {
