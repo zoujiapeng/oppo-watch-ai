@@ -1570,3 +1570,21 @@ vec2  duv = (qs - q) * uHalf * uPxToScreen / uScreen;  // 往外采样 → 圆�
 DSH 的 `mobile` 工具用的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin.js`；
 `~/dsh-preset-mobile-use/lib/index.js` 改了不生效。补丁：`python3 patches/patch-mobile-preset.py`，
 通道是 `127.0.0.1:38721` 的 `ACT`/`DONE` 回环 socket（文件通道在 Android 11+ 被分区存储挡死）。
+
+
+## 2026-10-28（续）：两个真正的原因
+
+1. **触摸被系统遮挡策略整串丢弃**：ColorOS 的 InputDispatcher 有 tap-jacking 保护 ——
+   触摸要"穿过"不受信任的悬浮窗（哪怕该窗口的可触摸区域是空的）会被丢弃。
+   所以只把代理窗口缩成 1×1 不够，**玻璃窗口本身也得让开**：
+   `applyGlassPark(agentBlind)` 把 glView 的 params 挪到屏幕外 3 倍处，`syncWinPos()` 期间跳过重算，DONE 后原样还原。
+2. **ACK 回得太早**：窗口位置对 InputDispatcher 生效要一帧多，注入方收到 ACK 立刻注入会丢。
+   现在 socket 与文件两路 ACK 都延后 `GATE_SETTLE_MS = 45ms` 才回。
+
+### 验收（球压在「⚙ 设置」卡片上，点 540,1866）
+
+| 条件 | 结果 |
+|---|---|
+| 门控开 + `input tap`（走 /system/bin/input 包装器） | DshSettingsActivity 打开，球零位移 |
+| 门控开 + `mobile click`（插件 socket） | DshSettingsActivity 打开 |
+| 门控关（`touch /data/local/tmp/ball-gate-off`）+ `input tap` | 停在首页（球把点击吃掉） |

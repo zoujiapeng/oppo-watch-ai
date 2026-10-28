@@ -177,6 +177,7 @@ public class FloatingBallService extends Service {
     private long lastAckAt = 0;
     private long lastDiagAt = 0;
     private boolean proxyParked = false;           // 代理窗口已被缩成 1×1 挪到屏外
+    private long blindStartMs = 0;                 // 让开动作开始的时间（ACK 要等窗口稳定再回）
     private boolean glassParked = false;           // 玻璃窗也被挪到屏外（注入那一刻，避免遮挡判定）
     private int glassSavedX = 0, glassSavedY = 0;
     private boolean lastDrawn = false;             // 上一次判定"球画出来了没有"（诊断用）
@@ -2766,6 +2767,7 @@ public class FloatingBallService extends Service {
                     }
                 });
                 latch.await(150, java.util.concurrent.TimeUnit.MILLISECONDS);   // 等窗口真的挪开再回 ACK
+                try { Thread.sleep(GATE_SETTLE_MS); } catch (InterruptedException ignored) { }
                 out.write(("ACK " + nonce + "\n").getBytes(StandardCharsets.UTF_8));
                 out.flush();
             } else if (line.startsWith("DONE")) {
@@ -2783,7 +2785,8 @@ public class FloatingBallService extends Service {
 
     /** 注入要开始了：把代理窗口挪到屏外（40ms 内生效）。 */
     private void beginAgentWindow(String nonce) {
-        blindUntilMs = System.currentTimeMillis() + AGENT_MAX_MS;
+        blindStartMs = System.currentTimeMillis();
+        blindUntilMs = blindStartMs + AGENT_MAX_MS;
         if (nonce != null && !nonce.isEmpty()) lastActNonce = nonce;
         if (!agentBlind) {
             agentBlind = true;
@@ -2805,6 +2808,8 @@ public class FloatingBallService extends Service {
     }
 
     private static final String SHELL_DIR = "/data/local/tmp";
+    /** 让开之后要等一帧多，窗口位置对 InputDispatcher 才真的生效（不等就会丢点击）。 */
+    private static final long GATE_SETTLE_MS = 45;
 
     /** 两个候选里取修改时间更新的那个（都不存在就返回第一个）。 */
     private static File freshest(File a, File b) {
@@ -2823,6 +2828,7 @@ public class FloatingBallService extends Service {
         String nonce = (act != null && act.exists()) ? readSmallString(act, 64) : "";
         if (!nonce.isEmpty() && !nonce.equals(lastActNonce)) {
             lastActNonce = nonce;
+            blindStartMs = now;
             blindUntilMs = now + AGENT_MAX_MS;
             Log.i("FloatingBall", "agent act: " + nonce + " → 触摸区让开");
         }
@@ -2855,7 +2861,8 @@ public class FloatingBallService extends Service {
             syncBallTouchWindow();     // 数值没变就什么都不做
         }
         boolean blind = signalBlind;
-        if (blind && !nonce.isEmpty() && !nonce.equals(lastAckNonce) && now - lastAckAt >= 200) {
+        if (blind && !nonce.isEmpty() && !nonce.equals(lastAckNonce) && now - lastAckAt >= 200
+                && now - blindStartMs >= GATE_SETTLE_MS) {
             lastAckAt = now;
             try {
                 writeAtomic(new File(dir, F_ACK), nonce + "\n");
