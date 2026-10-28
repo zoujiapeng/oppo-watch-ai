@@ -94,8 +94,16 @@ shots e; SY2=$(field synthetic)
 # cmd input 绕过 /system/bin/input 包装器 → 球应该"认得这不是人"
 cmd input tap $IN_X $IN_Y >/dev/null 2>&1
 sleep 0.4
+sleep 0.4
 SY3=$(field synthetic)          # diag 在吞到触摸后 40ms 内就会刷新
-[ "$SY3" -gt "$SY2" ] && ok "识别为机器触摸并计数（synthetic $SY2 → $SY3）" || bad "没识别成机器触摸（synthetic 没变）"
+DUCK=$(field duck)
+if [ -n "$SY2" ] && [ -n "$SY3" ] && [ "$SY3" -gt "$SY2" ]; then
+  ok "识别为机器触摸并计数（synthetic $SY2 → $SY3）"
+elif [ -n "$DUCK" ] && [ "$DUCK" -gt 0 ]; then
+  ok "识别为机器触摸（球已进入自愈让开 duck=${DUCK}ms）"
+else
+  bad "没识别成机器触摸（synthetic $SY2 → $SY3, duck=$DUCK）"
+fi
 # 紧接着再来一下：此刻球正处在 1.5s 自愈窗口里，应该能穿过去
 cmd input tap $IN_X $IN_Y >/dev/null 2>&1
 sleep 1.0

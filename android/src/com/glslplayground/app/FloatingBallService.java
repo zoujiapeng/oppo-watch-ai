@@ -113,6 +113,7 @@ public class FloatingBallService extends Service {
             }
             applyBallTouchability();   // 球看不见 / 看见了 → 代理窗口的触摸能力跟着变
             startPointerDaemon();      // 定向注入守护进程（死了自动拉起）
+            if (!surfaceTrusted) markSurfaceTrusted(glView);   // surface 建好后补打受信任标志
             main.postDelayed(this, CAP_WATCHDOG_MS);
         }
     };
@@ -183,6 +184,33 @@ public class FloatingBallService extends Service {
         } catch (Throwable t) {
             Log.w("FloatingBall", "ensureAssetJar(" + name + ") failed: " + t);
             return null;
+        }
+    }
+
+
+    /**
+     * 把某个 SurfaceView 的**子 surface** 标成受信任 overlay
+     * （`SurfaceControl.Transaction#setTrustedOverlay(sc, true)`，@hide）。
+     * 成功之后 InputDispatcher 的"不受信任遮挡"判定会跳过它 —— 球可以原地不动。
+     */
+    private void markSurfaceTrusted(View v) {
+        try {
+            if (!new File(gateDir(), "trusted-surface").exists()) return;
+        } catch (Throwable ignored) { return; }
+        try {
+            Class<?> scCls = Class.forName("android.view.SurfaceControl");
+            Class<?> txCls = Class.forName("android.view.SurfaceControl$Transaction");
+            Object sc = Class.forName("android.view.SurfaceView")
+                    .getMethod("getSurfaceControl").invoke(v);
+            if (sc == null) { Log.w("FloatingBall", "markSurfaceTrusted: sc=null"); return; }
+            Object tx = txCls.getConstructor().newInstance();
+            txCls.getMethod("setTrustedOverlay", scCls, boolean.class).invoke(tx, sc, true);
+            txCls.getMethod("apply").invoke(tx);
+            surfaceTrusted = true;
+            Log.i("FloatingBall", "SurfaceView 子 surface 已标为受信任 overlay");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "markSurfaceTrusted failed: " + t
+                    + (t.getCause() != null ? " / " + t.getCause() : ""));
         }
     }
 
@@ -271,7 +299,9 @@ public class FloatingBallService extends Service {
     // ── 「让开」的新实现：改可触摸区域（Region），窗口一个像素都不动 ──────────────
     // 老办法是把窗口缩成 1×1 挪到屏外再挪回来：每次点击 8~12 次 updateViewLayout，
     // 会重建缓冲（玻璃发白）、还会抖。改 Region 只走一次 traversal，肉眼看不到。
-    private volatile boolean blindNow = false;     // 当前是否处于"让开"状态
+    private volatile boolean blindNow = false;      // 注入那一刻：本 App **所有**窗口退出命中测试
+    private volatile boolean ballBlindNow = false;  // 只有球自己的触摸层退出（搜索框/菜单这些状态）
+    private volatile boolean surfaceTrusted = false;
     private boolean regionMode = false;            // 反射挂 InternalInsets 监听成功（能改 Region）
     private boolean a11yOverlayBroken = false;     // 受信任 overlay 被系统拒过（退回普通悬浮窗）
     private final java.util.Set<View> regionInstalled =
@@ -1946,6 +1976,8 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
         // 调试开关：放 files/region-only 强制走"只置空、不挪窗"
         try { if (new File(gateDir(), "region-only").exists()) return true; } catch (Throwable ignored) { }
+        // 调试开关：files/region-only → "只置空触摸区、不挪窗口"（用来验遮挡判定，别长期开）
+        try { if (new File(gateDir(), "region-only").exists()) return true; } catch (Throwable ignored) { }
         // 私有标志 PRIVATE_FLAG_TRUSTED_OVERLAY 打上了就算受信任（本机走的就是这条）
         return trustedFlagApplied;
     }
@@ -2908,7 +2940,11 @@ public class FloatingBallService extends Service {
      */
     private void buildTouchRegion(View v, android.graphics.Region out) {
         int w = v.getWidth(), h = v.getHeight();
-        if (w <= 0 || h <= 0 || blindNow) { out.setEmpty(); return; }
+        if (w <= 0 || h <= 0) { out.setEmpty(); return; }
+        // ⚠️ 搜索胶囊/卡片菜单/审批面板这些**交互窗口**，只在"注入那一刻"才让开；
+        // 平时（哪怕球自己要让开）它们的触摸区必须是整块 —— 否则胶囊自己就变成点不动的死屏。
+        boolean ballLayer = (v == ballTouch || v == siriTouch);
+        if (blindNow || (ballBlindNow && ballLayer)) { out.setEmpty(); return; }
         if (v == ballTouch && roundishOk(w, h)) {
             android.graphics.Path p = new android.graphics.Path();
             float r = Math.min(w, h) / 2f;
@@ -2965,8 +3001,16 @@ public class FloatingBallService extends Service {
      */
     private void applyBallTouchability() {
         if (ballTouchParams == null || wm == null || ballTouch == null) return;
-        boolean blind = agentBlind || blindWanted();
-        blindNow = blind;
+        // 三种"让开"要分清：
+        //   · agentBlind / 自愈 duck：跨 App 的触摸要真的到下面，玻璃和代理窗都得离开那个点；
+        //   · 搜索胶囊 / 卡片菜单 / 审批面板：球自己的层让开，但这些**交互窗口必须保持可触摸**，
+        //     否则胶囊自己就成了点不动的死屏（2026-10-29 人类触摸全废就是这条踩的坑）。
+        boolean ducking = System.currentTimeMillis() < syntheticDuckUntil;
+        boolean yieldAll = agentBlind || ducking;
+        boolean yieldBall = yieldAll || overlayTouchState();
+        boolean blind = yieldBall;
+        blindNow = yieldAll;
+        ballBlindNow = yieldBall;
         if (regionMode) nudgeRegions();            // 圆角区域 / 置空，都要重新算一次
 
         if (regionMode && trustedOverlayNow()) {
@@ -2997,8 +3041,9 @@ public class FloatingBallService extends Service {
         }
         // 走到这里说明窗口**不是受信任 overlay**：跨 App 时系统的遮挡拦截只看窗口框，
         // 光把触摸区置空不够 —— 必须把玻璃和代理窗一起挪出屏幕（会闪一下，但只在这一下）。
-        applyGlassParkRaw(blind);
-        parkAllOverlays(blind);
+        // 注意：只有"注入那一刻"才动玻璃和交互窗口；搜索框之类的状态只让球自己的层后退。
+        applyGlassParkRaw(yieldAll);
+        parkAllOverlays(yieldAll);
     }
 
     /**
@@ -8347,6 +8392,10 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         markTrustedOverlay(params);
+        // 实验开关：files/alpha099 → 玻璃窗 alpha=0.99（验"累积 opacity 要 > 1.0 才拦"这条判据）
+        try {
+            if (new File(gateDir(), "alpha099").exists()) params.alpha = 0.99f;
+        } catch (Throwable ignored) { }
         params.gravity = Gravity.TOP | Gravity.START;
         // 启动位置就是"水平居中、贴近屏幕顶端"（用户要求）：不要先放中间再跳上去
         params.x = (screenW - winW) / 2;
@@ -8375,6 +8424,16 @@ public class FloatingBallService extends Service {
             trackWindow(glView);
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
             homeCy = params.y + winH * 0.5f + winY0();
+            // ★ 关键一格：实测挡注入的是 GLSurfaceView 自带的 SurfaceView 子 surface
+            //   （BLOCK_UNTRUSTED），把**这个 surface** 标成受信任 overlay，
+            //   遮挡判定就会跳过它 —— 球不用挪、不用闪。
+            markSurfaceTrusted(glView);
+            // 实测：真正挡住注入的是 GLSurfaceView 自带的 SurfaceView 输入窗
+            //   "Untrusted touch due to occlusion by /10286/SurfaceView[](BLAST)"
+            // 把它的 surface alpha 压到 0.99（肉眼无感），累积 opacity 就不再是 1.0。
+            try {
+                if (new File(gateDir(), "alpha099").exists()) glView.setAlpha(0.99f);
+            } catch (Throwable ignored) { }
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(gateTick);            // agent 门控（文件通道，root 调试用）
