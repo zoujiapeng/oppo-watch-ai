@@ -6,10 +6,34 @@
 > 🚚 **要在另一台手机上安装部署**（而不是改代码）→ 直接看
 > [`DEPLOY_OTHER_PHONE.md`](DEPLOY_OTHER_PHONE.md)：体检命令、装法、必开开关、
 > 全新安装默认值表、踩坑速查表、给 AI 的最短行动清单。
->
-> 🖐 **Agent 在操控手机时，注入的点击/滑动会不会点到球上？** → 看
-> [`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)：球让路协议（信号文件 + ACK 握手）、
-> 代理触摸窗口的窗口结构、SELinux 只能读不能写的两个坑、验证脚本用法。
+
+## 2026-10-28：防误触 / 球让路门控已整体移除（等重新设计）
+
+用户要求把「agent 注入的触摸别被球吃掉」这套机制删干净、重新设计。已删：
+
+- **App 侧**：`pumpAgentGate()` / `agentGateTick` / `applyAgentYield()` / `yieldFlag()` /
+  `yieldRegion()` / `setAgentYield()` / `getAgentYield()`、ACT/ACK 信号文件、`dsh-ball-alive`
+  心跳、`float_agent_yield` 开关、代理窗口的 `dsh-ball-proxy` 标题、设置页
+  「DSH 操控时全部 UI 让位」。
+- **DSH 插件**：`~/dsh-preset-mobile-use/lib/index.js` 的 `waitForBallStandDown()` /
+  `BALL_GUARD_DIR` / guidance 里那句 stand-down 说明 / `/api/action` 前的调用点。
+- **验证与补丁**：`android/tools/ball-guard-verify.sh`、`ball-yield-verify.sh`、
+  `ball-guard-plugin-e2e.mjs`、`ball-proxy-state.py`、`patches/apply-vd-ball-guard-patch.sh`、
+  `patches/preset-mobile-use/`。
+- **LSPosed 模块**：`~/ball-trusted`（`com.pj.balltrusted`，在 system_server 里把球窗口标成
+  `trustedOverlay` / `TOUCH_OCCLUSION_NONE`）整目录删除。
+- **文档**：`BALL_TOUCH_GUARD.md` 删除；README / HANDOFF / DEPLOY_OTHER_PHONE / OPERATIONS
+  里相关段落一并清掉。
+
+**保留的底座**（这些不是防误触，删了球就不工作）：
+
+- 玻璃层只画不摸 —— `makeTouchTransparent()` 用**空可触摸区域**实现（不是 `FLAG_NOT_TOUCHABLE`，
+  那会被 ColorOS 压成 alpha 0.80，见下文那一节）；
+- 贴身代理窗口 `ballTouch`：唯一接用户手势的窗口（单击/长按取消/拖动）；
+- `applyBallTouchability()`：搜索胶囊 / 卡片菜单 / 整屏玻璃这些状态下代理窗口不接管触摸。
+
+**当前基线**：agent 注入的触摸落在球上时会被球当成用户手势（拖球、弹输入框）—— 这正是重设计
+要解决的问题。构建与装机已验证（`bash android/build.sh` → `pm install`），球可正常拖。
 
 ## 一句话现状
 
@@ -126,8 +150,6 @@ pm install -r ~/oppo-watch-ai/glsl-playground.apk
 4. **行内格式解析失败就原样显示**（`try/catch` 兜底）：排版出点错远好过把球搞崩。
 5. **超长截断**：只留最后 `MAX_CHARS = 2500` 字（结论通常在最后）。
 6. **字号** = 设置页「Siri 字号」×「球内回复字号比例」（滑块，默认 0.25 ≈ 18px）。
-7. **触摸让路**：文字层要能滚动所以是可触摸的，会挡住下面 App 的手势；
-   `applyTextTouchGate()` 在 `agentActing` 为真时给它设 `FLAG_NOT_TOUCHABLE`。
 
 ## 球内富文本：WebView + 自写 markdown（2026-10-16 大改，重点看）
 
@@ -473,59 +495,6 @@ SELinux 禁区，所以只能用 127.0.0.1 上的小服务当信箱。安卓侧�
 - ⚠️ 选项排现在是竖排单列（每行一个、左对齐、可带描述）。选项很短很多时竖排会偏长，
   靠滚动兜住；如果想让短选项并排成两列，需要在几何里再做一次行装箱。
 
-## Agent 触摸门控（2026-10-15 新增）
-
-**问题**：DSH 的 mobile 工具注入触摸走 `/system/bin/input`，和真手指走**同一套窗口命中测试**，
-`MotionEvent` 里没有"注入"标记。球常驻屏幕中间又可触摸，于是注入的 `ACTION_DOWN` 被球吃掉 →
-底下 App 收不到 down（滑动半途而废），球还会把这串手势当成用户在操作（按住挪球）。
-
-**做法**（详见 [`BALL_TOUCH_GUARD.md`](BALL_TOUCH_GUARD.md)）：
-
-1. 玻璃层 `GLSurfaceView` 改成 `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCHABLE | FLAG_LAYOUT_NO_LIMITS`
-   —— **只画不摸**；顺手消掉"窗口里那圈看不见的透明边也在吞触摸"的老坑。
-2. 新增**代理触摸窗口**（`setTitle("dsh-ball-proxy")`，`setupBallTouchLayer()`）：贴身包住球
-   （+10dp），在玻璃层之后 addView → z 序最低的触摸层，审批面板/文字层/输入行照样压在它上面。
-   单击/长按取消/拖动的手感与旧代码同源（同一个 `inSiriBall()` SDF + `moveBallDrag()`）。
-3. **agent 门控** `pumpAgentGate()`（60ms 一次）：DSH 要发 click/swipe/key 之前**原子写**一个
-   唯一 nonce 到 `<GATEDIR>/dsh-ball-act`；球读到**内容变了**就从**本地时钟**起算 1500ms 让路窗口
-   （此时代理窗口也设 NOT_TOUCHABLE），并回写 `<GATEDIR>/dsh-ball-ack`；DSH 侧读到 ACK 才真正注入。
-4. 两个必须记住的坑（都是实测翻车后改的）：
-   - **不能靠 mtime 判新鲜**：`/sdcard` 是 FUSE，球看到的 mtime 早 ~700ms，1.5s 窗口缩成 740ms；
-   - **信号必须原子写**（`.tmp` + rename）：球 60ms 读一次，直接 `>` 重定向会读到半个 nonce，
-     ACK 永远对不上（表现为"偶尔让路"）。
-5. `GATEDIR = /sdcard/Android/data/com.glslplayground.app/files` —— **不能**放
-   `/data/local/tmp`（`shell_data_file` 标签，`untrusted_app` 只能读不能写，写 ACK 报 EACCES；
-   0777 子目录也一样被拒）。
-
-DSH 侧对应两处：`~/dsh-preset-mobile-use/lib/index.js` 的 `waitForBallStandDown()`
-（**升级会覆盖，需重打**；备份 `patches/preset-mobile-use/index.js.patched`），
-和 Magisk 模块里的 `/system/bin/vd`（tap/swipe/key 插 `ball_signal`，
-用 `patches/apply-vd-ball-guard-patch.sh` 幂等应用，**重启生效**）。
-
-验证（两个都不需要重启 DSH）：
-
-```bash
-bash ~/oppo-watch-ai/android/tools/ball-guard-verify.sh          # 球侧：信号→notTouchable+ACK→恢复
-node ~/oppo-watch-ai/android/tools/ball-guard-plugin-e2e.mjs key # 插件侧贯通（切真实插件代码跑）
-python3 ~/oppo-watch-ai/android/tools/ball-proxy-state.py        # 单看代理层状态
-```
-
-实测：`touchable 710x497 tok=d301016` → 信号后 `notTouchable 719x499` + `ACK 匹配` → 1.5s 后恢复。
-
-**真机透传已验**（2026-10-15）：便签涂鸦里从球上方贯穿到球下方画竖线，
-像素比对确认球覆盖区无断口；同轮确认在球上拖动仍跟手（y 989→603）。
-注意：球**可见范围内**的点击归球（球压在按钮上时那次点击进不了 App）——先把球挪开即可。
-
-**真实 agent 路径已验通**（2026-10-15，DSH 重启后）：用 mobile 工具点击**落在球里**的便签
-→ 球先 `DISARM`（让路 1500ms）并回 ACK → **便签详情页正常打开**，球没被挪动。
-对照：同一位置在旧插件（无握手）下点击会被球吃掉、界面无反应。
-
-⚠️ 期间修掉一个我自己引入的坑：球"启动后首读只登记不让路"的守卫，会把**同序列的真信号**
-当成遗留物丢掉（球重启后第一次 agent 点击必失败）。现在改成"只有文件 mtime 超过 8 秒
-且本次启动没见过任何信号"才算遗留。
-
-**还没做的**：DSH 再重启一次可让插件带上"握手成功后删信号文件"的清理（非必需，球侧已有 8 秒豁免兜底）。
-
 ## 状态动画：沉降 + 幅度包络（2026-10-15 新增）
 
 **用户反馈**：「处理中的动画在没有真正回复时不要恢复为 Siri 波和空白状态，不然老是在处理中和
@@ -827,8 +796,8 @@ info.touchableRegion.setEmpty();                    // 输入系统命中不到 
 | Siri 文字层（`siriParams`） | 球里的回答文字（也会被压成 0.8）|
 | 审批面板底（`approvalContentParams`） | 审批卡片的底（同一个 flag，同样的病）|
 
-代理触摸窗口（`dsh-ball-proxy`）**故意保留** `FLAG_NOT_TOUCHABLE`：它是全透明的，
-球让路时被压成 0.8 也看不见（logcat 里那条警告现在只属于它）。
+代理触摸窗口（球的唯一触摸层）平时可触摸，只在搜索层 / 卡片菜单 / 整屏玻璃这些
+本来就不该接管手势的状态里切 `FLAG_NOT_TOUCHABLE`（`applyBallTouchability()` 一处管）。
 
 ### 验证（改完必须逐条过）
 
@@ -836,8 +805,6 @@ info.touchableRegion.setEmpty();                    // 输入系统命中不到 
 dumpsys window windows | grep -A2 "Window .*glslplayground"   # 玻璃窗 mAttrs 里**不再有** alpha=0.8
 dumpsys input | grep glslplayground                           # 玻璃窗 alpha=1.00 + touchableRegion=<empty>
 logcat -d | grep "setting alpha to 0.80" | tail                # 只剩代理窗口（透明，无害）
-# 让路窗口内再量一次：球 alpha 仍 1.00（说明让路协议没把球重新变透明）
-printf x > $D/.tmp-act && mv $D/.tmp-act $D/dsh-ball-act
 ```
 
 ### 顺手清掉的第二个坑：`float_no_skipshot` 调试开关
@@ -855,12 +822,6 @@ printf x > $D/.tmp-act && mv $D/.tmp-act $D/dsh-ball-act
 5. 屏幕上看到的和 shader 算的不一致时，**先 `dumpsys` 量合成 alpha**，别急着改 shader；
 6. **调试开关必须成对还原**，能删就删 —— 这个项目已经被"忘了关的开关"坑过两次
    （`float_no_skipshot` 一次、测试脚本留下的极端参数一次）。
-
-### 已知遗留（本次没动）
-
-- Siri 文字上的**点击层**（`siriTouch`）在"球让路"时不会跟着变 NOT_TOUCHABLE，
-  所以球里有文字时，agent 注入到那条文字带上的触摸会被它吃掉（`applyBallTouchability()`
-  只管代理窗口）。要修就把它一起纳入让路逻辑。
 
 ## 玻璃的「失焦 blur」：唯一的口味滑杆（2026-10-16 定到 0.3 = 完全不模糊）
 

@@ -40,9 +40,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 
 /** 悬浮水晶球：TYPE_APPLICATION_OVERLAY 悬浮窗 + MediaProjection 抓屏 + GLSurfaceView 渲染。 */
 public class FloatingBallService extends Service {
@@ -76,80 +74,9 @@ public class FloatingBallService extends Service {
     private GlassRenderer renderer;
     private WindowManager.LayoutParams params;
 
-    // ═══════════════════ agent 触摸门控（球在 DSH 注入触摸时不参与命中测试）═══════════════════
-    //
-    // 背景：DSH 的 mobile 工具注入触摸走的是 `/system/bin/input`（shell uid 的 INJECT_EVENTS），
-    // 事件一样要过 InputDispatcher 的 **窗口命中测试**。球的悬浮窗常驻屏幕中间，注入的
-    // ACTION_DOWN 落在球上就会被球吃掉 —— 底下 App 连 down 都收不到（滑动半途而废），
-    // 更糟的是球会把这串手势当成用户在操作（按住挪球）。
-    //
-    // 系统层面**分不出**「注入」和「真手指」，所以只能由 DSH 侧在动手之前先打个招呼：
-    //   · DSH 侧（dsh-preset-mobile-use）要发 click/swipe/key 时，先把一个 nonce 写进 ACT 文件；
-    //   · 球看到 ACT 文件变新 → 代理触摸窗口立刻设 FLAG_NOT_TOUCHABLE（球变成纯显示），
-    //     再把这个 nonce 写进 ACK 文件；DSH 侧等到 ACK（最多 ~500ms）才真正注入触摸；
-    //   · 之后 ACT 文件的 mtime 在 ACT_HOLD_MS 内保持「有 agent 在操作」→ 球继续不接触摸，
-    //     覆盖 observe→act→observe 的来回；超过这个窗口没有新信号就自动恢复可触摸。
-    //
-    // 结果：agent 的点击/滑动永远落不到球上，用户手指照常能点球/拖球（除注入那一刻）。
-    // 注意 ACT_HOLD_MS 必须大于 DSH 侧「收到 ACK → 真正注入」的往返时间，否则球会提前醒。
-    //
-    // 路径（踩过的坑，别改回去）：
-    //   ✗ /data/local/tmp 根下：目录是 drwxrwx--x shell shell + shell_data_file 标签，
-    //     untrusted_app 域**能读不能写** —— 实测读 ACT 成功、写 ACK 报 EACCES。
-    //   ✗ /data/local/tmp/dsh-ball（0777 子目录）：写文件同样被 SELinux 拒（目录创建也拒）。
-    //   ✓ App 外部私有目录 /sdcard/Android/data/<pkg>/files：App 免权限可写，
-    //     root/shell/普通 Termux 用户都读得到（实测 shell 写 OK，标签 media_rw_data_file）。
-    // 所以信号文件固定放这里；DSH 侧默认路径与之一致（可用 DSH_BALL_GUARD_DIR 覆盖）。
-    private static final String DIR_LEGACY = "/data/local/tmp";        // 兼容老版插件/老 vd 补丁
-    private static final String F_ACT = "dsh-ball-act";
-    private static final String F_ACK = "dsh-ball-ack";
-    private static final String F_GUARD_OFF = "dsh-ball-guard-off";
-    // 让路窗口长度：从**球自己看到新 nonce 的那一刻**起算（不是文件 mtime）。
-    // 为什么不看 mtime：信号目录在 /sdcard（FUSE），mtime 对 App 有缓存延迟 ——
-    // 实测球以为 mtime 比真实写时间早 700ms，1.5s 的窗口实际只剩 ~740ms。
-    // 必须大于 DSH 侧「收到 ACK → 真正注入」的往返（~100ms），1500ms 富余很大。
-    private static final long ACT_HOLD_MS = 1500;
-    private static final long GATE_POLL_MS = 60;
-    private static final long ACK_RETRY_MS = 500;
-    private static final long STALE_MS = 8000;   // 超过这么久没动过的信号文件 = 遗留物，不当新信号
-    private static final String PROXY_TITLE = "dsh-ball-proxy";   // dumpsys 里认这个名字（验证脚本用）
-
-    // ═══════════════ 全 UI 让位（2026-10-23）═══════════════
-    //
-    // 老版本只让**代理窗口**退出命中测试，其余窗口照吃注入触摸 —— 而 10-16 之后球长出了
-    // 一大票新窗口：文字触摸层（siriTouch）、状态 3 的全屏"点空白关掉"层（menuOutside）、
-    // 玻璃菜单（menuView）、输入行（convoBar）、搜索层（searchBar / searchOutside）、
-    // 审批三层（approvalContent / approvalActionsScroll / approvalInputRow）与审批拖动层。
-    // 于是 agent 的注入点击要么被这些窗口吃掉（底下 App 收不到 down），要么把菜单关掉 /
-    // 把文字钉住 —— 用户看到的就是"让位这东西早就失效了"。
-    //
-    // 现在的语义：agent 一动，**球拥有的每一个窗口**一起失去触摸能力（看得见、点不到），
-    // 让路窗口结束后原样恢复。开关在「设置 → 悬浮水晶球 → DSH 操控时全部 UI 让位」。
-    static final String PREF_AGENT_YIELD = "float_agent_yield";   // 设置页开关，默认开
-    private static final String F_ALIVE = "dsh-ball-alive";       // 心跳：插件据此判断球在不在跑
-    private static final long ALIVE_EVERY_MS = 2000;
-    private static final String SKIP_ACK_PREFIX = "!skip:";       // 让位关掉时回给插件的"立刻放行"
-
-    private volatile boolean agentYieldOn = false;   // 让路中（全部球窗口已退出命中测试）
-    // 用 WeakHashMap（View 没重写 equals ≈ 身份比较）：审批面板/菜单这类窗口会被反复 removeView
-    // + 重建，强引用会把已销毁的 View 连同它挂的监听一起攥住不放。
-    private final java.util.WeakHashMap<View, Boolean> yieldInsets =
-            new java.util.WeakHashMap<View, Boolean>();
-    private long lastAliveAt = 0;
-    private long lastSkipAckAt = 0;
-    private String lastSkipNonce = "";
-
     private View ballTouch;                                  // 唯一接用户手势的窗口（玻璃层只画不摸）
     private WindowManager.LayoutParams ballTouchParams;
-    private volatile boolean agentActing = false;            // agent 正在发触摸（或刚发完）
-    private volatile String lastAckNonce = "";               // 已确认「球已让路」的 nonce
-    private long gateUntilMs = 0;                            // 让路截止时刻（本地时钟，不用文件 mtime）
-    private String lastActNonce = "";                        // 上一次处理过的信号 nonce
-    private File gateDir;                                    // 信号目录（惰性解析）
-    private File gateAckFile;
-    private File lastActFile;                                // 上一次读到信号的文件（写 ACK 前回读用）
-    private long lastAckTryAt = 0;
-    private long lastStaleScanAt = 0;
+    private File gateDir;                                    // App 可写目录（文件调试钩子用）
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
@@ -2661,142 +2588,9 @@ public class FloatingBallService extends Service {
         }
     }
 
-    // ═══════════════════ agent 触摸门控 ═══════════════════
-    //
-    // 每 60ms 看一次信号文件：agent 要发 click/swipe/key 时会先把 nonce 写进 ACT 文件。
-    // 信号新鲜（mtime 在 ACT_HOLD_MS 内）→ 代理窗口失去触摸能力（纯显示）+ 回 ACK；
-    // 信号过期 → 恢复可触摸（用户照常能点球/拖球）。文件不存在 = 无人用这个协议，行为不变。
-    private final Runnable agentGateTick = new Runnable() {
-        @Override public void run() {
-            pumpAgentGate();
-            main.removeCallbacks(this);
-            main.postDelayed(this, GATE_POLL_MS);
-        }
-    };
-
-    private void pumpAgentGate() {
-        if (wm == null || ballTouch == null) return;
-        File dir = gateDir();
-        long now = System.currentTimeMillis();
-        // 心跳：球在跑就每 2s 写一次。插件靠它判断"球在不在"—— 不在就根本不发信号、
-        // 也不白等 500ms（以前球没开时每次注入都要多等半秒，就是这么来的）。
-        if (now - lastAliveAt > ALIVE_EVERY_MS) {
-            lastAliveAt = now;
-            try { writeAtomic(new File(dir, F_ALIVE), Long.toString(now) + "\n"); }
-            catch (Throwable ignored) { }
-        }
-        // 开关（两个都认）：
-        //   · 设置页 →「悬浮水晶球 → DSH 操控时全部 UI 让位」（PREF_AGENT_YIELD，默认开）
-        //   · 老的文件开关 dsh-ball-guard-off（放信号目录或旧路径都认）
-        // 调试钩子：files/yield-toggle（内容 0/off = 关，其它 = 开）—— 走**和设置页同一个**
-        // setAgentYield() 入口，所以脚本也能验证"改完立刻生效"这条承诺。
-        File fYield = new File(dir, "yield-toggle");
-        if (fYield.exists()) {
-            String v = readSmallString(fYield, 16).trim();
-            fYield.delete();
-            boolean on = !("0".equals(v) || "off".equalsIgnoreCase(v));
-            Log.i("FloatingBall", "文件钩子 yield-toggle -> " + (on ? "开" : "关"));
-            setAgentYield(on);
-        }
-        boolean allow = prefs().getBoolean(PREF_AGENT_YIELD, true);
-        boolean off = !allow || new File(dir, F_GUARD_OFF).exists()
-                || new File(DIR_LEGACY, F_GUARD_OFF).exists();
-        String nonce = null;
-        File src = null;
-        File[] candidates = {
-                new File(dir, F_ACT),
-                new File(DIR_LEGACY, F_ACT),      // 兼容老插件/老 vd 补丁
-        };
-        for (File c : candidates) {
-            if (c.lastModified() > 0) { src = c; break; }   // 只看"在不在"，不看 mtime
-        }
-        if (src != null) nonce = readSmallString(src, 64);
-        if (off) {
-            // 让位被关掉：不进入让路，但**立刻回一个 skip ACK**，插件看到就知道"球这边不管了，
-            // 直接注入"，不用白等 500ms 超时 —— 关掉开关后手感必须和没装球一样。
-            if (agentActing || gateUntilMs > 0) {
-                agentActing = false;
-                gateUntilMs = 0;               // 别留一个"还没到期"的窗口，免得重新打开开关时立刻又让路
-                applyBallTouchability();
-                Log.i("FloatingBall", "agent yield OFF（开关关闭）→ 球恢复可触摸");
-            }
-            if (nonce != null && !nonce.isEmpty() && !nonce.equals(lastSkipNonce)) {
-                lastSkipNonce = nonce;
-                lastActNonce = nonce;          // 记成已见：重新打开开关时不会当成新信号
-                if (now - lastSkipAckAt >= 200) {
-                    lastSkipAckAt = now;
-                    try { writeAtomic(gateAckFile(), SKIP_ACK_PREFIX + nonce + "\n"); }
-                    catch (Throwable ignored) { }
-                }
-            }
-            return;
-        }
-        // 看到**新的** nonce = 有新的一次 agent 触摸 → 从这一刻起让路 ACT_HOLD_MS。
-        // 内容比对而不是 mtime 比对：FUSE 上同一秒内的连续写 mtime 可能不变。
-        // 陈旧信号豁免：**只在信号文件本身很旧、且这次启动还没见过任何信号时**才忽略它。
-        // 为什么不能"启动后首读一律忽略"：实测翻过车 —— 球重启后首读把遗留 nonce 记成"已见"，
-        // 而插件下一次点击生成的 nonce 恰好就是同一个序列（同一毫秒+同一 pid+同一 action），
-        // 于是真信号被当成旧信号忽略，球不让路、不回 ACK，那一次点击就被球吃掉了。
-        long ageMs = (src != null) ? (now - src.lastModified()) : -1;
-        if (nonce != null && !nonce.isEmpty() && lastActNonce.isEmpty() && ageMs > STALE_MS) {
-            lastActNonce = nonce;
-            Log.i("FloatingBall", "agent act signal (陈旧 " + ageMs + "ms，仅登记): " + nonce);
-            return;
-        }
-        if (nonce != null && !nonce.isEmpty() && !nonce.equals(lastActNonce)) {
-            lastActNonce = nonce;
-            gateUntilMs = now + ACT_HOLD_MS;
-            Log.i("FloatingBall", "agent act signal: " + nonce
-                    + " @" + (src != null ? src.getPath() : "?") + " → 让路 " + ACT_HOLD_MS + "ms");
-        }
-        boolean acting = now < gateUntilMs;
-        if (acting != agentActing) {
-            agentActing = acting;
-            applyBallTouchability();
-            Log.i("FloatingBall", "agent gate -> " + (acting ? "DISARM (球只显示)" : "ARM (球可触摸)"));
-        }
-        // 让路期间每 60ms 补登记一次：agent 动作可能刚好把某个窗口建出来（审批面板、菜单…），
-        // 它必须在下一帧就跟着让路，而不是等下一次状态切换。
-        if (acting) applyAgentYield(true);
-        if (acting && nonce != null && !nonce.isEmpty() && !nonce.equals(lastAckNonce)) {
-            // 写 ACK 前先回读一次：万一这一瞬间插件又写了新 nonce，就别回旧的那个
-            if (src != null) {
-                String cur = readSmallString(src, 64);
-                if (!cur.isEmpty() && !cur.equals(nonce)) {
-                    nonce = cur;
-                    lastActNonce = cur;
-                    gateUntilMs = now + ACT_HOLD_MS;
-                }
-            }
-            if (now - lastAckTryAt >= ACK_RETRY_MS) {   // 失败时退避，别每 60ms 刷一条错误日志
-                lastAckTryAt = now;
-                try {
-                    writeAtomic(gateAckFile(), nonce + "\n");
-                    lastAckNonce = nonce;
-                    Log.i("FloatingBall", "agent gate ack: " + nonce + " -> " + gateAckFile().getPath());
-                } catch (Throwable e) {
-                    Log.w("FloatingBall", "ack write failed: " + e + " (dir=" + gateAckFile().getPath() + ")");
-                }
-            }
-        }
-        // 顺手清掉插件留下的 .tmp-* 残渣（原子写用；插件 rename 成功时本来就没有）
-        if (now - lastStaleScanAt > 10000) {
-            lastStaleScanAt = now;
-            try {
-                File[] stale = dir.listFiles();
-                if (stale != null) {
-                    for (File f : stale) {
-                        String n = f.getName();
-                        if (n.startsWith(F_ACT + ".tmp-") && now - f.lastModified() > 60000) f.delete();
-                    }
-                }
-            } catch (Throwable ignored) { }
-        }
-    }
-
-    /** 代理窗口（唯一接用户手势的窗口）：agent 注入触摸期间、以及搜索胶囊期间必须让路。 */
+    /** 代理窗口（唯一接用户手势的窗口）：搜索胶囊、卡片/菜单展开期间不接管触摸。 */
     private void applyBallTouchability() {
-        boolean blind = agentActing || searchActive || searchClosing || menuShown || glassFullscreen;
+        boolean blind = searchActive || searchClosing || menuShown || glassFullscreen;
         if (ballTouchParams != null && wm != null && ballTouch != null) {
             int want = blind ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0;
             int now = ballTouchParams.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -2807,148 +2601,12 @@ public class FloatingBallService extends Service {
                 updateProxyWindow();
             }
         }
-        // 代理窗口之外的那些窗口也要让路（老版本最致命的漏洞，见 PREF_AGENT_YIELD 的注释）
-        applyAgentYield(agentActing);
     }
 
-    // ═══════════════ 全 UI 让位：球拥有的每一个窗口一起退出命中测试 ═══════════════
-    //
-    // 手法分两类，理由见 makeTouchTransparent()：
-    //   ① 全透明窗口（代理窗 / 文字点击层 / 两个"点空白关掉"层 / 审批拖动层）
-    //      → 直接加 FLAG_NOT_TOUCHABLE：看不见，OEM 把 alpha 压成 0.80 也无所谓。
-    //   ② 看得见的窗口（玻璃菜单 / 输入行 / 搜索条 / 球内文字 / 审批三层）
-    //      → **可触摸区域置空**，绝不加 FLAG_NOT_TOUCHABLE —— 加了 ColorOS 会把整窗
-    //        alpha 钉在 0.80，而且摘掉 flag 也不一定还原（10-16 那次"半透明贴纸"）。
-    // 区域监听只挂一次（IdentityHashMap 去重），让路状态用一个 volatile 决定空/满，
-    // 切换时 requestLayout() 立刻触发一次 traversal 让系统重算。
-
-    private void applyAgentYield(boolean on) {
-        if (on != agentYieldOn) {
-            agentYieldOn = on;
-            Log.i("FloatingBall", "agent yield -> " + (on ? "全 UI 让路（看得见、点不到）" : "恢复球窗口触摸"));
-            for (View v : yieldInsets.keySet()) {
-                try { v.requestLayout(); } catch (Throwable ignored) { }
-            }
-        }
-        // ① 全透明窗口：flag
-        yieldFlag(siriTouch, siriTouchParams);
-        yieldFlag(menuOutside, menuOutsideParams);
-        yieldFlag(searchOutside, searchOutsideParams);
-        yieldFlag(approvalTouch, approvalTouchParams);
-        // ② 看得见的窗口：空可触摸区域（窗口在就挂上监听；新窗口最迟 60ms 内被登记）
-        yieldRegion(menuView);
-        yieldRegion(convoBar);
-        yieldRegion(convoSideBtn);
-        yieldRegion(searchBar);
-        yieldRegion(siriText);
-        yieldRegion(approvalContent);
-        yieldRegion(approvalActionsScroll);
-        yieldRegion(approvalInputRow);
-    }
-
-    /** 透明窗口：让路期间加 FLAG_NOT_TOUCHABLE，结束后按"加进去之前有没有"原样还原。 */
-    private void yieldFlag(View v, WindowManager.LayoutParams p) {
-        if (v == null || p == null || wm == null) return;
-        boolean has = (p.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0;
-        if (has == agentYieldOn) return;
-        p.flags = agentYieldOn
-                ? (p.flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
-                : (p.flags & ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
-        try {
-            wm.updateViewLayout(v, p);
-            Log.i("FloatingBall", "yieldFlag " + v.getClass().getSimpleName()
-                    + " -> " + (agentYieldOn ? "NOT_TOUCHABLE" : "touchable"));
-        } catch (Throwable t) {
-            Log.w("FloatingBall", "yieldFlag " + v.getClass().getSimpleName() + " failed: " + t);
-        }
-    }
-
-    /** 可见窗口：登记一次"跟随让路状态"的可触摸区域监听（空 = 让路，满 = 正常）。 */
-    private void yieldRegion(final View v) {
-        if (v == null || yieldInsets.containsKey(v)) return;
-        try {
-            final Class<?> listenerCls = Class.forName(
-                    "android.view.ViewTreeObserver$OnComputeInternalInsetsListener");
-            final Class<?> infoCls = Class.forName("android.view.ViewTreeObserver$InternalInsetsInfo");
-            final java.lang.reflect.Method setTouchableInsets = infoCls.getMethod("setTouchableInsets", int.class);
-            final java.lang.reflect.Field regionField = infoCls.getField("touchableRegion");
-            final int TOUCHABLE_INSETS_REGION = 3;
-            Object listener = java.lang.reflect.Proxy.newProxyInstance(
-                    listenerCls.getClassLoader(), new Class<?>[]{listenerCls},
-                    new java.lang.reflect.InvocationHandler() {
-                        @Override public Object invoke(Object proxy, java.lang.reflect.Method m, Object[] a) {
-                            if (a != null && a.length == 1 && a[0] != null) {
-                                try {
-                                    setTouchableInsets.invoke(a[0], TOUCHABLE_INSETS_REGION);
-                                    Object region = regionField.get(a[0]);
-                                    if (region instanceof android.graphics.Region) {
-                                        android.graphics.Region r = (android.graphics.Region) region;
-                                        if (agentYieldOn) r.setEmpty();
-                                        else r.set(0, 0, Math.max(1, v.getWidth()), Math.max(1, v.getHeight()));
-                                    }
-                                } catch (Throwable ignored) { }
-                            }
-                            return null;
-                        }
-                    });
-            android.view.ViewTreeObserver.class
-                    .getMethod("addOnComputeInternalInsetsListener", listenerCls)
-                    .invoke(v.getViewTreeObserver(), listener);
-            yieldInsets.put(v, Boolean.TRUE);   // WeakHashMap：窗口销毁后自动掉出表
-            if (agentYieldOn) {
-                try { v.requestLayout(); } catch (Throwable ignored) { }
-            }
-        } catch (Throwable t) {
-            // 挂不上就退回 flag（宁可让视觉差一点，也不能让它吃 agent 的触摸）
-            Log.w("FloatingBall", "yieldRegion failed (" + v.getClass().getSimpleName() + "): " + t);
-            if (agentYieldOn) yieldFlag(v, paramsOf(v));
-        }
-    }
-
-    /** 兜底用：从窗口表里反查某个 View 的 LayoutParams（只在 yieldRegion 失败时走）。 */
-    private WindowManager.LayoutParams paramsOf(View v) {
-        if (v == menuView) return menuViewParams;
-        if (v == convoBar) return convoBarParams;
-        if (v == convoSideBtn) return convoSideParams;
-        if (v == searchBar) return searchBarParams;
-        if (v == siriText) return siriParams;
-        if (v == approvalContent) return approvalContentParams;
-        if (v == approvalActionsScroll) return approvalActionsParams;
-        if (v == approvalInputRow) return approvalInputParams;
-        return null;
-    }
-
-    /** 设置页开关：打开/关闭「DSH 操控时全部 UI 让位」（立刻生效，不用重开球）。 */
-    public static void setAgentYield(boolean on) {
-        FloatingBallService s = INSTANCE;
-        if (s == null) return;
-        s.prefs().edit().putBoolean(PREF_AGENT_YIELD, on).apply();
-        s.main.post(new Runnable() {
-            @Override public void run() {
-                if (!on) {
-                    s.agentActing = false;
-                    s.gateUntilMs = 0;
-                }
-                s.applyBallTouchability();
-                Log.i("FloatingBall", "设置：全 UI 让位 = " + on);
-            }
-        });
-    }
-
-    /** 设置页回读：让位开关当前状态（默认开）。 */
-    public static boolean getAgentYield() {
-        FloatingBallService s = INSTANCE;
-        if (s == null) return true;
-        return s.prefs().getBoolean(PREF_AGENT_YIELD, true);
-    }
-
-
-    /** 统一的代理窗口更新口：updateViewLayout 之后补一次 setTitle（系统可能把 title 丢了）。 */
+    /** 统一的代理窗口更新口。 */
     private void updateProxyWindow() {
-        try {
-            ballTouchParams.setTitle(PROXY_TITLE);
-            try { wm.updateViewLayout(ballTouch, ballTouchParams); } catch (Throwable ignored) { }
-        } catch (Throwable ignored) { }
+        if (wm == null || ballTouch == null || ballTouchParams == null) return;
+        try { wm.updateViewLayout(ballTouch, ballTouchParams); } catch (Throwable ignored) { }
     }
 
     private static String readSmallString(File f, int max) {
@@ -2961,29 +2619,6 @@ public class FloatingBallService extends Service {
         } catch (Throwable e) {
             return "";
         }
-    }
-
-    /** 原子写：先写临时文件再 rename（插件可能正好在这一刻读走）。 */
-    private static void writeAtomic(File dst, String body) throws Exception {
-        File tmp = new File(dst.getAbsolutePath() + ".tmp");
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(body.getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            try { out.getFD().sync(); } catch (Throwable ignored) { }
-        }
-        File parent = dst.getParentFile();
-        if (parent != null) {
-            try { parent.setExecutable(true, false); parent.setReadable(true, false); } catch (Throwable ignored) { }
-        }
-        try {
-            Files.move(tmp.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (Throwable e) {
-            if (!tmp.renameTo(dst)) throw e;
-        }
-        try {
-            dst.setReadable(true, false);
-            dst.setWritable(true, false);
-        } catch (Throwable ignored) { }
     }
 
     /**
@@ -3078,10 +2713,6 @@ public class FloatingBallService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         ballTouchParams.gravity = Gravity.TOP | Gravity.START;
-        // 起个名字：dumpsys 里就能按 Window{... u0 dsh-ball-proxy} 直接认出代理层，
-        // 不用靠"猜哪个窗口是它"（验证脚本 ball-proxy-state.py 就靠这个名字）。
-
-
         v.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
@@ -3285,15 +2916,6 @@ public class FloatingBallService extends Service {
         gateDir = d;
         Log.i("FloatingBall", "gate dir = " + d.getAbsolutePath());
         return d;
-    }
-
-    private File gateAckFile() {
-        File f = gateAckFile;
-        if (f == null) {
-            f = new File(gateDir(), F_ACK);
-            gateAckFile = f;
-        }
-        return f;
     }
 
     /**
@@ -7960,7 +7582,6 @@ public class FloatingBallService extends Service {
             homeCy = params.y + winH * 0.5f + winY0();
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
-            main.post(agentGateTick);       // agent 触摸门控：DSH 要注入触摸时球让路
         }
         glView.onResume();
         glView.addOnLayoutChangeListener(
