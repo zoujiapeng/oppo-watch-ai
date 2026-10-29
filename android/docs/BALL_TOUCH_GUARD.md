@@ -146,6 +146,80 @@ DSH 侧（要注入触摸时）                          球侧（每 60ms 轮�
 换机三件事：装新 APK、装/升级插件（`patches/install-ball-guard-plugin.sh`）、
 重启 DSH 后跑 `android/tools/ball-gate-doctor.sh`。
 
+## 2.7 让位三档：关闭 / 让位 / 闪开（2026-10-29）
+
+用户报「这套防误触在别的手机上有时失效」，所以让位从一个开关升级成**三档**，设置页
+「悬浮水晶球 → AI 操控时的防误触」直接选，`float_agent_yield_mode` 存值：
+
+| 档位 | 值 | 球侧行为 | 什么时候用 |
+|---|---|---|---|
+| 关闭 | `off` | 不让位，收到信号立刻回 `!skip:<nonce>` 放行 | 调试、或用户明确不要球让路 |
+| 让位 | `touch` | 全 UI 让位（看得见、点不到），老默认档 | 常规机型 |
+| 闪开 | `flash` | 在让位的基础上**让玻璃真的消失**，触摸结束立刻回来 | 让位"看着在、其实没用"的机型 |
+
+**闪开怎么做到"消失"**（`applyAgentFlash()` + `GlassRenderer.hidden`）：
+
+- 球是 SurfaceView 上的 GL，整窗像素由 `onDrawFrame` 决定。收到 `YIELD` 的那一刻把
+  `renderer.hidden = true`，那一帧起只 `glClear(0,0,0,0)` → 窗口内容全透明，**一帧都不画**
+  （连抓屏上传都跳过）。这在像素上等价于"这个窗口不存在"，不依赖 WindowManager 的
+  alpha / touchableRegion（ColorOS 会把带 `NOT_TOUCHABLE` 的可见悬浮窗 alpha 钉在 0.80，
+  闪开绕开这条坑）。
+- 球内文字层 `siriText` 同时 `INVISIBLE`（它不是一个 SurfaceControl，得单独藏），
+  恢复时按**藏起来之前的可见性**原样还原。
+- 恢复只有两个来源，都走同一个入口：插件动作做完发 `RELEASE <nonce>`，或 1.5s / 4s
+  让位窗口到期 → `agentActing=false` → `applyAgentYield(false)` → `applyAgentFlash(false)`。
+- 触摸让位照旧（代理窗 `FLAG_NOT_TOUCHABLE` + 可见窗空区域），闪开是**叠加**在它之上的
+  第二重保险，不是替换。
+- 心跳 / `STATUS` 都带新字段：`"mode":"flash"`、`"flash":true`，插件和 `ball-gate-doctor.sh`
+  都能一眼看出当前档位和"此刻是否正闪开"。
+
+**不需要装任何新东西**：逻辑全在球自己的 APK 里（`FloatingBallService.applyAgentFlash` +
+`GlassRenderer.hidden`），插件那半边（发信号 / RELEASE）本来就是现成的。
+
+**文件钩子**（脚本、验证工具、没空点设置页时用）：
+
+```bash
+echo flash > /sdcard/Android/data/com.glslplayground.app/files/yield-mode   # 闪开
+echo touch > /sdcard/Android/data/com.glslplayground.app/files/yield-mode   # 让位
+echo off   > /sdcard/Android/data/com.glslplayground.app/files/yield-mode   # 关闭
+```
+
+老的两个入口仍然有效：布尔键 `float_agent_yield`（false = off，true = 保留当前档位）、
+`yield-toggle` 文件钩子、`dsh-ball-guard-off` 文件开关。
+
+**实测（2026-10-29，LE2120 / Android 13，`ball-flash-verify.sh`）**：
+
+```
+球在跑：pid=7813  信号目录=/sdcard/Android/data/com.glslplayground.app/files  端口=3181
+跑之前的模式：touch
+  [ok] yield-mode 钩子生效：mode=flash
+  [ok] 球区（代理窗口）：x/y/w/h = 179 224 724 510
+  [ok] YIELD 回 OK（flash-verify-1793274311009299075）
+  [ok] 让位中：STATUS flash=1（渲染器已 hidden）
+  [ok] RELEASE 回 RELEASED flash-verify-1793274311009299075
+  [ok] 恢复后：STATUS flash=0（玻璃重新入场）
+  [ok] logcat：玻璃消失（闪开让位）
+  [ok] logcat：玻璃恢复显示
+  球区 179,224 724x510  采样 41140
+  让位前 ↔ 让位中不同 11952（29.1%）
+  让位中 ↔ 恢复后不同 11949（29.0%）
+  [ok] 让位期间球区变了 29% —— 玻璃确实离场
+  [ok] 恢复后球区又变回 29% —— 玻璃回来了
+  [ok] 模式已还原：touch
+★ 全部通过
+```
+
+> ⚠️ 跑这个脚本时它会临时放 `files/show-glass`：球默认给自己的 Surface 打了
+> `SKIP_SCREENSHOT`，不打开这个调试口子，root 截屏**根本拍不到球**（像素断言会"空对空"）。
+> 脚本结束会写 `hide-glass` 关掉，生产必须关（开着的话抓屏里含球自己 → 折射自采样）。
+
+`off` 档实测：
+
+```
+STATUS(off): STATE 0 0 yield=0 mode=off flash=0
+YIELD: !skip:offtest-1793274344781955051
+```
+
 ## 3. 落地位置（三处）
 
 | 位置 | 角色 |
@@ -421,8 +495,13 @@ agent gate -> ARM (球可触摸)
 - 球被系统杀掉再打开（点「悬浮于桌面」）后重新开始轮询，无状态残留。
 - ~~球里有文字时，文字点击层那条带不受让路协议管~~ → **2026-10-23 已修**：`siriText` 与
   `siriTouch` 都进了 `applyAgentYield()`，实测让路期间两者都是 `notTouchable`。
-- 让路只保证"球不吃手势"，不负责"球看不见"：球仍然画在屏幕上，DSH 截图里能看到它。
-  要让球彻底让开视线，得靠球自己收起来 / 挪走，协议不管这个。
+- 让路只保证"球不吃手势"，不负责"球看不见"：**让位档**下球仍然画在屏幕上（要它连视线一起让开，
+  切到 **闪开档**，见 §2.7）。
+- **闪开档**的"消失"是像素级的：窗口和 Surface 都还在、位置也没动，只是每帧只清成透明；
+  命中测试照旧靠代理窗 `FLAG_NOT_TOUCHABLE` + 可见窗空区域。所以它不会让 `yieldRegion failed`
+  的窗口突然能穿透 —— 只是把"看得见"这一半彻底解决掉，而且给了用户一个明确的"AI 在动"反馈。
+- **闪开档**下抓屏本来就拍不到球（球给自己的 Surface 打了 `SKIP_SCREENSHOT`），
+  所以 agent 的 `observe` 截图里闪开前后**没有区别**；闪开只影响真人眼睛，不影响 agent 的截图。
 - 可见窗口的"可触摸区域置空"依赖 @hide API 反射；万一 OEM 又不认（日志 `yieldRegion failed`），
   会退回 `FLAG_NOT_TOUCHABLE`：让路仍成功，但那个窗口可能被压到 alpha 0.80。
 - 插件侧的改动要**重启 DSH** 才生效（插件启动时 import 进内存）；App 侧装完 APK 立刻生效。
@@ -443,6 +522,10 @@ agent gate -> ARM (球可触摸)
 | `FloatingBallService.java`（2026-10-23） | `applyAgentYield` / `yieldFlag` / `yieldRegion` / `setAgentYield` / `getAgentYield`；开关 `float_agent_yield`；心跳 `dsh-ball-alive`；关掉时回 `!skip:` ACK |
 | `MainActivity.java` / `WatchBridge.java` / `settings.html` | 「DSH 操控时全部 UI 让位」开关（`W.getAgentYield()` / `W.setAgentYield()`） |
 | `android/tools/ball-yield-verify.sh` | 全窗口让位端到端验证（平时可触摸 → 让路时全不可触摸 → 1.5s 恢复；`--off` 验证开关） |
+| `FloatingBallService.java`（2026-10-29） | 让位三档 `float_agent_yield_mode`（off/touch/flash）：`applyAgentFlash()` 让玻璃真的消失、`agentYieldMode()`/`setAgentYieldMode()`、`yield-mode` 文件钩子、心跳与 STATUS 带 `mode`/`flash` |
+| `GlassRenderer.java`（2026-10-29） | `hidden` 标志：为 true 时 `onDrawFrame` 只清屏不画（闪开档的像素级"消失"） |
+| `MainActivity.java` / `WatchBridge.java` / `settings.html`（2026-10-29） | 「AI 操控时的防误触」三档选择（让位 / 闪开 / 关闭），`getAgentYieldMode()` / `setAgentYieldMode()` |
+| `android/tools/ball-flash-verify.sh`（2026-10-29） | 闪开档端到端验证（mode=flash → flash=1 → 球区像素变化 29% → RELEASE → 还原） |
 | `FloatingBallService.java`（2026-10-24） | 回环 TCP 门控（3181，`PING/YIELD/RELEASE/STATUS`）；心跳前置到判空之前；`gateDirs()` 双目录；心跳 JSON（含 port/yield/touch）；`gateUntilMs`/`lastActNonce` 改 volatile；onDestroy 停监听 |
 | `~/dsh-preset-mobile-use/lib/index.js`（2026-10-24） | 三级通道（TCP → 6 个候选目录 → `su` 中继）；心跳三态；全断时逐条报原因；动作后 `RELEASE`；`DSH_BALL_GATE_PORT`/`DSH_BALL_GUARD_DIRS`/`DSH_BALL_PKG` |
 | `android/tools/ball-guard-plugin-e2e.mjs` | 改成新代码切段；测 TCP 握手 / 窗口 notTouchable / RELEASE / 文件通道 / 全断诊断 |

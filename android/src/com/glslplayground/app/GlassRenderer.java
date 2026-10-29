@@ -50,6 +50,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // 复用那个页面的动画和效果，而不是球的变体」。所以这一层**不是**球的形变：
     // 它跑的是演示页自己那段 FS（SearchLayerShader），球那一趟渲染整趟让路。
     public volatile boolean searchMode = false;
+    /**
+     * 「闪开」让位模式（2026-10-29）：true 时这一帧只把整块窗口清成全透明。
+     * 由 FloatingBallService.applyAgentFlash() 在收到 agent 的 YIELD 时置位、
+     * RELEASE / 窗口到期时清位 —— 视觉上球"闪一下消失"，像素上等价于这个窗口不存在。
+     * 放在这里而不是靠 WindowManager 的 alpha/flag：ColorOS 对可见悬浮窗的 alpha 有自己的规矩。
+     */
+    public volatile boolean hidden = false;
     public volatile float sBlobCx = 0f, sBlobCy = 0f, sBlobHx = 1f, sBlobHy = 1f;  // 屏幕像素（y 向下）
     public volatile float sK = 64f, sHeight = 18f, sRefract = 14f;   // 顶部黑边已按用户要求删掉（见 SearchLayerShader ★5）
     public volatile float sHlAmt = 1.5f, sAb = 0.12f, sDark = 1f, sCont = 0f, sValid = 0f;
@@ -822,6 +829,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glViewport(0, 0, winW, winH);
         GLES20.glClearColor(0f, 0f, 0f, 0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        // 闪开让位：整窗只留透明清屏，一帧都不画（连抓屏上传都省了）。
+        // 恢复由 hidden=false + 下一帧 requestRender 完成，服务侧驱动每帧都在跑，不丢帧。
+        if (hidden) return;
         if (oesTex == 0) return;
 
         if (frameAvailable) {

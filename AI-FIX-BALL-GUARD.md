@@ -133,7 +133,7 @@ doctor 的环号就是诊断路径：
 | 3 | 三处心跳 | 都没有 → 球是老 APK 或没跑 |
 | 4 | 用 DSH 的 uid 实测读目录 | `Permission denied` 是**预期**，靠 TCP 就够；不用修 |
 | 5 | 插件有没有让路代码 | 回 F1 |
-| 6 | 让位开关 | 设置页「DSH 操控时全部 UI 让位」要**开**；或删掉 `dsh-ball-guard-off` 文件 |
+| 6 | 让位档位 | 设置页「AI 操控时的防误触」不能是**关闭**；其它机型让位不灵就切**闪开**（`echo flash > …/files/yield-mode`）；或删掉 `dsh-ball-guard-off` 文件 |
 | 7 | TCP 门控 | 回 F2 |
 | 8 | 此刻窗口可触摸状态 | 只在动作那几秒应当全 `notTouchable`，平时可触摸是正常 |
 | 9 | 最近一次动作走的通道 | 没有新行 = 还是旧插件（重启 DSH） |
@@ -193,6 +193,8 @@ doctor 的环号就是诊断路径：
 | `patches/install-ball-guard-plugin.sh` | 把上面那份装进 `~/dsh-preset-mobile-use` 并注册到 profile |
 | `android/tools/ball-gate-doctor.sh` | 九环体检（球/uid/心跳/权限/插件/开关/TCP/窗口/最近通道） |
 | `android/tools/ball-guard-plugin-e2e.mjs` | 从真实插件源码切出协议代码跑真机贯通 |
+| `android/tools/ball-yield-verify.sh` | 让位档端到端：让位期间所有球窗口不可触摸、1.5s 后恢复 |
+| `android/tools/ball-flash-verify.sh` | **闪开档端到端**：mode=flash → flash=1 → 球区像素变化 ~29% → RELEASE 后复原 |
 | `android/docs/BALL_GUARD_CROSS_DEVICE.md` | 根因、实测证据、设计取舍（要理解为什么这么改就读它） |
 | `android/docs/BALL_TOUCH_GUARD.md` | 历史实现细节（让位窗口登记表、踩过的坑） |
 
@@ -202,7 +204,7 @@ doctor 的环号就是诊断路径：
 PING                    → ALIVE <pid> <yield 0|1> <port>
 YIELD <nonce> [holdMs]   → OK <nonce>        （让路，默认 4000ms）
 RELEASE <nonce>          → RELEASED <nonce>  （动作做完立刻恢复）
-STATUS                   → STATE <yield> <untilMs> yield=<0|1>
+STATUS                   → STATE <yield> <untilMs> yield=<0|1> mode=<off|touch|flash> flash=<0|1>
 ```
 
 回滚（只在确实要退回旧行为时）：

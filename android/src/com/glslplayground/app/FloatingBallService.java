@@ -125,7 +125,23 @@ public class FloatingBallService extends Service {
     //
     // 现在的语义：agent 一动，**球拥有的每一个窗口**一起失去触摸能力（看得见、点不到），
     // 让路窗口结束后原样恢复。开关在「设置 → 悬浮水晶球 → DSH 操控时全部 UI 让位」。
-    static final String PREF_AGENT_YIELD = "float_agent_yield";   // 设置页开关，默认开
+    static final String PREF_AGENT_YIELD = "float_agent_yield";   // 老开关（兼容用，mode != off 时为 true）
+    // ═══════════ 让位三档（2026-10-29）：off / touch / flash ═══════════
+    //
+    // 为什么加档：模式一「看得见、点不到」全靠反射把窗口 touchableRegion 置空。个别 ROM /
+    // 个别悬浮窗形态会把这套反射吞掉（日志 `yieldRegion failed` → 退回 FLAG_NOT_TOUCHABLE，
+    // 而 ColorOS 又会把 alpha 钉成 0.80）—— 于是"让位"看着还在，球其实还接着触摸，
+    // 用户看到的就是「这功能在别的手机上失效」。
+    //
+    // 模式二「闪开」不跟 WindowManager 讲道理，直接从**像素**上让球离场：
+    //   收到 YIELD 的同一刻 → 渲染器 hidden=true（每帧只 glClear 成全透明）+ 球内文字藏起来；
+    //   动作结束（插件发 RELEASE）或 1.5s 窗口到期 → 原样恢复。
+    // 视觉上就是"闪一下让位"，命中测试上等于球整个不在场；不需要装任何额外模块，
+    // 全部逻辑都在球自己的 APK 里（插件那半边早就在做信号了）。
+    static final String PREF_AGENT_YIELD_MODE = "float_agent_yield_mode";
+    static final String YIELD_OFF = "off";       // 不防误触（老行为：球照吃手势）
+    static final String YIELD_TOUCH = "touch";   // 模式一：全 UI 让位，看得见点不到
+    static final String YIELD_FLASH = "flash";   // 模式二：闪开，玻璃瞬间消失再恢复
     private static final String F_ALIVE = "dsh-ball-alive";       // 心跳：插件据此判断球在不在跑
     private static final long ALIVE_EVERY_MS = 2000;
     private static final String SKIP_ACK_PREFIX = "!skip:";       // 让位关掉时回给插件的"立刻放行"
@@ -155,6 +171,8 @@ public class FloatingBallService extends Service {
     private static final long TCP_HOLD_MS = 4000;
 
     private volatile boolean agentYieldOn = false;   // 让路中（全部球窗口已退出命中测试）
+    private volatile boolean agentFlashOn = false;   // 「闪开」模式：玻璃此刻已经藏起来（渲染器 hidden）
+    private int flashSavedTextVis = View.VISIBLE;    // 闪开前球内文字的可见性（结束时原样还原）
     // 用 WeakHashMap（View 没重写 equals ≈ 身份比较）：审批面板/菜单这类窗口会被反复 removeView
     // + 重建，强引用会把已销毁的 View 连同它挂的监听一起攥住不放。
     private final java.util.WeakHashMap<View, Boolean> yieldInsets =
@@ -2723,7 +2741,9 @@ public class FloatingBallService extends Service {
                     + ",\"pid\":" + android.os.Process.myPid()
                     + ",\"port\":" + gateServerPort
                     + ",\"tcp\":" + gateServerRunning
-                    + ",\"yield\":" + prefs().getBoolean(PREF_AGENT_YIELD, true)
+                    + ",\"yield\":" + agentYieldEnabled()
+                    + ",\"mode\":\"" + agentYieldMode() + "\""
+                    + ",\"flash\":" + agentFlashOn
                     + ",\"touch\":" + (ballTouch != null)
                     + ",\"dirs\":" + dirs.length + "}\n";
             for (File d : dirs) {
@@ -2744,7 +2764,20 @@ public class FloatingBallService extends Service {
             Log.i("FloatingBall", "文件钩子 yield-toggle -> " + (on ? "开" : "关"));
             setAgentYield(on);
         }
-        boolean allow = prefs().getBoolean(PREF_AGENT_YIELD, true);
+        // 同源的第二个文件钩子：直接指定三档模式（脚本 / 验证工具 / 老用户不点设置页时用）。
+        //   echo flash > files/yield-mode    → 闪开
+        //   echo touch > files/yield-mode    → 让位
+        //   echo off   > files/yield-mode    → 关闭
+        File fMode = new File(dir, "yield-mode");
+        if (fMode.exists()) {
+            String v = readSmallString(fMode, 16).trim();
+            fMode.delete();
+            if (!v.isEmpty()) {
+                Log.i("FloatingBall", "文件钩子 yield-mode -> " + v);
+                setAgentYieldMode(v);
+            }
+        }
+        boolean allow = agentYieldEnabled();
         boolean off = !allow
                 || new File(dir, F_GUARD_OFF).exists()
                 || new File(DIR_LEGACY, F_GUARD_OFF).exists();
@@ -2896,6 +2929,40 @@ public class FloatingBallService extends Service {
         yieldRegion(approvalContent);
         yieldRegion(approvalActionsScroll);
         yieldRegion(approvalInputRow);
+        // ③ 闪开模式（2026-10-29）：让玻璃**真的消失**，不是只退出命中测试。
+        //    和 ①② 不互斥 —— 触摸让位照做，闪开是在它之上再保证"看不见"。
+        applyAgentFlash(on && YIELD_FLASH.equals(agentYieldMode()));
+    }
+
+    // ═══════════ 让位模式二「闪开」：玻璃瞬间消失，触摸结束立刻回来 ═══════════
+    //
+    // 为什么只有渲染器这条路径靠得住：球是 SurfaceView 上跑的 GL，整块窗口的像素由
+    // onDrawFrame 决定。`hidden` 一置位，每帧只 glClear(0,0,0,0) → 窗口内容全透明，
+    // 和"关掉这个窗口"在像素上等价，且不依赖 WindowManager 的 alpha/insets 语义
+    // （ColorOS 会把带 NOT_TOUCHABLE 的可见窗 alpha 钉成 0.80，闪开绕开这条坑）。
+    // 恢复是同一个入口（RELEASE / 1.5s 到期 → agentActing=false → applyAgentYield(false)），
+    // 所以"触摸结束再恢复"不需要第二条信号通道。
+    private void applyAgentFlash(boolean hide) {
+        if (hide == agentFlashOn) {
+            if (hide && siriText != null && siriText.getVisibility() != View.INVISIBLE) {
+                siriText.setVisibility(View.INVISIBLE);   // 闪开期间有人把文字叫回来也别让它冒头
+            }
+            return;
+        }
+        agentFlashOn = hide;
+        if (renderer != null) renderer.hidden = hide;
+        if (glView != null) {
+            try { glView.requestRender(); } catch (Throwable ignored) { }
+        }
+        if (siriText != null) {
+            if (hide) {
+                flashSavedTextVis = siriText.getVisibility();
+                siriText.setVisibility(View.INVISIBLE);
+            } else {
+                siriText.setVisibility(flashSavedTextVis);
+            }
+        }
+        Log.i("FloatingBall", "agent flash -> " + (hide ? "玻璃消失（闪开让位）" : "玻璃恢复显示"));
     }
 
     /** 透明窗口：让路期间加 FLAG_NOT_TOUCHABLE，结束后按"加进去之前有没有"原样还原。 */
@@ -2970,28 +3037,70 @@ public class FloatingBallService extends Service {
         return null;
     }
 
-    /** 设置页开关：打开/关闭「DSH 操控时全部 UI 让位」（立刻生效，不用重开球）。 */
-    public static void setAgentYield(boolean on) {
+    /** 三档模式的归一化：认不出来的字符串一律当 touch（保守：宁可让位，也不要静默失效）。 */
+    static String normalizeYieldMode(String mode) {
+        if (mode == null) return YIELD_TOUCH;
+        String m = mode.trim().toLowerCase(java.util.Locale.ROOT);
+        if (YIELD_OFF.equals(m) || "0".equals(m) || "false".equals(m)) return YIELD_OFF;
+        if (YIELD_FLASH.equals(m) || "hide".equals(m) || "vanish".equals(m)) return YIELD_FLASH;
+        return YIELD_TOUCH;
+    }
+
+    /** 当前模式：老安装只写过布尔开关，就按它推（false → off，true/没写过 → touch）。 */
+    static String yieldModeOf(android.content.SharedPreferences p) {
+        String m = p.getString(PREF_AGENT_YIELD_MODE, null);
+        if (m == null || m.trim().isEmpty()) {
+            return p.getBoolean(PREF_AGENT_YIELD, true) ? YIELD_TOUCH : YIELD_OFF;
+        }
+        return normalizeYieldMode(m);
+    }
+
+    /** 让位是否启用（off 时球回 !skip，插件立刻放行）。 */
+    private boolean agentYieldEnabled() { return !YIELD_OFF.equals(agentYieldMode()); }
+
+    private String agentYieldMode() { return yieldModeOf(prefs()); }
+
+    /** 设置页开关（老接口，只区分开关）：开 = 保留当前模式（off 过就回到 touch），关 = off。 */
+    public static void setAgentYield(final boolean on) {
         FloatingBallService s = INSTANCE;
         if (s == null) return;
-        s.prefs().edit().putBoolean(PREF_AGENT_YIELD, on).apply();
+        String cur = yieldModeOf(s.prefs());
+        setAgentYieldMode(on ? (YIELD_OFF.equals(cur) ? YIELD_TOUCH : cur) : YIELD_OFF);
+    }
+
+    /** 设置页三档：off / touch / flash（立刻生效，不用重开球）。 */
+    public static void setAgentYieldMode(String mode) {
+        final String m = normalizeYieldMode(mode);
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.prefs().edit()
+                .putString(PREF_AGENT_YIELD_MODE, m)
+                .putBoolean(PREF_AGENT_YIELD, !YIELD_OFF.equals(m))   // 老键同步，老插件/老脚本照旧能读
+                .apply();
         s.main.post(new Runnable() {
             @Override public void run() {
-                if (!on) {
+                if (YIELD_OFF.equals(m)) {
                     s.agentActing = false;
                     s.gateUntilMs = 0;
                 }
-                s.applyBallTouchability();
-                Log.i("FloatingBall", "设置：全 UI 让位 = " + on);
+                s.applyBallTouchability();     // 里面会走到 applyAgentYield → 闪开/恢复一起结算
+                Log.i("FloatingBall", "设置：让位模式 = " + m);
             }
         });
     }
 
-    /** 设置页回读：让位开关当前状态（默认开）。 */
+    /** 设置页回读：当前模式（off / touch / flash）。 */
+    public static String getAgentYieldMode() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return YIELD_TOUCH;
+        return yieldModeOf(s.prefs());
+    }
+
+    /** 设置页回读：让位开关当前状态（off 以外都算开）。 */
     public static boolean getAgentYield() {
         FloatingBallService s = INSTANCE;
         if (s == null) return true;
-        return s.prefs().getBoolean(PREF_AGENT_YIELD, true);
+        return !YIELD_OFF.equals(yieldModeOf(s.prefs()));
     }
 
 
@@ -3465,14 +3574,16 @@ public class FloatingBallService extends Service {
         String cmd = (a.length > 0 && a[0] != null)
                 ? a[0].toUpperCase(java.util.Locale.ROOT) : "";
         long now = System.currentTimeMillis();
-        boolean yieldPref = prefs().getBoolean(PREF_AGENT_YIELD, true);
+        boolean yieldPref = agentYieldEnabled();
         if ("PING".equals(cmd)) {
             return "ALIVE " + android.os.Process.myPid() + " " + (now < gateUntilMs ? 1 : 0)
                     + " " + gateServerPort;
         }
         if ("STATUS".equals(cmd)) {
             return "STATE " + (now < gateUntilMs ? 1 : 0) + " " + gateUntilMs
-                    + " yield=" + (yieldPref ? 1 : 0);
+                    + " yield=" + (yieldPref ? 1 : 0)
+                    + " mode=" + agentYieldMode()
+                    + " flash=" + (agentFlashOn ? 1 : 0);
         }
         if ("YIELD".equals(cmd)) {
             String nonce = (a.length > 1 && !a[1].isEmpty()) ? a[1] : ("tcp-" + now);

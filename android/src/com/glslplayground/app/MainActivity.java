@@ -305,21 +305,44 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 「DSH 操控时全部 UI 让位」开关（默认开）。
+     * 「DSH 操控时球怎么让路」三档模式（2026-10-29）：off / touch / flash。
      *
-     * 开：agent 每次注入触摸之前，球自己的**所有**窗口（玻璃、文字、文字点击层、状态 3 卡片、
-     * 输入行、搜索层、审批三层）一起退出命中测试 —— 看得见、点不到，注入手势直达底下的 App。
-     * 关：回到老行为（只有代理窗口让路，其余窗口照吃触摸）。
+     * off   ：不防误触（老行为，球照吃手势）
+     * touch ：全 UI 让位 —— 看得见、点不到（反射把可触摸区域置空）
+     * flash ：闪开 —— 收到信号的一刻玻璃**真的消失**，触摸结束立刻恢复
      *
+     * 为什么加 flash：touch 那档全靠反射，个别 ROM / 个别窗口形态会把反射吞掉
+     * （日志 `yieldRegion failed`），看起来还在让位、其实球还接着触摸。
+     * flash 从像素层面让球离场，不跟 WindowManager 讲道理。
      * 不用重启悬浮球：服务每 60ms 读一次这个键，改完立刻生效。
      */
+    public String getAgentYieldMode() {
+        String m = prefs().getString("float_agent_yield_mode", null);
+        if (m == null || m.trim().isEmpty()) {
+            return prefs().getBoolean("float_agent_yield", true) ? "touch" : "off";
+        }
+        m = m.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("off".equals(m) || "0".equals(m) || "false".equals(m)) return "off";
+        if ("flash".equals(m) || "hide".equals(m) || "vanish".equals(m)) return "flash";
+        return "touch";
+    }
+
+    public void setAgentYieldMode(String mode) {
+        String m = FloatingBallService.normalizeYieldMode(mode);
+        prefs().edit().putString("float_agent_yield_mode", m)
+                .putBoolean("float_agent_yield", !"off".equals(m))   // 老键同步
+                .apply();
+        if (FloatingBallService.running) FloatingBallService.setAgentYieldMode(m);
+    }
+
+    /** 老接口：开 = 保留当前模式（off 过就回 touch），关 = off。 */
     public boolean getAgentYield() {
-        return prefs().getBoolean("float_agent_yield", true);
+        return !"off".equals(getAgentYieldMode());
     }
 
     public void setAgentYield(boolean v) {
-        prefs().edit().putBoolean("float_agent_yield", v).apply();
-        if (FloatingBallService.running) FloatingBallService.setAgentYield(v);
+        String cur = getAgentYieldMode();
+        setAgentYieldMode(v ? ("off".equals(cur) ? "touch" : cur) : "off");
     }
 
     public int getFloatCapScale() {

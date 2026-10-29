@@ -29,6 +29,10 @@ bash ai-ball-guard-setup.sh            # 末行 RESULT: PASS / FAIL
 细节与判定标准全在 [`AI-FIX-BALL-GUARD.md`](AI-FIX-BALL-GUARD.md)；原理与实测证据在
 [`android/docs/BALL_GUARD_CROSS_DEVICE.md`](android/docs/BALL_GUARD_CROSS_DEVICE.md)。
 
+让位有**三档**（设置页「AI 操控时的防误触」/ `float_agent_yield_mode`）：`off` / `touch`（看得见点不到）/
+`flash`（**闪开**：AI 触摸的瞬间玻璃真的消失，触摸结束立刻恢复）。换机型后「让位看着在、其实没用」就切 `flash`，
+验证：`bash android/tools/ball-flash-verify.sh`（要点：它会临时放 `files/show-glass`，跑完自动 `hide-glass`）。
+
 ## 硬性约束（违反会引入更贵的问题）
 
 1. 让路是**两半**：球 APK（收到信号让路）+ DSH 插件（注入前发信号）。**只装一半等于没修。**

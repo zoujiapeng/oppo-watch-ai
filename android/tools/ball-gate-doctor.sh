@@ -133,11 +133,14 @@ else
     echo "       提示：改完插件要**重启 DSH** 才生效（ESM 在启动时 import 进内存）"
 fi
 
-hdr "环 6 · 球侧让位开关"
+hdr "环 6 · 球侧让位开关（三档：off / touch / flash）"
 PREF=$(asu "cat /data/data/$PKG/shared_prefs/watch.xml" 2>/dev/null)
 case "$PREF" in
+  *float_agent_yield_mode*"flash"*) pass "让位档位=闪开（AI 触摸时玻璃瞬间消失，触摸结束恢复）" ;;
+  *float_agent_yield_mode*"touch"*) pass "让位档位=让位（看得见、点不到）" ;;
+  *float_agent_yield_mode*"off"*)   fail "让位档位=**关闭** → 球会回 !skip，永不让路" ;;
   *float_agent_yield*"false"*) fail "设置里「DSH 操控时全部 UI 让位」是**关**的 → 球会回 !skip，永不让路" ;;
-  *float_agent_yield*"true"*)  pass "让位开关=开" ;;
+  *float_agent_yield*"true"*)  pass "让位开关=开（老键；档位按 touch 算）" ;;
   "" ) note "读不到 shared_prefs（球没起过 / 没 root）" ;;
   * ) pass "让位开关=默认开（prefs 里没有这一项）" ;;
 esac

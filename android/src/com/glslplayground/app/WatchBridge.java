@@ -233,7 +233,20 @@ public class WatchBridge {
         });
     }
 
-    /** 「DSH 操控时全部 UI 让位」开关（默认开）—— 见 MainActivity#getAgentYield。 */
+    /** 「DSH 操控时球怎么让路」三档：off / touch / flash —— 见 MainActivity#getAgentYieldMode。 */
+    @JavascriptInterface
+    public String getAgentYieldMode() {
+        return act.getAgentYieldMode();
+    }
+
+    @JavascriptInterface
+    public void setAgentYieldMode(final String mode) {
+        ui(new Runnable() {
+            public void run() { act.setAgentYieldMode(mode); }
+        });
+    }
+
+    /** 老接口（开关）：开 = 保留当前模式，关 = off。 */
     @JavascriptInterface
     public boolean getAgentYield() {
         return act.getAgentYield();
