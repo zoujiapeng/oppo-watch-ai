@@ -5,710 +5,974 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>设置</title>
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{min-height:100vh;background:#0a0a0c;color:#f5f5f7;
-    font:14px/1.5 -apple-system,system-ui,sans-serif;
-    padding:calc(14px + env(safe-area-inset-top)) 14px calc(24px + env(safe-area-inset-bottom));}
-  .top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-  .top a{color:#5b9dff;text-decoration:none;font-size:15px;padding:4px 2px}
-  h1{font-size:18px;font-weight:700}
-  .grp{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);
-    border-radius:14px;padding:14px;margin-bottom:12px}
-  .gh{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#86868b;margin-bottom:10px}
-  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
-  .row:last-child{margin-bottom:0}
-  .row label{font-size:13px;color:#ddd}
-  .v{color:#5b9dff;font-variant-numeric:tabular-nums;font-size:12px}
-  input[type=range]{width:100%;accent-color:#5b9dff;height:4px}
-  button{font:600 13px/1 inherit;padding:11px 14px;border-radius:10px;
-    border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#f5f5f7;cursor:pointer}
-  button:active{background:rgba(255,255,255,.16)}
-  button.on{background:#5b9dff;border-color:#5b9dff;color:#fff}
-  .btns{display:flex;gap:8px;flex-wrap:wrap}
-  .muted{color:#8a8a92;font-size:12px;line-height:1.7;word-break:break-all}
-  .kv{display:flex;justify-content:space-between;font-size:12px;color:#c8c8cf;margin-bottom:6px}
-  .kv b{color:#fff;font-weight:600}
-  .switch{position:relative;width:46px;height:26px;border-radius:13px;background:#3a3a40;
+    font:14px/1.55 -apple-system,system-ui,sans-serif;
+    padding:calc(12px + env(safe-area-inset-top)) 14px calc(28px + env(safe-area-inset-bottom));}
+  .top{display:flex;align-items:center;gap:10px;margin:2px 2px 12px}
+  .top a{color:#5b9dff;text-decoration:none;font-size:15px;padding:6px 2px}
+  .top h1{font-size:19px;font-weight:700;flex:1}
+  .top .tag{font-size:11px;color:#9aa0a6;border:1px solid rgba(255,255,255,.14);
+    padding:3px 8px;border-radius:999px;white-space:nowrap}
+
+  .status{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 12px;margin-bottom:12px;
+    background:rgba(91,157,255,.08);border:1px solid rgba(91,157,255,.22);border-radius:12px;
+    font-size:12px;color:#c9d4e4}
+  .status b{color:#fff;font-weight:600}
+  .status .dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;
+    background:#6b7280;vertical-align:1px}
+  .status .dot.on{background:#34c759;box-shadow:0 0 8px rgba(52,199,89,.7)}
+
+  .card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);
+    border-radius:14px;margin-bottom:12px;overflow:hidden}
+  .card > .hd{padding:14px 14px 8px}
+  .card > .hd h2{font-size:14px;font-weight:650;letter-spacing:.01em}
+  .card > .hd p{font-size:12px;color:#8a8a92;margin-top:3px;line-height:1.55}
+  .card > .bd{padding:2px 14px 14px}
+  .card.dim > .bd{opacity:.45;pointer-events:none}
+
+  .row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;
+    border-top:1px solid rgba(255,255,255,.06)}
+  .row:first-child{border-top:0}
+  .row .lb{font-size:13.5px;color:#e8e8ee}
+  .row .sub{font-size:11.5px;color:#7f858f;margin-top:2px;line-height:1.45}
+  .v{color:#5b9dff;font-variant-numeric:tabular-nums;font-size:12.5px;flex:none}
+
+  .switch{position:relative;width:48px;height:28px;border-radius:14px;background:#3a3a40;
     transition:background .2s;flex:none}
   .switch.on{background:#34c759}
-  .switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;
     background:#fff;transition:transform .2s}
   .switch.on::after{transform:translateX(20px)}
-  input[type=text]{width:100%;padding:11px;border-radius:10px;border:1px solid rgba(255,255,255,.15);
-    background:rgba(255,255,255,.06);color:#fff;font-size:13px;margin-bottom:8px}
+
+  .seg{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0 10px}
+  .seg button{font:600 13px/1 inherit;padding:11px 14px;border-radius:10px;min-height:40px;
+    border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#f5f5f7;cursor:pointer}
+  .seg button:active{background:rgba(255,255,255,.14)}
+  .seg button.on{background:#5b9dff;border-color:#5b9dff;color:#fff}
+  .seg.tight button{padding:9px 12px;min-height:36px;font-size:12.5px}
+
+  /* touch-action:pan-y —— 手指竖着滑是滚页面，只有横着拖才调值（否则往下翻页会误改数值）*/
+  input[type=range]{width:100%;accent-color:#5b9dff;height:22px;background:transparent;touch-action:pan-y}
+  .slider{padding:6px 0 10px;touch-action:pan-y}
+  /* 原生 range 在 Chrome 上「按哪儿都能拖」——竖向翻页会顺手改值。
+     这里让 range 不吃指针，手势交给 .slider 自己算：横着拖才改值，竖着就是滚页面。*/
+  .slider input[type=range]{pointer-events:none}
+  input[type=text]{width:100%;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.15);
+    background:rgba(255,255,255,.06);color:#fff;font-size:13px}
+
+  .hint{font-size:11.5px;color:#7f858f;line-height:1.6;padding:2px 0 10px}
+  .legend{display:flex;flex-direction:column;gap:9px;padding:2px 0 8px}
+  .legend div{font-size:12.5px;color:#a9b1bd;line-height:1.55}
+  .legend b{color:#fff;font-weight:650;margin-right:5px}
+  .hint b{color:#b9c2cf;font-weight:600}
+
+  details{border-top:1px solid rgba(255,255,255,.06)}
+  details > summary{list-style:none;cursor:pointer;padding:12px 0;font-size:13px;color:#a9b1bd;
+    display:flex;align-items:center;justify-content:space-between}
+  details > summary::-webkit-details-marker{display:none}
+  details > summary::after{content:"›";transform:rotate(90deg);color:#6f7681;font-size:16px;
+    transition:transform .18s}
+  details[open] > summary::after{transform:rotate(-90deg)}
+  details .inner{padding:0 0 12px}
+
+  .btns{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0 10px}
+  .btns button{font:600 12.5px/1 inherit;padding:10px 12px;border-radius:10px;min-height:38px;
+    border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#f5f5f7;cursor:pointer}
+  .btns button:active{background:rgba(255,255,255,.14)}
+  .btns button.primary{border-color:rgba(91,157,255,.6);color:#cfe0ff}
+
+  .kv{display:flex;justify-content:space-between;font-size:12.5px;color:#c8c8cf;padding:5px 0}
+  .kv b{color:#fff;font-weight:600}
   code{font-size:11px;background:rgba(255,255,255,.1);padding:2px 5px;border-radius:5px}
-  .grp.gl .row{margin-bottom:3px;margin-top:2px}
-  .grp.gl input[type=range]{display:block;margin-bottom:11px}
-  @media (max-height:520px){
-    body{padding-top:calc(8px + env(safe-area-inset-top))}
-    .grp{padding:12px;margin-bottom:10px}
-    button{padding:9px 12px}
-  }
+  .muted{color:#8a8a92;font-size:12px;line-height:1.7}
+  .hidden{display:none !important}
 </style>
 </head>
 <body>
-  <div class="top"><a href="index.html">‹ 返回</a><h1>设置</h1></div>
+  <div class="top"><a href="index.html">‹ 返回</a><h1>设置</h1><span class="tag" id="verTag">水晶球</span></div>
 
-  <div class="grp" id="grpDevice" style="display:none">
-    <div class="gh">设备</div>
-    <div class="kv"><span>型号</span><b id="dModel">-</b></div>
-    <div class="kv"><span>Android</span><b id="dVer">-</b></div>
-    <div class="kv"><span>电量</span><b id="dBat">-</b></div>
-    <div class="kv"><span>设备所有者</span><b id="dAdmin">-</b></div>
+  <!-- 一眼看到现在什么状态 -->
+  <div class="status">
+    <span><span class="dot" id="dotFloat"></span>球：<b id="stFloat">未运行</b></span>
+    <span>采集：<b id="stCap">—</b></span>
+    <span>防误触：<b id="stYield">—</b></span>
+    <span>DSH：<b id="stAsst">—</b></span>
   </div>
 
-  <div class="grp" id="grpScreen" style="display:none">
-    <div class="gh">屏幕</div>
-    <div class="row"><label>亮度</label><span class="v" id="vBright">100%</span></div>
-    <input type="range" id="bright" min="5" max="100" value="100">
-    <div class="row" style="margin-top:12px"><label>屏幕常亮</label><div class="switch on" id="swKeep"></div></div>
-  </div>
-
-  <div class="grp" id="grpKiosk" style="display:none">
-    <div class="gh">桌面 / 锁定</div>
-    <div class="row"><label>开机自动锁定 (Kiosk)</label><div class="switch" id="swAuto"></div></div>
-    <div class="btns">
-      <button id="btnLock">🔒 锁定</button>
-      <button id="btnUnlock">🔓 解锁</button>
+  <!-- ═══ 1. 悬浮球 ═══ -->
+  <div class="card" id="cardBall">
+    <div class="hd">
+      <h2>悬浮球</h2>
+      <p>水晶球浮在桌面和任何 App 之上，实时折射下面的画面。</p>
     </div>
-    <div class="muted" id="kioskHint" style="margin-top:10px"></div>
-  </div>
-
-  <div class="grp" id="grpFloat" style="display:none">
-    <div class="gh">调试覆盖层</div>
-    <div class="row"><label>坐标条 / 触摸轨迹（开发者选项）</label><div class="switch" id="swDbgOverlay"></div></div>
-    <div class="muted" style="margin-top:6px">开发者选项里的那两个覆盖层：屏幕顶部那条 <b>坐标/速度/压力</b> 条，
-      以及触摸时的 <b>彩色十字线</b>。它们由系统绘制（不属于本 App），装了这颗球之后基本没用 —— 在这里一次关掉。<br>
-      写系统设置需要权限；被拒时点下面的「授权」给一次即可（本机有 root，也会自动尝试 root 通道）。</div>
-    <div class="btns" style="margin-top:8px">
-      <button id="btnDbgOverlayAuth">授权（修改系统设置）</button>
-    </div>
-    <div class="muted" style="margin-top:4px">当前权限：<b id="dbgPermState">—</b></div>
-
-    <div class="gh">悬浮水晶球</div>
-    <div class="row"><label>悬浮于桌面</label><div class="switch" id="swFloat"></div></div>
-    <div class="row" style="margin-top:12px;margin-bottom:8px"><label>采集方式</label></div>
-    <div class="btns" id="srcBtns">
-      <button data-src="0">录屏 MediaProjection</button>
-      <button data-src="1">Root 直采</button>
-    </div>
-    <div class="row" style="margin-top:12px;margin-bottom:6px"><label>帧率 (FPS)</label><span class="v" id="vFps">60</span></div>
-    <input type="range" id="fps" min="10" max="120" step="5" value="60">
-    <div class="btns" style="margin-top:8px" id="fpsBtns">
-      <button data-fps="30">30</button>
-      <button data-fps="60">60</button>
-      <button data-fps="90">90</button>
-      <button data-fps="120">120</button>
-    </div>
-    <div class="row" style="margin-top:12px"><label>低延迟采集 (root 常驻)</label><div class="switch" id="swLowLat"></div></div>
-    <div class="row" style="margin-top:12px"><label>AI 操控时的防误触</label><span class="v" id="vYieldMode">—</span></div>
-    <div class="btns" id="yieldModeBtns" style="margin-top:8px">
-      <button data-mode="touch">让位（看得见点不到）</button>
-      <button data-mode="flash">闪开（玻璃瞬间消失）</button>
-      <button data-mode="off">关闭</button>
-    </div>
-    <div class="muted" style="margin-top:6px">
-      <b>让位</b>：DSH 每次点击 / 滑动之前，球自己的<b>所有</b>窗口（玻璃、球内文字、文字点击层、
-      状态 3 卡片、输入行、搜索层、审批面板）一起退出命中测试 —— <b>看得见、点不到</b>，
-      agent 注入的手势直达底下的 App。<br>
-      <b>闪开</b>（别的手机上让位失效时用这档）：收到信号的一刻玻璃整块<b>消失</b>（渲染器只清成全透明），
-      触摸一结束（插件发 RELEASE，或 1.5 秒窗口到期）立刻恢复 —— 视觉上是<b>闪一下让位</b>。
-      它不靠 WindowManager 的 alpha / 可触摸区域，个别 ROM 吞掉那套反射也照样不挡手；
-      球内文字同时藏起来，像素上等于球不在场。<br>
-      <b>关闭</b>：球照吃手势（老行为）。<br>
-      自动恢复：让位窗口 1.5 秒，每次动作重新计时；不用重启球，改完立刻生效。</div>
-    <div class="row" style="margin-top:10px;margin-bottom:8px"><label>采集分辨率</label></div>
-    <div class="btns" id="scaleBtns">
-      <button data-scale="1">原始 1/1</button>
-      <button data-scale="2">一半 1/2</button>
-      <button data-scale="4">四分之一 1/4</button>
-    </div>
-    <div class="row" style="margin-top:12px"><label>Siri 模式 (文字形变球)</label><div class="switch" id="swSiri"></div></div>
-    <div id="siriBox" style="display:none;margin-top:8px">
-      <div class="row" style="margin-top:8px"><label>黑区下沿位置 (px)</label><span class="v" id="vSiriDy">10</span></div>
-      <input type="range" id="siriDy" min="-40" max="200" step="1" value="10">
-      <div class="muted" style="margin-top:6px">只影响<b>黑区下沿</b>（球里那块深色的下边界）。<br>
-        文字本身的位置由富文本排版固定（顶部 8px），不再受这个滑块影响。<br>
-        <span style="opacity:.75">（旧版它叫「文字距球顶」，现在那个作用已废弃。）</span></div>
-      <div class="row" style="margin-top:8px"><label>Siri 字号 (sp)</label><span class="v" id="vSiriSz">34</span></div>
-      <input type="range" id="siriSz" min="10" max="120" step="1" value="34">
-      <div class="row" style="margin-top:10px"><label>球内回复字号比例</label><span class="v" id="vMdRatio">0.25</span></div>
-      <input type="range" id="mdRatio" min="5" max="120" step="1" value="25">
-      <div class="muted" style="margin-top:6px">球里那段 <b>AI 回复（富文本）</b>的正文字号 =
-        「Siri 字号」× 这个比例（默认 0.25 ≈ 18px）。<b>拖动即时生效</b>，不用重装。<br>
-        想让球里一屏看更多字就往左拉；想更醒目就往右拉。表格/代码块会跟着等比缩放。</div>
-      <div class="btns" style="margin-top:8px">
-        <button id="btnMdPreview">离线预览球内排版</button>
-        <button id="btnMdPreviewStop">结束预览</button>
+    <div class="bd">
+      <div class="row">
+        <div>
+          <div class="lb">悬浮于桌面</div>
+          <div class="sub">关掉只是收起球，设置都还在</div>
+        </div>
+        <div class="switch" id="swFloat"></div>
       </div>
-      <div class="muted" style="margin-top:6px">「离线预览」会往球里灌一段<b>示例 markdown</b>（表格 / 标题 / 列表 / 引用 / 代码块全都有）并
-        <b>钉住不消散</b>，这样不用等 DSH 回话就能拖上面的滑块调字号。<br>
-        想改示例内容：编辑 <code>/sdcard/Android/data/com.glslplayground.app/files/md-sample.md</code> 再点一次预览。</div>
-      <details style="margin-top:10px">
-        <summary style="cursor:pointer;color:#9AA5B4;font-size:13px">调试：手动灌一句话进球的旧模式</summary>
-        <div class="muted" style="margin-top:6px">这里是<b>旧的纯文本通道</b>（球内任意文字，不解析 markdown）。
-          调字号/排版请用上面的「离线预览」，它更接近真实回复。</div>
-        <input type="text" id="siriText" placeholder="输入文字，球实时变形（纯文本）">
-        <div class="btns">
-          <button id="btnSiriClear">清空球内文字</button>
-          <button id="btnSiriDemo">演示</button>
+
+      <div class="row" style="border-top:1px solid rgba(255,255,255,.06)">
+        <div>
+          <div class="lb">画面从哪来</div>
+          <div class="sub" id="capSrcSub">录屏要授权，Root 直采不用</div>
+        </div>
+      </div>
+      <div class="seg" id="srcSeg">
+        <button data-src="0">录屏（免 root）</button>
+        <button data-src="1">Root 直采（推荐）</button>
+      </div>
+
+      <div class="row hidden" id="rowLowLat">
+        <div>
+          <div class="lb">低延迟采集</div>
+          <div class="sub">常驻采集器，少一次 fork，跟手更顺</div>
+        </div>
+        <div class="switch" id="swLowLat"></div>
+      </div>
+
+      <div class="row hidden" id="rowScale">
+        <div>
+          <div class="lb">采集分辨率</div>
+          <div class="sub">越小越省电，折射略糊；跟「低延迟」一起用</div>
+        </div>
+      </div>
+      <div class="seg tight hidden" id="scaleSeg">
+        <button data-scale="1">原始</button>
+        <button data-scale="2">一半</button>
+        <button data-scale="4">四分之一</button>
+      </div>
+
+      <div class="row" id="rowFps">
+        <div>
+          <div class="lb">帧率</div>
+          <div class="sub">球面动画与折射的刷新率</div>
+        </div>
+        <span class="v" id="vFps">60</span>
+      </div>
+      <div class="slider"><input type="range" id="fps" min="10" max="120" step="5" value="60"></div>
+      <div class="seg tight" id="fpsSeg">
+        <button data-fps="30">30</button>
+        <button data-fps="60">60</button>
+        <button data-fps="90">90</button>
+        <button data-fps="120">120</button>
+      </div>
+
+      <div class="row hidden" id="rowLive">
+        <div>
+          <div class="lb">实时刷新（画面会闪）</div>
+          <div class="sub">只在录屏模式用得上；Root 直采本来就实时</div>
+        </div>
+        <div class="switch" id="swLive"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 2. 它会怎么回应你（形态说明）═══ -->
+  <div class="card" id="cardAct">
+    <div class="hd">
+      <h2>它会怎么回应你</h2>
+      <p>同一块玻璃在六种形态之间连续变形，每种形态只对应一件事。</p>
+    </div>
+    <div class="bd">
+      <div class="legend">
+        <div><b>待命</b>一颗圆球，折射桌面。它在等，点它不做事、拖它才动。</div>
+        <div><b>思考</b>球心浮出几个流体圆点，还没有字 —— 表示在跑工具。</div>
+        <div><b>回答</b>文字从顶部往下长，球变成一张会折射的便签，底部一道 Siri 波跟着念。</div>
+        <div><b>菜单</b>长按 0.5 秒，六个玻璃圆围成一圈 + 玻璃列表面板，手指不离开屏幕也能选。</div>
+        <div><b>输入</b>双指长按，球缩成小黑球再弹成顶部胶囊，输入框浮出来 —— 打字问 DSH。</div>
+        <div><b>决策</b>DSH 要你点头时，球展开成卡片：标题、选项、自由输入，点一下就替你回。</div>
+      </div>
+      <details>
+        <summary>球上的手势（自己用手时）</summary>
+        <div class="inner">
+          <div class="legend">
+            <div><b>单击</b>什么都不做（防误触，球只能被拖）。</div>
+            <div><b>长按 0.5 秒</b>展开六个玻璃圆（菜单）。</div>
+            <div><b>拖动</b>只挪球，松手就停在那儿，成为新的家。</div>
+            <div><b>双指长按</b>打字搜索（顶部胶囊）。</div>
+            <div><b>双指拖动 / 双指快点</b>回到初始圆球，清掉文字。</div>
+            <div><b>球内上下滑</b>翻长回复（内容超出时才有）。</div>
+          </div>
         </div>
       </details>
-      <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
-      <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
-      <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
-      <div class="row" style="margin-top:10px"><label>思考中圆点环半径 (px)</label><span class="v" id="vOrbR">90</span></div>
-      <input type="range" id="orbR" min="30" max="220" step="5" value="90">
-      <div class="row" style="margin-top:8px"><label>思考中圆点亮度</label><span class="v" id="vOrbG">1.10</span></div>
-      <input type="range" id="orbG" min="10" max="400" step="5" value="110">
-      <div class="row" style="margin-top:8px"><label>思考中边缘辉光</label><span class="v" id="vOrbRim">1.30</span></div>
-      <input type="range" id="orbRim" min="0" max="400" step="5" value="130">
-      <div class="muted" style="margin-top:6px">「思考中」的那组流体圆点：环半径按<b>屏幕像素</b>给，圆点在任何形状的球里都是等大的圆
-        （旧版把竖轴多放大了一倍多，扁球里被拉成高椭圆，又大又亮、整颗球像换了个东西）；亮度默认与 Siri 波在黑区里对齐。
-        思考→回答时会做 0.3 秒的<b>交叉淡化</b>，不再瞬间换脸。<br>
-        <b>边缘辉光</b>是圆点带起的球壳高光 / 赤道线 / 底缘亮度：波动形态用的是波自己的暗色，
-        圆点形态若用固定满值会让整圈球边亮 5 倍（就是「思考中边缘太亮、很突兀」），
-        所以这里按「圆点自身亮度 × 系数」走，默认 1.30 与 Siri 波同亮；调到 0 = 圆点完全不带边缘光。</div>
-      <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
+  </div>
 
-    <div class="row" style="margin-top:16px"><label>DSH 文本助手（打字问答）</label><div class="switch" id="swAsst"></div></div>
-    <div id="asstBox" style="display:none;margin-top:8px">
-      <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
-      <div class="row" style="margin-top:8px"><label>DSH 地址</label></div>
-      <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3080">
-      <div class="btns" style="margin-top:8px">
-        <button id="btnAsstTest">问一句（测试链路）</button>
-        <button id="btnAsstClear">清空球内文字</button>
-        <button id="btnBallShot">保存球体截图</button>
+  <!-- ═══ 3. AI 防误触（重点）═══ -->
+  <div class="card" id="cardGuard">
+    <div class="hd">
+      <h2>AI 操控时的防误触</h2>
+      <p>AI 要点屏幕时，先让球让开 —— 手势就不会被玻璃吃掉。</p>
+    </div>
+    <div class="bd">
+      <div class="seg" id="yieldSeg">
+        <button data-mode="touch">让位</button>
+        <button data-mode="flash">闪开</button>
+        <button data-mode="off">关闭</button>
       </div>
-      <div class="btns" style="margin-top:8px">
-        <button id="btnSearchOpen">打开搜索框（调版式）</button>
-        <button id="btnSearchClose">关掉搜索框</button>
+      <div class="hint" id="yieldHint"></div>
+      <details>
+        <summary>三档到底差在哪</summary>
+        <div class="inner">
+          <div class="hint" style="padding-top:0">
+            <b>让位</b>：球还看得见，但整颗球（玻璃、文字、卡片、输入行、搜索层、审批面板）在这一刻都点不到，
+            AI 的手势直接落到底下的 App。适合绝大多数手机。<br><br>
+            <b>闪开</b>：在让位的基础上，玻璃<b>整块消失</b>（渲染器只清成全透明），球内文字一起藏起来，
+            AI 的手一松（或 1.5 秒后）立刻恢复 —— 视觉上是闪一下让位。它不依赖系统对可触摸区域的处理，
+            个别机型上「让位看着在、其实没用」时用这档。<br><br>
+            <b>关闭</b>：球照吃手势（老行为），AI 点在球上的那一下会落空。只在排错时用。<br><br>
+            自动恢复：每次动作 1.5 秒（TCP 通道下 AI 发完动作就立刻放行）。改完立刻生效，不用重启球。
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ═══ 4. 球里显示什么 ═══ -->
+  <div class="card" id="cardText">
+    <div class="hd">
+      <h2>球里显示什么</h2>
+      <p>DSH 的回复会逐字写进球里；开着「文字形变」时球跟着字数变宽变高。</p>
+    </div>
+    <div class="bd">
+      <div class="row">
+        <div>
+          <div class="lb">文字形变（Siri 模式）</div>
+          <div class="sub">球随文字长大、圆角变方</div>
+        </div>
+        <div class="switch" id="swSiri"></div>
       </div>
-      <div class="muted" style="margin-top:6px"><b>搜索框（打字问 DSH）</b>：<b>双指长按</b>水晶球（任何状态下都行）→
-        球缩成小黑球 →「一团黑」弹开成胶囊 → 🔍 输入框从模糊里凝聚出来。<br>
-        打字后按<b>键盘回车（发送键）</b>直接把这句话发给 DSH。<b>点空白处 / 返回键</b>收起胶囊。<br>
-        老的 <b>双指拖动</b>手势保持不变（仍是"回到初始形状"）；胶囊停在小黑球原来的高度，
-        键盘弹出来时整条胶囊会自动上移躲开键盘。</div>
-      <div class="muted" style="margin-top:8px">手势：<b>单指长按</b>取消当前这一轮；<b>拖动</b>只移动球，不做任何操作；单击不响应；
-        <b>双指长按</b>=打开打字搜索框，<b>双指拖动</b>=回到初始形状。</div>
-      <div class="muted" style="margin-top:6px">「镜像当前会话」打开时，<b>不管这条回复是谁问的</b>（浏览器里聊、别的客户端发的），
-        只要 DSH 当前会话里 AI 在回话，球就会逐字出字；在 DSH 里切换对话后约 20 秒自动跟上。</div>
-      <div class="muted" style="margin-top:6px">「问一句」用固定文本 <code>只回复四个字：球内链路正常</code> 直接走一遍 DSH 往返。</div>
-      <div class="muted" style="margin-top:8px">球内当前文字（实时回读）：<b id="ballText">—</b></div>
-      <div class="muted" style="margin-top:4px">助手状态：<b id="asstState">—</b> · 球 Siri 模式：<b id="ballSiri">—</b></div>
-      <div class="muted" style="margin-top:4px">镜像：<b id="mirrorState">—</b></div>
-    </div>
 
-    <div class="row" style="margin-top:16px"><label>审批球（DSH 要你点批准时弹新球）</label><div class="switch" id="swAppr"></div></div>
-    <div id="apprBox" style="display:none;margin-top:8px">
-      <div class="muted">DSH 里任何一条会话需要你点头（审批 / 提问）时，<b>这颗球自己会展开</b>成一张
-        近方形的液态玻璃卡片：上面是标题与说明，下面是可点的选项，点一下就替你回给 DSH。<br>
-        <b>选项是自适应的</b>：审批固定「批准 / 拒绝」；提问（<code>ask_user_question</code>）多少条、
-        什么文案、能不能多选，都按 DSH 给的排。<br>
-        <b>提问还带自由输入框</b>（协议里的 custom）：选项都不合适就自己写，写完点「发送」；
-        单选时「自己写」和「选一个」互斥。<br>
-        卡片不带 Siri 波：只留水晶球本来的折射 / 黑顶 / 赤道亮线，字和选项落在黑区里。
-        答完（或你在网页端答了）球就收回原样，原球状态一点不动。<br>
-        它跟网页端是「谁先答谁算」：你在浏览器里点了，球会自己收回去。</div>
-      <div class="btns" style="margin-top:8px">
-        <button id="btnApprDemo">叫一条假审批（调版式）</button>
-        <button id="btnQDemo">叫一条假提问（多选项+输入）</button>
-        <button id="btnApprDismiss">撤掉球上的审批</button>
+      <div id="siriBody">
+        <div class="row">
+          <div>
+            <div class="lb">字号</div>
+            <div class="sub">球内正文的基准大小</div>
+          </div>
+          <span class="v" id="vSiriSz">34</span>
+        </div>
+        <div class="slider"><input type="range" id="siriSz" min="8" max="120" step="1" value="34"></div>
+
+        <div class="row">
+          <div>
+            <div class="lb">回复字号比例</div>
+            <div class="sub">AI 富文本回复 = 字号 × 这个比例</div>
+          </div>
+          <span class="v" id="vMdRatio">0.25</span>
+        </div>
+        <div class="slider"><input type="range" id="mdRatio" min="5" max="120" step="1" value="25"></div>
+
+        <div class="row">
+          <div>
+            <div class="lb">文字与 Siri 波的距离</div>
+            <div class="sub">黑区下沿再往下留多少，防止文字压到波上</div>
+          </div>
+          <span class="v" id="vSiriBlack">0.10</span>
+        </div>
+        <div class="slider"><input type="range" id="siriBlack" min="0" max="450" step="5" value="100"></div>
+
+        <details>
+          <summary>更多排版</summary>
+          <div class="inner">
+            <div class="row" style="border-top:0">
+              <div>
+                <div class="lb">黑区下沿微调 (px)</div>
+                <div class="sub">只挪球里那块深色的下边界，默认 10</div>
+              </div>
+              <span class="v" id="vSiriDy">10</span>
+            </div>
+            <div class="slider"><input type="range" id="siriDy" min="-40" max="200" step="1" value="10"></div>
+
+          </div>
+        </details>
+
+        <div class="btns">
+          <button id="btnMdPreview" class="primary">预览一段示例回复</button>
+          <button id="btnMdPreviewStop">结束预览</button>
+        </div>
+        <div class="hint" style="padding-bottom:0">「预览」会往球里灌一段示例 markdown（表格 / 列表 / 代码块都有）并钉住不消散，
+          方便边拖滑块边看效果。示例内容在 <code>files/md-sample.md</code>。</div>
       </div>
-      <div class="row" style="margin-top:10px"><label>审批面板字号</label><span class="v" id="vApScale">0.55</span></div>
-      <input type="range" id="apScale" min="20" max="150" step="1" value="55">
-      <div class="muted" style="margin-top:6px">审批 / 提问那张卡片的<b>整体缩放</b>（字号、内边距、按钮高全跟着变）。
-        拖动后<b>下一次弹面板</b>就是新尺寸；正挂着的话会当场重排。</div>
-      <div class="muted" style="margin-top:6px">连接：<b id="apprState">—</b> · 球上正挂着：<b id="apprPending">—</b></div>
     </div>
-    <div class="row" style="margin-top:12px"><label>实时刷新（会闪）</label><div class="switch" id="swMode"></div></div>
-    <div class="muted" style="margin-top:8px">水晶球浮在桌面/任意 App 上实时折射下方画面，可拖动移动。<br>
-      <b>采集方式</b>：<b>录屏 MediaProjection</b>=需授予「屏幕录制」，有系统录制标记；<b>Root 直采</b>=root 直读合成帧，无弹窗、无标记（需设备已 root）。<br>
-      <b>实时折射</b>：<b>Root 直采</b>时会把水晶球从抓屏中排除（截屏/录屏不含球），球内实时折射下方真实界面、<b>不闪烁</b>；此模式下下方开关无效。<br>
-      <b>无 root / 录屏</b>时用下方开关：<b>关</b>=无缝抠图（不闪，球正下方略滞后）；<b>开</b>=定时刷新（更实时，但球会闪）。</div>
   </div>
 
-  <div class="grp gl" id="grpGlassShape" style="display:none">
-    <div class="gh">液态玻璃 · 形状</div>
-    <div class="row"><label>球体大小（整体 scale）</label><span class="v" id="vSC">1.00</span></div>
-    <input type="range" id="SC" min="20" max="200" value="100">
-    <div class="muted" style="margin:-6px 0 10px">球体整体大小：1.00 = 原始大小，0.50 = 一半。
-      实时生效、自动保存。回答出字时球会按文字大小变形，但仍以这个倍率为基准。</div>
-    <div class="row"><label>整体 y 位置</label><span class="v" id="vPY">0.50</span></div>
-    <input type="range" id="PY" min="8" max="92" value="50">
-    <div class="row"><label>整体 x 位置</label><span class="v" id="vPX">0.50</span></div>
-    <input type="range" id="PX" min="8" max="92" value="50">
-    <div class="row"><label>宽 halfX</label><span class="v" id="vHX">0.37</span></div>
-    <input type="range" id="HX" min="15" max="48" value="37">
-    <div class="row"><label>高 halfY</label><span class="v" id="vHY">0.25</span></div>
-    <input type="range" id="HY" min="15" max="45" value="25">
-    <div class="row"><label>圆角 corner</label><span class="v" id="vCR">1.00</span></div>
-    <input type="range" id="CR" min="0" max="100" value="100">
-  </div>
-
-  <div class="grp gl" id="grpGlassRefr" style="display:none">
-    <div class="gh">液态玻璃 · 折射（透镜）</div>
-    <div class="row"><label>强度 refraction</label><span class="v" id="vRF">200</span></div>
-    <input type="range" id="RF" min="0" max="260" value="200">
-    <div class="row"><label>放大 zoom</label><span class="v" id="vZM">1.00</span></div>
-    <input type="range" id="ZM" min="100" max="180" value="100">
-    <div class="row"><label>带宽 band</label><span class="v" id="vBD">170</span></div>
-    <input type="range" id="BD" min="60" max="500" value="170">
-    <div class="row"><label>球面/平缓 dome</label><span class="v" id="vDM">0.40</span></div>
-    <input type="range" id="DM" min="0" max="100" value="40">
-    <div class="row"><label>色差 aberration</label><span class="v" id="vAB">10</span></div>
-    <input type="range" id="AB" min="0" max="40" value="10">
-    <div class="row"><label>模糊 blur(backdrop)</label><span class="v" id="vBL">0.3</span></div>
-    <input type="range" id="BL" min="0" max="40" value="3">
-  </div>
-
-  <div class="grp gl" id="grpGlassTop" style="display:none">
-    <div class="gh">液态玻璃 · 黑顶镜面</div>
-    <div class="row"><label>黑区强度</label><span class="v" id="vTD">0.93</span></div>
-    <input type="range" id="TD" min="0" max="100" value="93">
-    <div class="row"><label>黑区起点</label><span class="v" id="vB0">-1.00</span></div>
-    <input type="range" id="B0" min="-300" max="80" value="-100">
-    <div class="row"><label>黑区终点</label><span class="v" id="vB1">-0.01</span></div>
-    <input type="range" id="B1" min="-300" max="120" value="-1">
-  </div>
-
-  <div class="grp gl" id="grpGlassEdge" style="display:none">
-    <div class="gh">液态玻璃 · 赤道亮线</div>
-    <div class="row"><label>亮度 edgeBleed</label><span class="v" id="vEB">0.11</span></div>
-    <input type="range" id="EB" min="0" max="200" value="11">
-  </div>
-
-  <div class="grp gl" id="grpGlassWave" style="display:none">
-    <div class="gh">液态玻璃 · Siri 波</div>
-    <div class="btns" id="waveModeBtns">
-      <button data-mode="0">关闭</button>
-      <button data-mode="1">Siri 波</button>
-      <button data-mode="2">Fluid Dots</button>
+  <!-- ═══ 5. 审批球 ═══ -->
+  <div class="card" id="cardAppr">
+    <div class="hd">
+      <h2>审批球</h2>
+      <p>DSH 要你点头（审批 / 提问）时，球自己展开成玻璃卡片，点一下就替你回。</p>
     </div>
-    <div class="row" style="margin-top:10px"><label>亮度 wave</label><span class="v" id="vWV">1.90</span></div>
-    <input type="range" id="WV" min="0" max="300" value="190">
-    <div class="row"><label>缩放 scale</label><span class="v" id="vWS">0.85</span></div>
-    <input type="range" id="WS" min="20" max="150" value="85">
-    <div class="muted" style="margin-top:8px">实时作用于悬浮水晶球；<b>Siri 模式</b>下形状由文字决定，但折射 / 黑顶 / 亮线 / 波光仍实时生效。</div>
-  </div>
+    <div class="bd">
+      <div class="row">
+        <div>
+          <div class="lb">弹出审批球</div>
+          <div class="sub">关掉就只能回浏览器里点</div>
+        </div>
+        <div class="switch" id="swAppr"></div>
+      </div>
 
-  <div class="grp" id="grpPreset" style="display:none">
-    <div class="gh">预设</div>
-    <input type="text" id="presetName" placeholder="预设名称">
-    <div class="btns">
-      <button id="btnPresetSave">保存当前</button>
-      <button id="btnPresetReload">刷新列表</button>
+      <div id="apprBody">
+        <div class="row">
+          <div>
+            <div class="lb">面板字号</div>
+            <div class="sub">卡片整体缩放（字号、内边距、按钮高一起变）</div>
+          </div>
+          <span class="v" id="vApScale">0.55</span>
+        </div>
+        <div class="slider"><input type="range" id="apScale" min="20" max="150" step="1" value="55"></div>
+        <div class="btns">
+          <button id="btnApprDemo">假审批（调版式）</button>
+          <button id="btnQDemo">假提问（多选+输入）</button>
+          <button id="btnApprDismiss">撤掉</button>
+        </div>
+      </div>
     </div>
-    <div class="btns" id="presetList" style="margin-top:8px"></div>
-    <div class="muted" style="margin-top:8px">保存当前「液态玻璃」全部参数 + Siri 字号。点击预设即应用，长按预设删除。</div>
   </div>
 
-  <div class="grp" id="grpMore" style="display:none">
-    <div class="gh">测试 / 扩展</div>
-    <div class="btns" style="margin-bottom:12px">
-      <button id="btnVib">震动</button>
-      <button id="btnToast">Toast</button>
+  <!-- ═══ 6. DSH 连接 ═══ -->
+  <div class="card" id="cardDsh">
+    <div class="hd">
+      <h2>DSH 连接</h2>
+      <p>球的文字来自本机 DSH。地址不对就一直转圈不显字。</p>
     </div>
-    <input type="text" id="url" placeholder="https://…">
-    <div class="btns"><button id="btnOpen">打开网址</button></div>
+    <div class="bd">
+      <div class="row">
+        <div>
+          <div class="lb">文本助手</div>
+          <div class="sub" id="asstSub">打字问答：问答结果写进球里</div>
+        </div>
+        <div class="switch" id="swAsst"></div>
+      </div>
+
+      <div id="asstBody">
+        <div class="row">
+          <div><div class="lb">DSH 地址</div></div>
+        </div>
+        <input type="text" id="asstUrl" placeholder="http://127.0.0.1:3081">
+        <div class="hint" style="padding-top:8px">改完点一下空白处生效；本机 DSH 一般是
+          <code>http://127.0.0.1:3081</code>。</div>
+
+        <div class="row">
+          <div>
+            <div class="lb">镜像当前会话</div>
+            <div class="sub">不管谁在问，DSH 一回复球就出字</div>
+          </div>
+          <div class="switch" id="swMirror"></div>
+        </div>
+
+        <div class="btns">
+          <button id="btnAsstTest" class="primary">问一句（测链路）</button>
+          <button id="btnSearchOpen">打开搜索框</button>
+          <button id="btnSearchClose">关掉搜索框</button>
+        </div>
+        <div class="hint" style="padding-bottom:0">球里现在：<b id="ballText">—</b><br>
+          状态：<b id="asstState">—</b> · 镜像：<b id="mirrorState">—</b> · 球上审批：<b id="apprPending">—</b></div>
+      </div>
+    </div>
   </div>
 
-  <div class="grp" id="grpNone">
-    <div class="gh">未连接系统</div>
-    <div class="muted">当前在普通浏览器中打开，<b>window.Watch</b> 不存在。<br>请在手表 App 内查看这些设置。</div>
+  <!-- ═══ 7. 高级 ═══ -->
+  <div class="card" id="cardAdv">
+    <div class="hd">
+      <h2>高级</h2>
+      <p>玻璃外观、预设、诊断工具。平时不用动。</p>
+    </div>
+    <div class="bd">
+      <details>
+        <summary>玻璃外观（形状 / 材质 / 动效）</summary>
+        <div class="inner">
+          <div class="hint" style="padding-top:0">球、便签、六个圆、胶囊、审批卡片是<b>同一块玻璃</b>的不同形态 ——
+            这里调的是材质本身，所有形态一起变。拖动即时生效并自动保存。</div>
+
+          <details style="border-top:1px solid rgba(255,255,255,.06)">
+            <summary>形状与位置</summary>
+            <div class="inner">
+              <div class="hint" style="padding-top:0">决定"它看起来是圆的还是扁的、待在哪儿"。</div>
+
+              <div class="row" style="border-top:0">
+                <div><div class="lb">整体大小</div><div class="sub">所有形态一起缩放</div></div>
+                <span class="v" id="vSC">1.00</span>
+              </div>
+              <div class="slider"><input type="range" id="SC" min="20" max="200" value="100"></div>
+
+              <div class="row">
+                <div><div class="lb">宽度</div><div class="sub">球的横向半径</div></div>
+                <span class="v" id="vHX">0.37</span>
+              </div>
+              <div class="slider"><input type="range" id="HX" min="15" max="48" value="37"></div>
+
+              <div class="row">
+                <div><div class="lb">高度</div><div class="sub">球的纵向半径（比宽度小 = 扁球）</div></div>
+                <span class="v" id="vHY">0.25</span>
+              </div>
+              <div class="slider"><input type="range" id="HY" min="15" max="45" value="25"></div>
+
+              <div class="row">
+                <div><div class="lb">圆角</div><div class="sub">1 = 圆球 / 胶囊端头，0 = 方角</div></div>
+                <span class="v" id="vCR">1.00</span>
+              </div>
+              <div class="slider"><input type="range" id="CR" min="0" max="100" value="100"></div>
+
+              <div class="row">
+                <div><div class="lb">横向位置</div><div class="sub">0.5 = 屏幕正中</div></div>
+                <span class="v" id="vPX">0.50</span>
+              </div>
+              <div class="slider"><input type="range" id="PX" min="8" max="92" value="50"></div>
+
+              <div class="row">
+                <div><div class="lb">纵向位置</div><div class="sub">窗口里的相对位置，不是屏幕坐标</div></div>
+                <span class="v" id="vPY">0.50</span>
+              </div>
+              <div class="slider"><input type="range" id="PY" min="8" max="92" value="50"></div>
+            </div>
+          </details>
+
+          <details style="border-top:1px solid rgba(255,255,255,.06)">
+            <summary>玻璃材质（折射 / 黑顶 / 高光）</summary>
+            <div class="inner">
+              <div class="hint" style="padding-top:0">这一组决定"它像多厚的玻璃、边缘有多锋利、顶上那块黑有多重"。</div>
+
+              <div class="row" style="border-top:0">
+                <div><div class="lb">折射强度</div><div class="sub">背景被推开的力度，越大越像放大镜</div></div>
+                <span class="v" id="vRF">200</span>
+              </div>
+              <div class="slider"><input type="range" id="RF" min="0" max="260" value="200"></div>
+
+              <div class="row">
+                <div><div class="lb">折射带宽</div><div class="sub">贴边那圈厚玻璃有多宽（越大越"钝"）</div></div>
+                <span class="v" id="vBD">170</span>
+              </div>
+              <div class="slider"><input type="range" id="BD" min="60" max="500" value="170"></div>
+
+              <div class="row">
+                <div><div class="lb">放大</div><div class="sub">玻璃里的画面比外面大多少</div></div>
+                <span class="v" id="vZM">1.00</span>
+              </div>
+              <div class="slider"><input type="range" id="ZM" min="100" max="180" value="100"></div>
+
+              <div class="row">
+                <div><div class="lb">球面感</div><div class="sub">0 = 平板玻璃，1 = 玻璃球珠</div></div>
+                <span class="v" id="vDM">0.40</span>
+              </div>
+              <div class="slider"><input type="range" id="DM" min="0" max="100" value="40"></div>
+
+              <div class="row">
+                <div><div class="lb">边缘色差</div><div class="sub">边缘那圈彩虹的强度</div></div>
+                <span class="v" id="vAB">10</span>
+              </div>
+              <div class="slider"><input type="range" id="AB" min="0" max="40" value="10"></div>
+
+              <div class="row">
+                <div><div class="lb">背景模糊</div><div class="sub">玻璃后面糊多少（0 = 完全清晰）</div></div>
+                <span class="v" id="vBL">0.3</span>
+              </div>
+              <div class="slider"><input type="range" id="BL" min="0" max="40" value="3"></div>
+
+              <div class="row">
+                <div><div class="lb">黑顶浓度</div><div class="sub">顶上那块磨砂黑有多深（0 = 不黑）</div></div>
+                <span class="v" id="vTD">0.93</span>
+              </div>
+              <div class="slider"><input type="range" id="TD" min="0" max="100" value="93"></div>
+
+              <div class="row">
+                <div><div class="lb">黑区上边界</div><div class="sub">+1 = 球顶，-1 = 球底</div></div>
+                <span class="v" id="vB0">-1.00</span>
+              </div>
+              <div class="slider"><input type="range" id="B0" min="-300" max="80" value="-100"></div>
+
+              <div class="row">
+                <div><div class="lb">黑区下边界</div><div class="sub">整块黑往下铺到哪</div></div>
+                <span class="v" id="vB1">-0.01</span>
+              </div>
+              <div class="slider"><input type="range" id="B1" min="-300" max="120" value="-1"></div>
+
+              <div class="row">
+                <div><div class="lb">赤道线 / 底边高光</div><div class="sub">腰线那道亮光，0 = 不亮</div></div>
+                <span class="v" id="vEB">0.11</span>
+              </div>
+              <div class="slider"><input type="range" id="EB" min="0" max="200" value="11"></div>
+            </div>
+          </details>
+
+          <details style="border-top:1px solid rgba(255,255,255,.06)">
+            <summary>动效（Siri 波 / 思考圆点）</summary>
+            <div class="inner">
+              <div class="hint" style="padding-top:0">回答时有波、思考时有圆点 —— 两个动效各管一段状态。</div>
+              <div class="seg tight" id="waveSeg" style="padding-top:0">
+                <button data-mode="0">关闭</button>
+                <button data-mode="1">Siri 波</button>
+                <button data-mode="2">流体圆点</button>
+              </div>
+
+              <div class="row"><div><div class="lb">波的亮度</div></div><span class="v" id="vWV">1.90</span></div>
+              <div class="slider"><input type="range" id="WV" min="0" max="300" value="190"></div>
+              <div class="row"><div><div class="lb">波的密度</div><div class="sub">越大波形越密</div></div><span class="v" id="vWS">0.85</span></div>
+              <div class="slider"><input type="range" id="WS" min="20" max="150" value="85"></div>
+
+              <div class="row"><div><div class="lb">思考圆点 · 环半径 (px)</div></div><span class="v" id="vOrbR">90</span></div>
+              <div class="slider"><input type="range" id="orbR" min="30" max="220" step="5" value="90"></div>
+              <div class="row"><div><div class="lb">思考圆点 · 亮度</div></div><span class="v" id="vOrbG">1.10</span></div>
+              <div class="slider"><input type="range" id="orbG" min="10" max="400" step="5" value="110"></div>
+              <div class="row"><div><div class="lb">思考圆点 · 边缘辉光</div></div><span class="v" id="vOrbRim">1.30</span></div>
+              <div class="slider"><input type="range" id="orbRim" min="0" max="400" step="5" value="130"></div>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details>
+        <summary>预设</summary>
+        <div class="inner">
+          <input type="text" id="presetName" placeholder="预设名称">
+          <div class="btns"><button id="btnPresetSave">保存当前外观</button></div>
+          <div class="btns" id="presetList"></div>
+          <div class="hint" style="padding-bottom:0">点预设即应用，长按预设删除。</div>
+        </div>
+      </details>
+
+      <details>
+        <summary>诊断</summary>
+        <div class="inner">
+          <div class="row" style="border-top:0">
+            <div>
+              <div class="lb">关掉开发者覆盖层</div>
+              <div class="sub" id="dbgPermState">—</div>
+            </div>
+            <div class="switch" id="swDbgOverlay"></div>
+          </div>
+          <div class="hint">开发者选项里的「坐标/速度」条和触摸十字线，在这里一次关掉。<br>
+            没授权时点下面这个给一次（有 root 也会自动走 root 通道）。</div>
+          <div class="btns"><button id="btnDbgOverlayAuth">授权改系统设置</button><button id="btnBallShot">存一张球体截图</button></div>
+        </div>
+      </details>
+
+      <details>
+        <summary>设备</summary>
+        <div class="inner">
+          <div class="kv"><span>型号</span><b id="dModel">-</b></div>
+          <div class="kv"><span>Android</span><b id="dVer">-</b></div>
+          <div class="kv"><span>电量</span><b id="dBat">-</b></div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div class="card" id="grpNone" style="display:none">
+    <div class="hd"><h2>没连上球</h2>
+      <p>当前在普通浏览器里打开，页面的 <code>window.Watch</code> 不存在。<br>要在球 App 里打开这一页才能改设置。</p></div>
   </div>
 
 <script>
 (function () {
   var W = window.Watch;
-  if (!W) return;
-  document.getElementById('grpNone').style.display = 'none';
-  ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',
-   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave','grpPreset'].forEach(function (id) {
-    document.getElementById(id).style.display = 'block';
-  });
+  function $(id) { return document.getElementById(id); }
+  function isOn(el) { return !!(el && el.classList.contains('on')); }
+  function setOn(el, v) { if (el) el.classList.toggle('on', !!v); }
+  function show(el, v) { if (el) el.classList.toggle('hidden', !v); }
+  function txt(el, s) { if (el) el.textContent = s; }
+  function call(fn) { try { return fn(); } catch (e) { return null; } }
+  function toast(s) { call(function () { W.toast(s); }); }
 
-  function info() {
-    try {
-      var i = JSON.parse(W.getInfo());
-      document.getElementById('dModel').textContent = i.model;
-      document.getElementById('dVer').textContent = 'API ' + i.android;
-      document.getElementById('dBat').textContent = Math.round(i.battery) + '%' + (i.charging ? ' ⚡' : '');
-      document.getElementById('dAdmin').textContent = W.isAdmin() ? '是' : '否';
-    } catch (e) {}
+  if (!W) { $('grpNone').style.display = ''; return; }
+
+  // 竖向滑动别改到滑块的值 —— Chrome 的原生 range「按哪儿都能拖」，往下翻页会顺手改值
+  // （实测把「回复字号比例」从 0.83 拖成 0.63）。做法：range 不接指针（CSS pointer-events:none），
+  // 手势由它外面的 .slider 自己算：横着拖才改值，竖着就让页面滚。
+  var sliders = document.querySelectorAll('.slider');
+  for (var si2 = 0; si2 < sliders.length; si2++) {
+    (function (wrap) {
+      var inp = wrap.querySelector('input[type=range]');
+      if (!inp) return;
+      var down = false, horiz = false, sx = 0, sy = 0;
+      function setFromX(clientX) {
+        var r = inp.getBoundingClientRect();
+        if (r.width <= 0) return;
+        var lo = isFinite(+inp.min) ? +inp.min : 0;
+        var hi = isFinite(+inp.max) ? +inp.max : 100;
+        var st = isFinite(+inp.step) && +inp.step > 0 ? +inp.step : 1;
+        var t = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+        var v = Math.round((lo + (hi - lo) * t) / st) * st;
+        v = Math.min(hi, Math.max(lo, v));
+        if (String(v) !== inp.value) {
+          inp.value = v;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));   // 和原来一样的入口
+        }
+      }
+      wrap.addEventListener('pointerdown', function (e) {
+        down = true; horiz = false; sx = e.clientX; sy = e.clientY;
+      });
+      wrap.addEventListener('pointermove', function (e) {
+        if (!down) return;
+        var dx = Math.abs(e.clientX - sx), dy = Math.abs(e.clientY - sy);
+        if (!horiz) {
+          if (dy > dx + 8) { down = false; return; }   // 竖向：交回滚动，绝不改值
+          if (dx > dy + 4) horiz = true;
+        }
+        if (horiz) setFromX(e.clientX);
+      });
+      wrap.addEventListener('pointerup', function () { down = false; });
+      wrap.addEventListener('pointercancel', function () { down = false; });
+      wrap.addEventListener('pointerleave', function () { down = false; });
+    })(sliders[si2]);
   }
-  info();
 
-  var bright = document.getElementById('bright'), vBright = document.getElementById('vBright');
-  function applyBright() {
-    W.setBrightness(bright.value / 100);
-    vBright.textContent = Math.round(bright.value) + '%';
+  // 整行都能点开/关（不必非戳中小开关），顺带给读屏软件补上标签
+  var allSwitches = document.querySelectorAll('.switch');
+  for (var si = 0; si < allSwitches.length; si++) {
+    (function (sw) {
+      sw.setAttribute('role', 'switch');
+      var row = sw.closest ? sw.closest('.row') : null;
+      if (row) {
+        var lb = row.querySelector('.lb');
+        if (lb) sw.setAttribute('aria-label', lb.textContent.trim());
+        row.addEventListener('click', function (e) {
+          if (e.target === sw || sw.contains(e.target)) return;
+          sw.click();
+        });
+      }
+    })(allSwitches[si]);
   }
-  bright.addEventListener('input', applyBright);
-  applyBright();
 
-  var swKeep = document.getElementById('swKeep');
-  try { swKeep.classList.toggle('on', W.getKeepScreenOn()); } catch (e) {}
-  swKeep.addEventListener('click', function () {
-    var on = !swKeep.classList.contains('on');
-    swKeep.classList.toggle('on', on);
-    W.setKeepScreenOn(on);
-  });
+  // 版本/状态
+  txt($('verTag'), '水晶球');
 
-  var swFloat = document.getElementById('swFloat');
-  function syncFloat() {
-    try { swFloat.classList.toggle('on', !!W.isFloating()); } catch (e) {}
+  // ── 顶部状态 ───────────────────────────────────────────────
+  var YIELD_LABEL = { off: '关闭', touch: '让位', flash: '闪开' };
+  function refreshStatus() {
+    var floating = call(function () { return !!W.isFloating(); });
+    txt($('stFloat'), floating ? '在跑' : '未运行');
+    var dot = $('dotFloat'); if (dot) dot.classList.toggle('on', !!floating);
+    var src = call(function () { return W.getFloatCaptureSrc(); });
+    txt($('stCap'), src === 1 ? 'Root 直采' : '录屏');
+    var m = call(function () { return W.getAgentYieldMode(); });
+    txt($('stYield'), YIELD_LABEL[m] || '让位');
+    var asst = call(function () { return W.getAssistantEnabled(); });
+    txt($('stAsst'), asst ? '已开' : '关');
   }
+
+  // ── 悬浮球 ─────────────────────────────────────────────────
+  var swFloat = $('swFloat');
+  function syncFloat() { setOn(swFloat, call(function () { return !!W.isFloating(); })); }
   syncFloat();
   setInterval(syncFloat, 1500);
-  swFloat.addEventListener('click', function () {
-    var on = !swFloat.classList.contains('on');
-    if (on) { W.startFloat(); } else { W.stopFloat(); }
-    swFloat.classList.toggle('on', on);
+  if (swFloat) swFloat.addEventListener('click', function () {
+    var on = !isOn(swFloat);
+    if (on) call(function () { W.startFloat(); }); else call(function () { W.stopFloat(); });
+    setOn(swFloat, on);
+    setTimeout(refreshStatus, 400);
   });
 
-  var swMode = document.getElementById('swMode');
-  try { swMode.classList.toggle('on', W.getFloatMode() === 1); } catch (e) {}
-  swMode.addEventListener('click', function () {
-    var on = !swMode.classList.contains('on');
-    swMode.classList.toggle('on', on);
-    W.setFloatMode(on ? 1 : 0);
-  });
+  var srcSeg = document.querySelectorAll('#srcSeg button');
+  var scaleSeg = document.querySelectorAll('#scaleSeg button');
+  var rowLowLat = $('rowLowLat'), rowScale = $('rowScale'), rowLive = $('rowLive');
+  var swLowLat = $('swLowLat'), swLive = $('swLive');
 
-  var srcBtns = document.querySelectorAll('#srcBtns button');
-  function syncSrc() {
-    var cur = 0;
-    try { cur = W.getFloatCaptureSrc(); } catch (e) {}
-    for (var i = 0; i < srcBtns.length; i++) {
-      srcBtns[i].classList.toggle('on', +srcBtns[i].dataset.src === cur);
+  function currentSrc() { var s = call(function () { return W.getFloatCaptureSrc(); }); return s === 1 ? 1 : 0; }
+  function lowLatOn() { return !!call(function () { return W.getFloatLowLat(); }); }
+
+  // 采集方式决定哪些项真的有用：录屏模式没有「低延迟 / 分辨率」，只有「实时刷新」
+  function applyCaptureUi() {
+    var src = currentSrc();
+    for (var i = 0; i < srcSeg.length; i++) {
+      srcSeg[i].classList.toggle('on', +srcSeg[i].dataset.src === src);
     }
+    txt($('capSrcSub'), src === 1 ? 'Root 直采：无录屏弹窗、无录制标记' : '录屏：需要一次屏幕录制授权');
+    var isRoot = src === 1;
+    show(rowLowLat, isRoot);
+    show(rowScale, isRoot && lowLatOn());
+    show($('scaleSeg'), isRoot && lowLatOn());
+    show(rowLive, !isRoot);
+    txt($('stCap'), isRoot ? 'Root 直采' : '录屏');
   }
-  syncSrc();
-  for (var i = 0; i < srcBtns.length; i++) {
-    srcBtns[i].addEventListener('click', function () {
-      W.setFloatCaptureSrc(+this.dataset.src);
-      syncSrc();
+  for (var i = 0; i < srcSeg.length; i++) {
+    srcSeg[i].addEventListener('click', function () {
+      // ⚠️ 别在 call() 的闭包里用 this（那不是按钮）—— 以前这两处就是这么静默失效的
+      var src = +this.dataset.src;
+      call(function () { W.setFloatCaptureSrc(src); });
+      setTimeout(applyCaptureUi, 200);
     });
   }
 
-  var fps = document.getElementById('fps'), vFps = document.getElementById('vFps');
-  var fpsBtns = document.querySelectorAll('#fpsBtns button');
-  function applyFps(v) {
-    v = Math.max(1, Math.min(144, parseInt(v, 10) || 60));
-    try { W.setFloatFps(v); } catch (e) {}
-    vFps.textContent = v;
-    for (var j = 0; j < fpsBtns.length; j++) {
-      fpsBtns[j].classList.toggle('on', +fpsBtns[j].dataset.fps === v);
-    }
-  }
-  try {
-    var cur = W.getFloatFps();
-    fps.value = Math.max(10, Math.min(120, cur));
-  } catch (e) {}
-  vFps.textContent = fps.value;
-  fps.addEventListener('input', function () { applyFps(fps.value); });
-  fps.addEventListener('change', function () { applyFps(fps.value); });
-  for (var k = 0; k < fpsBtns.length; k++) {
-    fpsBtns[k].addEventListener('click', function () {
-      fps.value = this.dataset.fps;
-      applyFps(this.dataset.fps);
-    });
-  }
-  applyFps(fps.value);
-
-  var swLow = document.getElementById('swLowLat');
-  try { swLow.classList.toggle('on', W.getFloatLowLat()); } catch (e) {}
-  swLow.addEventListener('click', function () {
-    var on = !swLow.classList.contains('on');
-    swLow.classList.toggle('on', on);
-    W.setFloatLowLat(on);
-  });
-
-  var yieldBtns = document.querySelectorAll('#yieldModeBtns button');
-  var vYieldMode = document.getElementById('vYieldMode');
-  var YIELD_LABEL = { off: '关闭（不防误触）', touch: '让位（看得见点不到）', flash: '闪开（玻璃瞬间消失）' };
-  function syncYieldMode() {
-    var mode = 'touch';
-    try { mode = W.getAgentYieldMode(); } catch (e) {}
-    if (mode !== 'off' && mode !== 'flash') mode = 'touch';
-    if (vYieldMode) vYieldMode.textContent = YIELD_LABEL[mode];
-    for (var i = 0; i < yieldBtns.length; i++) {
-      yieldBtns[i].classList.toggle('on', yieldBtns[i].dataset.mode === mode);
-    }
-  }
-  syncYieldMode();
-  for (var i = 0; i < yieldBtns.length; i++) {
-    yieldBtns[i].addEventListener('click', function () {
-      var mode = this.dataset.mode;
-      try { W.setAgentYieldMode(mode); } catch (e) {}
-      syncYieldMode();
-      try {
-        W.toast(mode === 'off' ? 'AI 操控时：球不再让路'
-          : (mode === 'flash' ? 'AI 操控时：玻璃闪开让位' : 'AI 操控时：全部 UI 让位'));
-      } catch (e) {}
+  if (swLowLat) {
+    setOn(swLowLat, lowLatOn());
+    swLowLat.addEventListener('click', function () {
+      var on = !isOn(swLowLat);
+      call(function () { W.setFloatLowLat(on); });
+      setOn(swLowLat, on);
+      setTimeout(applyCaptureUi, 200);
     });
   }
 
-  var scaleBtns = document.querySelectorAll('#scaleBtns button');
   function syncScale() {
-    var cur = 2;
-    try { cur = W.getFloatCapScale(); } catch (e) {}
-    for (var s = 0; s < scaleBtns.length; s++) {
-      scaleBtns[s].classList.toggle('on', +scaleBtns[s].dataset.scale === cur);
+    var cur = call(function () { return W.getFloatCapScale(); }) || 2;
+    for (var s = 0; s < scaleSeg.length; s++) {
+      scaleSeg[s].classList.toggle('on', +scaleSeg[s].dataset.scale === cur);
     }
   }
   syncScale();
-  for (var t = 0; t < scaleBtns.length; t++) {
-    scaleBtns[t].addEventListener('click', function () {
-      W.setFloatCapScale(+this.dataset.scale);
+  for (var t = 0; t < scaleSeg.length; t++) {
+    scaleSeg[t].addEventListener('click', function () {
+      var sc = +this.dataset.scale;
+      call(function () { W.setFloatCapScale(sc); });
       syncScale();
     });
   }
 
-  var swSiri = document.getElementById('swSiri');
-  var siriBox = document.getElementById('siriBox');
+  var fps = $('fps'), vFps = $('vFps');
+  var fpsSeg = document.querySelectorAll('#fpsSeg button');
+  function applyFps(v) {
+    v = Math.max(10, Math.min(120, parseInt(v, 10) || 60));
+    call(function () { W.setFloatFps(v); });
+    txt(vFps, v);
+    for (var j = 0; j < fpsSeg.length; j++) {
+      fpsSeg[j].classList.toggle('on', +fpsSeg[j].dataset.fps === v);
+    }
+  }
+  if (fps) {
+    var curFps = call(function () { return W.getFloatFps(); }) || 60;
+    fps.value = Math.max(10, Math.min(120, curFps));
+    applyFps(fps.value);
+    fps.addEventListener('input', function () { applyFps(fps.value); });
+    fps.addEventListener('change', function () { applyFps(fps.value); });
+  }
+  for (var k = 0; k < fpsSeg.length; k++) {
+    fpsSeg[k].addEventListener('click', function () {
+      if (fps) fps.value = this.dataset.fps;
+      applyFps(this.dataset.fps);
+    });
+  }
+
+  if (swLive) {
+    setOn(swLive, call(function () { return W.getFloatMode() === 1; }));
+    swLive.addEventListener('click', function () {
+      var on = !isOn(swLive);
+      call(function () { W.setFloatMode(on ? 1 : 0); });
+      setOn(swLive, on);
+      toast(on ? '实时刷新：开（画面会闪）' : '实时刷新：关');
+    });
+  }
+
+  applyCaptureUi();
+
+  // ── 防误触 ─────────────────────────────────────────────────
+  var yieldSeg = document.querySelectorAll('#yieldSeg button');
+  var YIELD_HINT = {
+    touch: '现在的行为：球还看得见，但 AI 动手时整颗球点不到，手势直接落到底下的 App。',
+    flash: '现在的行为：AI 一动手，玻璃整块消失（球内文字一起藏），手一松立刻回来 —— 闪一下让位。',
+    off: '现在的行为：球照吃手势。AI 点在球上的那一下会落空，只在排错时用。'
+  };
+  function syncYield() {
+    var mode = call(function () { return W.getAgentYieldMode(); });
+    if (mode !== 'off' && mode !== 'flash') mode = 'touch';
+    for (var i = 0; i < yieldSeg.length; i++) {
+      yieldSeg[i].classList.toggle('on', yieldSeg[i].dataset.mode === mode);
+    }
+    txt($('yieldHint'), YIELD_HINT[mode]);
+    txt($('stYield'), YIELD_LABEL[mode] || '让位');
+  }
+  syncYield();
+  for (var i2 = 0; i2 < yieldSeg.length; i2++) {
+    yieldSeg[i2].addEventListener('click', function () {
+      var mode = this.dataset.mode;
+      call(function () { W.setAgentYieldMode(mode); });
+      syncYield();
+      toast(mode === 'off' ? '防误触已关闭' : (mode === 'flash' ? '防误触：闪开' : '防误触：让位'));
+    });
+  }
+
+  // ── 球内文字 ───────────────────────────────────────────────
+  var swSiri = $('swSiri'), siriBody = $('siriBody');
   function syncSiri() {
-    var on = false;
-    try { on = W.getSiriEnabled(); } catch (e) {}
-    swSiri.classList.toggle('on', on);
-    siriBox.style.display = on ? 'block' : 'none';
+    var on = call(function () { return !!W.getSiriEnabled(); });
+    setOn(swSiri, on);
+    show(siriBody, on);
   }
   syncSiri();
-  swSiri.addEventListener('click', function () {
-    var on = !swSiri.classList.contains('on');
-    try { W.setSiriEnabled(on); } catch (e) {}
+  if (swSiri) swSiri.addEventListener('click', function () {
+    var on = !isOn(swSiri);
+    call(function () { W.setSiriEnabled(on); });
     syncSiri();
   });
-  var siriInput = document.getElementById('siriText');
-  siriInput.addEventListener('input', function () {
-    try { W.setSiriText(siriInput.value); } catch (e) {}
+
+  var siriSz = $('siriSz'), vSiriSz = $('vSiriSz');
+  if (siriSz) {
+    var curSz = call(function () { return W.getSiriTextSp(); });
+    if (curSz) siriSz.value = Math.max(8, Math.min(120, curSz));
+    txt(vSiriSz, siriSz.value);
+    siriSz.addEventListener('input', function () {
+      txt(vSiriSz, siriSz.value);
+      call(function () { W.setSiriTextSp(parseInt(siriSz.value, 10)); });
+    });
+  }
+
+  var mdRatio = $('mdRatio'), vMdRatio = $('vMdRatio');
+  function fmt2(pct) { return (pct / 100).toFixed(2); }
+  if (mdRatio) {
+    var curMd = call(function () { return W.getMdFontRatioPct(); });
+    if (curMd) mdRatio.value = curMd;
+    txt(vMdRatio, fmt2(parseInt(mdRatio.value, 10)));
+    mdRatio.addEventListener('input', function () {
+      txt(vMdRatio, fmt2(parseInt(mdRatio.value, 10)));
+      call(function () { W.setMdFontRatioPct(parseInt(mdRatio.value, 10)); });
+    });
+  }
+
+  var siriBlack = $('siriBlack'), vSiriBlack = $('vSiriBlack');
+  if (siriBlack) {
+    var curBk = call(function () { return W.getSiriBlackStep(); });
+    if (curBk != null) siriBlack.value = curBk;
+    txt(vSiriBlack, (siriBlack.value / 1000).toFixed(2));
+    siriBlack.addEventListener('input', function () {
+      txt(vSiriBlack, (siriBlack.value / 1000).toFixed(2));
+      call(function () { W.setSiriBlackStep(parseInt(siriBlack.value, 10)); });
+    });
+  }
+
+  var siriDy = $('siriDy'), vSiriDy = $('vSiriDy');
+  if (siriDy) {
+    var curDy = call(function () { return W.getSiriTextDy(); });
+    if (curDy != null) siriDy.value = curDy;
+    txt(vSiriDy, siriDy.value);
+    siriDy.addEventListener('input', function () {
+      txt(vSiriDy, siriDy.value);
+      call(function () { W.setSiriTextDy(parseInt(siriDy.value, 10)); });
+    });
+  }
+
+  function bindOrb(id, vid, getter, setter, scale) {
+    var s = $(id), v = $(vid);
+    if (!s) return;
+    var cur = call(getter);
+    if (cur != null) s.value = cur;
+    txt(v, scale ? (s.value / scale).toFixed(2) : s.value);
+    s.addEventListener('input', function () {
+      txt(v, scale ? (s.value / scale).toFixed(2) : s.value);
+      call(function () { setter(parseInt(s.value, 10)); });
+    });
+  }
+  bindOrb('orbR', 'vOrbR', function () { return W.getOrbRadius(); }, function (n) { W.setOrbRadius(n); }, 0);
+  bindOrb('orbG', 'vOrbG', function () { return W.getOrbGain(); }, function (n) { W.setOrbGain(n); }, 100);
+  bindOrb('orbRim', 'vOrbRim', function () { return W.getOrbRim(); }, function (n) { W.setOrbRim(n); }, 100);
+
+  var btnPreview = $('btnMdPreview');
+  if (btnPreview) btnPreview.addEventListener('click', function () {
+    call(function () { W.previewSiriText(); });
+    toast('已灌入示例回复（钉住不消散）');
   });
-  document.getElementById('btnSiriClear').addEventListener('click', function () {
-    siriInput.value = '';
-    try { W.setSiriText(''); } catch (e) {}
-  });
-  var siriDemoText = '你好，我是水晶球，会跟着文字实时变形。';
-  document.getElementById('btnSiriDemo').addEventListener('click', function () {
-    var i = 0;
-    siriInput.value = '';
-    var timer = setInterval(function () {
-      if (i > siriDemoText.length) { clearInterval(timer); return; }
-      siriInput.value = siriDemoText.slice(0, i);
-      try { W.setSiriText(siriInput.value); } catch (e) {}
-      i++;
-    }, 180);
+  var btnPreviewStop = $('btnMdPreviewStop');
+  if (btnPreviewStop) btnPreviewStop.addEventListener('click', function () {
+    call(function () { W.previewSiriTextStop(); });
+    toast('已结束预览');
   });
 
-  // ── DSH 文本助手 ──────────────────────────────────────────────
-  var swAsst = document.getElementById('swAsst');
-  var asstBox = document.getElementById('asstBox');
-  var asstUrl = document.getElementById('asstUrl');
-  function syncAsst() {
-    var on = false, url = '';
-    try { on = W.getAssistantEnabled(); } catch (e) {}
-    try { url = W.getAssistantEndpoint(); } catch (e) {}
-    swAsst.classList.toggle('on', !!on);
-    asstBox.style.display = on ? 'block' : 'none';
-    if (!asstUrl.value && url) asstUrl.value = url;
-  }
-  syncAsst();
-  swAsst.addEventListener('click', function () {
-    var on = !swAsst.classList.contains('on');
-    try { W.setAssistantEnabled(on); } catch (e) {}
-    syncAsst();
-  });
-  asstUrl.addEventListener('change', function () {
-    try { W.setAssistantEndpoint(asstUrl.value); } catch (e) {}
-  });
-  document.getElementById('btnAsstTest').addEventListener('click', function () {
-    try { W.assistantAsk('只回复四个字：球内链路正常'); } catch (e) {}
-  });
-  document.getElementById('btnAsstClear').addEventListener('click', function () {
-    try { W.setSiriText(''); } catch (e) {}
-  });
-  document.getElementById('btnBallShot').addEventListener('click', function () {
-    var p = '';
-    try { p = W.captureBall(); } catch (e) {}
-    try { W.toast(p ? ('已保存：' + p) : '截图失败'); } catch (e) {}
-  });
-  // 镜像开关
-  var swAsstMirror = document.getElementById('swAsstMirror');
-  try { swAsstMirror.classList.toggle('on', !!W.getMirrorEnabled()); } catch (e) {}
-  swAsstMirror.addEventListener('click', function () {
-    var on = !swAsstMirror.classList.contains('on');
-    try { W.setMirrorEnabled(on); } catch (e) {}
-    swAsstMirror.classList.toggle('on', on);
-  });
-  // 审批球开关 + 调试入口
-  var swAppr = document.getElementById('swAppr');
-  var apprBox = document.getElementById('apprBox');
-  var apprStateEl = document.getElementById('apprState');
-  var apprPendingEl = document.getElementById('apprPending');
+  // ── 审批球 ─────────────────────────────────────────────────
+  var swAppr = $('swAppr'), apprBody = $('apprBody');
   function syncAppr() {
-    var on = true;
-    try { on = !!W.getApprovalOrb(); } catch (e) {}
-    swAppr.classList.toggle('on', on);
-    apprBox.style.display = on ? 'block' : 'none';
+    var on = call(function () { return !!W.getApprovalOrb(); });
+    setOn(swAppr, on);
+    show(apprBody, on);
   }
   syncAppr();
-  swAppr.addEventListener('click', function () {
-    var on = !swAppr.classList.contains('on');
-    try { W.setApprovalOrb(on); } catch (e) {}
+  if (swAppr) swAppr.addEventListener('click', function () {
+    var on = !isOn(swAppr);
+    call(function () { W.setApprovalOrb(on); });
     syncAppr();
   });
-  document.getElementById('btnApprDemo').addEventListener('click', function () {
-    try { W.debugApproval('bash', '这个命令要在沙箱之外执行：rm -rf /data/local/tmp/probe（试一下审批球长什么样）'); } catch (e) {}
-  });
-  document.getElementById('btnQDemo').addEventListener('click', function () {
-    try { W.debugQuestion(); } catch (e) {}
-  });
-  document.getElementById('btnApprDismiss').addEventListener('click', function () {
-    try { W.dismissApproval(); } catch (e) {}
-  });
 
-  // 实时回读球内文字 / 助手状态，确认 DSH 的回答真的写进了球里
-  var ballTextEl = document.getElementById('ballText');
-  var btnSearchOpen = document.getElementById('btnSearchOpen');
-  if (btnSearchOpen) btnSearchOpen.addEventListener('click', function () {
-    try { W.openSearchBox(); } catch (e) {}
-  });
-  var btnSearchClose = document.getElementById('btnSearchClose');
-  if (btnSearchClose) btnSearchClose.addEventListener('click', function () {
-    try { W.closeSearchBox(); } catch (e) {}
-  });
-
-  var asstStateEl = document.getElementById('asstState');
-  var ballSiriEl = document.getElementById('ballSiri');
-  var mirrorEl = document.getElementById('mirrorState');
-  setInterval(function () {
-    if (!ballTextEl) return;
-    try { ballTextEl.textContent = W.getBallSiriText() || '—'; } catch (e) {}
-    try { asstStateEl.textContent = W.getAssistantState(); } catch (e) {}
-    try { ballSiriEl.textContent = W.isBallSiriOn() ? '开' : '关'; } catch (e) {}
-    try { mirrorEl.textContent = W.getMirrorStatus() || '未连接'; } catch (e) {}
-    try { apprStateEl.textContent = W.getApprovalStatus() || '未连接'; } catch (e) {}
-    try { apprPendingEl.textContent = W.getApprovalPending() || '—'; } catch (e) {}
-  }, 1000);
-
-  var siriDy = document.getElementById('siriDy'), vSiriDy = document.getElementById('vSiriDy');
-  try { var curDy = W.getSiriTextDy(); siriDy.value = curDy; vSiriDy.textContent = curDy; } catch (e) {}
-  siriDy.addEventListener('input', function () {
-    vSiriDy.textContent = siriDy.value;
-    try { W.setSiriTextDy(parseInt(siriDy.value, 10)); } catch (e) {}
-  });
-
-  var siriSz = document.getElementById('siriSz'), vSiriSz = document.getElementById('vSiriSz');
-  try { var curSz = W.getSiriTextSp(); if (curSz) siriSz.value = curSz; } catch (e) {}
-  vSiriSz.textContent = siriSz.value;
-  siriSz.addEventListener('input', function () {
-    vSiriSz.textContent = siriSz.value;
-    try { W.setSiriTextSp(parseInt(siriSz.value, 10)); } catch (e) {}
-  });
-
-  // 调试覆盖层开关（pointer_location / show_touches）
-  var swDbg = document.getElementById('swDbgOverlay');
-  var dbgPerm = document.getElementById('dbgPermState');
-  function syncDbg() {
-    var on = false, perm = false;
-    try { on = W.getDebugOverlay(); } catch (e) {}
-    try { perm = W.hasOverlayWritePermission(); } catch (e) {}
-    if (swDbg) swDbg.classList.toggle('on', !!on);
-    if (dbgPerm) dbgPerm.textContent = perm ? '已授权' : '未授权（会尝试 root 通道）';
+  var apScale = $('apScale'), vApScale = $('vApScale');
+  if (apScale) {
+    var curAp = call(function () { return W.getApScalePct(); });
+    if (curAp) apScale.value = curAp;
+    txt(vApScale, fmt2(parseInt(apScale.value, 10)));
+    apScale.addEventListener('input', function () {
+      txt(vApScale, fmt2(parseInt(apScale.value, 10)));
+      call(function () { W.setApScalePct(parseInt(apScale.value, 10)); });
+    });
   }
-  syncDbg();
-  if (swDbg) swDbg.addEventListener('click', function () {
-    var on = !swDbg.classList.contains('on');
-    try { W.setDebugOverlay(on); } catch (e) {}
-    setTimeout(syncDbg, 500);
+  var btnA1 = $('btnApprDemo');
+  if (btnA1) btnA1.addEventListener('click', function () {
+    call(function () { W.debugApproval('bash', '这个命令要在沙箱之外执行：rm -rf /data/local/tmp/probe（试一下审批球长什么样）'); });
   });
-  var bAuthDbg = document.getElementById('btnDbgOverlayAuth');
-  if (bAuthDbg) bAuthDbg.addEventListener('click', function () {
-    try { W.requestOverlayWritePermission(); } catch (e) {}
-  });
+  var btnA2 = $('btnQDemo');
+  if (btnA2) btnA2.addEventListener('click', function () { call(function () { W.debugQuestion(); }); });
+  var btnA3 = $('btnApprDismiss');
+  if (btnA3) btnA3.addEventListener('click', function () { call(function () { W.dismissApproval(); }); });
 
-  // 离线预览球内排版
-  var btnMdPreview = document.getElementById('btnMdPreview');
-  if (btnMdPreview) btnMdPreview.addEventListener('click', function () {
-    try { W.previewSiriText(); } catch (e) { alert('预览失败：' + e); }
+  // ── DSH 连接 ───────────────────────────────────────────────
+  var swAsst = $('swAsst'), asstBody = $('asstBody'), asstUrl = $('asstUrl');
+  function syncAsst() {
+    var on = call(function () { return !!W.getAssistantEnabled(); });
+    setOn(swAsst, on);
+    show(asstBody, on);
+    txt($('stAsst'), on ? '已开' : '关');
+  }
+  syncAsst();
+  if (swAsst) swAsst.addEventListener('click', function () {
+    var on = !isOn(swAsst);
+    call(function () { W.setAssistantEnabled(on); });
+    syncAsst();
   });
-  var btnMdPreviewStop = document.getElementById('btnMdPreviewStop');
-  if (btnMdPreviewStop) btnMdPreviewStop.addEventListener('click', function () {
-    try { W.previewStop(); } catch (e) {}
+  if (asstUrl) {
+    var url0 = call(function () { return W.getAssistantEndpoint(); });
+    if (url0) asstUrl.value = url0;
+    asstUrl.addEventListener('change', function () {
+      call(function () { W.setAssistantEndpoint(asstUrl.value); });
+      toast('DSH 地址已保存');
+    });
+  }
+  var swMirror = $('swMirror');
+  if (swMirror) {
+    setOn(swMirror, call(function () { return !!W.getMirrorEnabled(); }));
+    swMirror.addEventListener('click', function () {
+      var on = !isOn(swMirror);
+      call(function () { W.setMirrorEnabled(on); });
+      setOn(swMirror, on);
+      toast(on ? '镜像当前会话：开' : '镜像当前会话：关');
+    });
+  }
+  var btnAsk = $('btnAsstTest');
+  if (btnAsk) btnAsk.addEventListener('click', function () {
+    call(function () { W.assistantAsk('只回复四个字：球内链路正常'); });
+    toast('已发送，球里会出字');
   });
+  var btnSO = $('btnSearchOpen');
+  if (btnSO) btnSO.addEventListener('click', function () { call(function () { W.openSearchBox(); }); });
+  var btnSC = $('btnSearchClose');
+  if (btnSC) btnSC.addEventListener('click', function () { call(function () { W.closeSearchBox(); }); });
 
-  // 球内回复字号比例（百分数 ↔ 小数）
-  var mdRatio = document.getElementById('mdRatio'), vMdRatio = document.getElementById('vMdRatio');
-  function fmtRatio(pct) { return (pct / 100).toFixed(2); }
-  try { var curMd = W.getMdFontRatioPct(); if (curMd) { mdRatio.value = curMd; } } catch (e) {}
-  vMdRatio.textContent = fmtRatio(parseInt(mdRatio.value, 10));
-  mdRatio.addEventListener('input', function () {
-    vMdRatio.textContent = fmtRatio(parseInt(mdRatio.value, 10));
-    try { W.setMdFontRatioPct(parseInt(mdRatio.value, 10)); } catch (e) {}
-  });
+  setInterval(function () {
+    txt($('ballText'), call(function () { return W.getBallSiriText(); }) || '—');
+    txt($('asstState'), call(function () { return W.getAssistantState(); }) || '—');
+    txt($('mirrorState'), call(function () { return W.getMirrorStatus(); }) || '未连接');
+    txt($('apprPending'), call(function () { return W.getApprovalPending(); }) || '—');
+    txt($('stAsst'), call(function () { return W.getAssistantEnabled(); }) ? '已开' : '关');
+  }, 1200);
 
-  // 审批面板整体缩放
-  var apScale = document.getElementById('apScale'), vApScale = document.getElementById('vApScale');
-  try { var curAp = W.getApScalePct(); if (curAp) { apScale.value = curAp; } } catch (e) {}
-  vApScale.textContent = fmtRatio(parseInt(apScale.value, 10));
-  apScale.addEventListener('input', function () {
-    vApScale.textContent = fmtRatio(parseInt(apScale.value, 10));
-    try { W.setApScalePct(parseInt(apScale.value, 10)); } catch (e) {}
-  });
-
-  var siriBlack = document.getElementById('siriBlack'), vSiriBlack = document.getElementById('vSiriBlack');
-  try { var curBk = W.getSiriBlackStep(); if (curBk != null) siriBlack.value = curBk; } catch (e) {}
-  vSiriBlack.textContent = (siriBlack.value / 1000).toFixed(2);
-  siriBlack.addEventListener('input', function () {
-    vSiriBlack.textContent = (siriBlack.value / 1000).toFixed(2);
-    try { W.setSiriBlackStep(parseInt(siriBlack.value, 10)); } catch (e) {}
-  });
-
-  // 思考中的流体圆点：环半径(屏幕像素) + 亮度增益
-  var orbR = document.getElementById('orbR'), vOrbR = document.getElementById('vOrbR');
-  var orbG = document.getElementById('orbG'), vOrbG = document.getElementById('vOrbG');
-  try { var curOrbR = W.getOrbRadius(); if (curOrbR != null) orbR.value = curOrbR; } catch (e) {}
-  try { var curOrbG = W.getOrbGain(); if (curOrbG != null) orbG.value = curOrbG; } catch (e) {}
-  vOrbR.textContent = orbR.value;
-  vOrbG.textContent = (orbG.value / 100).toFixed(2);
-  orbR.addEventListener('input', function () {
-    vOrbR.textContent = orbR.value;
-    try { W.setOrbRadius(parseInt(orbR.value, 10)); } catch (e) {}
-  });
-  orbG.addEventListener('input', function () {
-    vOrbG.textContent = (orbG.value / 100).toFixed(2);
-    try { W.setOrbGain(parseInt(orbG.value, 10)); } catch (e) {}
-  });
-  var orbRim = document.getElementById('orbRim'), vOrbRim = document.getElementById('vOrbRim');
-  try { var curOrbRim = W.getOrbRim(); if (curOrbRim != null) orbRim.value = curOrbRim; } catch (e) {}
-  vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
-  orbRim.addEventListener('input', function () {
-    vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
-    try { W.setOrbRim(parseInt(orbRim.value, 10)); } catch (e) {}
-  });
-
-  // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──
+  // ── 液态玻璃外观 ───────────────────────────────────────────
   var GP = { master:1, posX:0.5, posY:0.5, halfX:0.37, halfY:0.25, corner:1,
     refraction:200, band:170, zoom:1, dome:0.4, aberration:10, blur:0.3,
     topDarken:0.93, black0:-1, black1:-0.01, edgeBleed:0.11,
     waveAmp:1.9, waveScale:0.85, waveOn:true, waveMode:1 };
-  try {
-    var gs = W.getFloatParams();
-    if (gs) { var go = JSON.parse(gs); for (var gk in go) if (gk in GP) GP[gk] = go[gk]; }
-  } catch (e) {}
-
+  var gs = call(function () { return W.getFloatParams(); });
+  if (gs) {
+    try { var go = JSON.parse(gs); for (var gk in go) if (gk in GP) GP[gk] = go[gk]; } catch (e) {}
+  }
   var glassPending = false;
   function pushGlass() {
-    if (glassPending) return; glassPending = true;
+    if (glassPending) return;
+    glassPending = true;
     setTimeout(function () {
       glassPending = false;
-      try { W.setFloatParams(JSON.stringify(GP)); } catch (e) {}
+      call(function () { W.setFloatParams(JSON.stringify(GP)); });
     }, 0);
   }
   var gBindings = [];
   function bindG(id, key, scale, fmt) {
-    var s = document.getElementById(id), v = document.getElementById('v' + id);
+    var s = $(id), v = $('v' + id);
     if (!s) return;
     gBindings.push({ s: s, v: v, key: key, scale: scale, fmt: fmt });
     s.addEventListener('input', function () {
@@ -733,18 +997,17 @@
   bindG('TD','topDarken',0.01,f2); bindG('B0','black0',0.01,f2); bindG('B1','black1',0.01,f2);
   bindG('EB','edgeBleed',0.01,f2); bindG('WV','waveAmp',0.01,f2); bindG('WS','waveScale',0.01,f2);
 
-  var waveModeBtns = document.querySelectorAll('#waveModeBtns button');
+  var waveSeg = document.querySelectorAll('#waveSeg button');
   function syncWaveMode() {
     var m = GP.waveOn ? GP.waveMode : 0;
-    for (var wi = 0; wi < waveModeBtns.length; wi++) {
-      waveModeBtns[wi].classList.toggle('on', +waveModeBtns[wi].dataset.mode === m);
+    for (var wi = 0; wi < waveSeg.length; wi++) {
+      waveSeg[wi].classList.toggle('on', +waveSeg[wi].dataset.mode === m);
     }
   }
-  for (var wj = 0; wj < waveModeBtns.length; wj++) {
-    waveModeBtns[wj].addEventListener('click', function () {
+  for (var wj = 0; wj < waveSeg.length; wj++) {
+    waveSeg[wj].addEventListener('click', function () {
       var m = +this.dataset.mode;
-      if (m === 0) { GP.waveOn = false; }
-      else { GP.waveOn = true; GP.waveMode = m; }
+      if (m === 0) { GP.waveOn = false; } else { GP.waveOn = true; GP.waveMode = m; }
       syncWaveMode(); pushGlass();
     });
   }
@@ -752,90 +1015,92 @@
   renderGlass();
   pushGlass();
 
-  // ── 预设：保存 / 加载「液态玻璃参数 + Siri 字号」组合 ──
+  // ── 预设 ───────────────────────────────────────────────────
   var PRESET_KEY = 'glass_presets';
-  function loadPresets() { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || {}; } catch (e) { return {}; } }
-  function savePresets(o) { try { localStorage.setItem(PRESET_KEY, JSON.stringify(o)); } catch (e) {} }
+  function loadPresets() {
+    try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || {}; } catch (e) { return {}; }
+  }
+  function savePresets(o) {
+    try { localStorage.setItem(PRESET_KEY, JSON.stringify(o)); } catch (e) {}
+  }
   function renderPresets() {
-    var box = document.getElementById('presetList'); if (!box) return;
+    var box = $('presetList');
+    if (!box) return;
     box.innerHTML = '';
     var o = loadPresets(), names = Object.keys(o);
-    if (!names.length) { box.innerHTML = '<span class="muted">暂无预设</span>'; return; }
+    if (!names.length) { box.innerHTML = '<span class="muted">还没有预设</span>'; return; }
     names.forEach(function (n) {
       var b = document.createElement('button');
       b.textContent = n;
       b.addEventListener('click', function () { applyPreset(n); });
       var lt = null;
-      function startLong() { lt = setTimeout(function () {
-        var oo = loadPresets(); delete oo[n]; savePresets(oo); renderPresets();
-        try { W.toast('已删除预设：' + n); } catch (e) {}
-      }, 700); }
-      function cancelLong() { clearTimeout(lt); }
-      b.addEventListener('pointerdown', startLong);
-      b.addEventListener('pointerup', cancelLong);
-      b.addEventListener('pointerleave', cancelLong);
-      b.addEventListener('pointercancel', cancelLong);
+      b.addEventListener('pointerdown', function () {
+        lt = setTimeout(function () {
+          var oo = loadPresets(); delete oo[n]; savePresets(oo); renderPresets();
+          toast('已删除预设：' + n);
+        }, 700);
+      });
+      ['pointerup','pointerleave','pointercancel'].forEach(function (ev) {
+        b.addEventListener(ev, function () { clearTimeout(lt); });
+      });
       box.appendChild(b);
     });
   }
   function applyPreset(n) {
-    var o = loadPresets()[n]; if (!o) return;
+    var o = loadPresets()[n];
+    if (!o) return;
     if (o.p) { for (var k in o.p) if (k in GP) GP[k] = o.p[k]; }
-    renderGlass();
-    syncWaveMode();
-    pushGlass();
-    if (typeof o.sp === 'number') {
-      siriSz.value = o.sp; vSiriSz.textContent = o.sp;
-      try { W.setSiriTextSp(o.sp); } catch (e) {}
+    renderGlass(); syncWaveMode(); pushGlass();
+    if (typeof o.sp === 'number' && siriSz) {
+      siriSz.value = o.sp;
+      txt(vSiriSz, o.sp);
+      call(function () { W.setSiriTextSp(o.sp); });
     }
-    document.getElementById('presetName').value = n;
-    try { W.toast('已应用预设：' + n); } catch (e) {}
+    if ($('presetName')) $('presetName').value = n;
+    toast('已应用预设：' + n);
   }
-  document.getElementById('btnPresetSave').addEventListener('click', function () {
-    var ne = document.getElementById('presetName');
-    var n = (ne.value || '').trim();
-    if (!n) { try { W.toast('请输入预设名称'); } catch (e) {} return; }
+  var btnPS = $('btnPresetSave');
+  if (btnPS) btnPS.addEventListener('click', function () {
+    var ne = $('presetName');
+    var n = ((ne && ne.value) || '').trim();
+    if (!n) { toast('先起个名字'); return; }
     var o = loadPresets();
-    o[n] = { p: JSON.parse(JSON.stringify(GP)), sp: parseInt(siriSz.value, 10) };
+    o[n] = { p: JSON.parse(JSON.stringify(GP)), sp: parseInt(siriSz ? siriSz.value : 34, 10) };
     savePresets(o); renderPresets();
-    try { W.toast('已保存预设：' + n); } catch (e) {}
+    toast('已保存预设：' + n);
   });
-  document.getElementById('btnPresetReload').addEventListener('click', renderPresets);
   renderPresets();
 
-  var swAuto = document.getElementById('swAuto');
-  try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}
-  swAuto.addEventListener('click', function () {
-    var on = !swAuto.classList.contains('on');
-    swAuto.classList.toggle('on', on);
-    W.setAutoKiosk(on);
-    hint();
-  });
-
-  document.getElementById('btnLock').addEventListener('click', function () {
-    W.startKiosk(); W.vibrate(60);
-  });
-  document.getElementById('btnUnlock').addEventListener('click', function () {
-    W.stopKiosk();
-  });
-
-  function hint() {
-    var k = document.getElementById('kioskHint');
-    if (!W.isAdmin()) {
-      k.innerHTML = '未设为设备所有者：锁定会走系统「屏幕固定」，需手动确认且可退出。<br>执行：'
-        + '<br><code>adb shell dpm set-device-owner com.glslplayground.app/.AdminReceiver</code>';
-    } else {
-      k.innerHTML = '已是设备所有者，锁定后无法退出。长按首页标题 1.2s 可应急解锁。';
-    }
+  // ── 诊断：开发者覆盖层 / 截图 / 设备 ────────────────────────
+  var swDbg = $('swDbgOverlay'), dbgPerm = $('dbgPermState');
+  function syncDbg() {
+    setOn(swDbg, call(function () { return !!W.getDebugOverlay(); }));
+    var perm = call(function () { return !!W.hasOverlayWritePermission(); });
+    txt(dbgPerm, perm ? '已授权' : '未授权（会试 root 通道）');
   }
-  hint();
-
-  document.getElementById('btnVib').addEventListener('click', function () { W.vibrate(120); });
-  document.getElementById('btnToast').addEventListener('click', function () { W.toast('来自网页的问候'); });
-  document.getElementById('btnOpen').addEventListener('click', function () {
-    var u = document.getElementById('url').value.trim();
-    if (u) W.openUrl(u);
+  syncDbg();
+  if (swDbg) swDbg.addEventListener('click', function () {
+    var on = !isOn(swDbg);
+    call(function () { W.setDebugOverlay(on); });
+    setTimeout(syncDbg, 500);
   });
+  var btnAuth = $('btnDbgOverlayAuth');
+  if (btnAuth) btnAuth.addEventListener('click', function () { call(function () { W.requestOverlayWritePermission(); }); });
+  var btnShot = $('btnBallShot');
+  if (btnShot) btnShot.addEventListener('click', function () {
+    var p = call(function () { return W.captureBall(); });
+    toast(p ? ('已保存：' + p) : '截图失败');
+  });
+
+  var info = call(function () { return JSON.parse(W.getInfo()); });
+  if (info) {
+    txt($('dModel'), info.model || '-');
+    txt($('dVer'), 'API ' + info.android);
+    txt($('dBat'), Math.round(info.battery) + '%' + (info.charging ? ' ⚡' : ''));
+  }
+
+  refreshStatus();
+  setInterval(refreshStatus, 3000);
 })();
 </script>
 </body>
