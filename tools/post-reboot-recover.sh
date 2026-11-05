@@ -48,7 +48,16 @@ echo "   OK"
 
 echo "== 3/3 LSPosed / 模块状态"
 if [ -f /data/adb/lspd/config/modules_config.db ]; then
-  echo "   LSPosed：已安装"
+  echo "   LSPosed：已安装（重启后 DB 已就绪）"
+  # 一次性把「键盘隐身」那一档需要的手工点按也做掉：
+  #   启用模块（作用域=当前默认输入法）→ 重启输入法进程 → 把本 App 设为隐身目标
+  echo "   → 启用 VoiceMap 模块（作用域=当前默认输入法）"
+  su -c "sh '$REPO/android/assets/vmctl.sh' enable"
+  echo "   → 重启输入法进程（让模块注入）"
+  su -c "sh '$REPO/android/assets/vmctl.sh' restart"
+  echo "   → 把本 App 设为隐身目标"
+  su -c "sh '$REPO/android/assets/vmctl.sh' cmd register com.glslplayground.app"
+  echo "   --- 自检 ---"
   su -c "sh '$REPO/android/assets/vmctl.sh' status"
 else
   echo "   LSPosed：未安装 —— 设置页里点「下载并安装 LSPosed」，重启后回来点「启用模块」"
