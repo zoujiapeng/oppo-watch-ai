@@ -859,15 +859,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 防"球被窗口裁成方形"：
         // hx = base*halfX*master，而窗口大小是按 winSize 定的、不跟 master 变。
         // master 拉到 1.7 之类的值时球比窗口还宽 —— 两侧被裁平（看着像方形），
-        // 折射/色差采样又跑到窗口外，玻璃整个花掉。这里把半宽/半高夹在窗口内，
-        // 宁可让「球体大小」滑块在高位饱和，也不要渲染出一个坏形状。
-        float maxHx = Math.max(1f, winW * 0.5f - 2f);
-        float maxHy = Math.max(1f, winH * 0.5f - 2f);
-        if (hx > maxHx || hy > maxHy) {
-            float f = Math.min(maxHx / Math.max(hx, 1e-3f), maxHy / Math.max(hy, 1e-3f));
-            hx *= f;
-            hy *= f;
-            cr *= f;
+        // 折射/色差采样又跑到窗口外，玻璃整个花掉。
+        //
+        // ⚠️ 只夹「手动球体大小」这一路（非 siriGeom）。聊天卡片那种大方形玻璃是服务端
+        // 动画驱动的（siriGeom=true），窗口本身会按卡片尺寸重设；在这里跟着夹会把宽度
+        // 一起等比缩小 —— 表现就是"大玻璃变瘦、文字跑到玻璃外面"（实测踩过）。
+        if (!siriGeom) {
+            float maxHx = Math.max(1f, winW * 0.5f - 2f);
+            float maxHy = Math.max(1f, winH * 0.5f - 2f);
+            if (hx > maxHx || hy > maxHy) {
+                float f = Math.min(maxHx / Math.max(hx, 1e-3f), maxHy / Math.max(hy, 1e-3f));
+                hx *= f;
+                hy *= f;
+                cr *= f;
+            }
         }
 
         if (captureSource == 1) {
