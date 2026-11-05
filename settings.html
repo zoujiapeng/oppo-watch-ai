@@ -982,6 +982,7 @@
     window.vmOnVoice = function (evt, text) {
       var st = vmEl('vmTestState');
       if (evt === 'listening') { if (st) st.textContent = '🔴 录音中…'; return; }
+      if (evt === 'holding') { if (st) st.textContent = '🎙 正在听…'; return; }
       if (evt === 'transcribing') { if (st) st.textContent = '⏳ 转写中…'; return; }
       if (st) st.textContent = '—';
       if (evt === 'error') {
@@ -1008,6 +1009,11 @@
       if (e && e.preventDefault) e.preventDefault();
       if (talking) return;
       talking = true;
+      try {
+        if (e && e.pointerId != null && talk && talk.setPointerCapture) {
+          talk.setPointerCapture(e.pointerId);   // 抓住指针：滑出按钮也不算松手
+        }
+      } catch (x) {}
       talkPath = vmVoicemapReady() ? 'voicemap' : 'local';
       var st = vmEl('vmTestState');
       if (talkPath === 'voicemap') {
@@ -1051,10 +1057,13 @@
     }
 
     if (talk) {
+      talk.style.touchAction = 'none';   // 别让页面滚动手势把这一按抢走
       talk.addEventListener('pointerdown', vmDown);
       talk.addEventListener('pointerup', vmUp);
       talk.addEventListener('pointercancel', vmUp);
-      talk.addEventListener('pointerleave', vmUp);
+      // 不再监听 pointerleave：手指在按钮上轻微移动（或按钮被键盘顶起来）就会 leave，
+      // 原来那样会被判成"松手"，表现就是"按住有时候自己松开"。
+      // 改成 pointerdown 时抓住指针，up/cancel 才结束。
       if (!window.PointerEvent) {
         talk.addEventListener('touchstart', vmDown, { passive: false });
         talk.addEventListener('touchend', vmUp, { passive: false });

@@ -2,15 +2,19 @@ package com.glslplayground.app;
 
 import android.app.Activity;
 import android.app.admin.DevicePolicyManager;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Vibrator;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -94,6 +98,8 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT);
         setContentView(webView, lp);
+
+        armVoiceAck();
 
         if (savedInstanceState == null) {
             webView.loadUrl("file:///android_asset/index.html");
@@ -500,6 +506,49 @@ public class MainActivity extends Activity {
     }
 
     public String voiceTalkState() { return talkState; }
+
+    /**
+     * 模块把 ACTION_DOWN 真正注进键盘那一刻会回一条广播（com.pj.voicemap.ACK, msg=down/…）。
+     * 收到就点亮"正在听"并轻震一下 —— 从按下到输入法真的开始录音之间必然有几百毫秒，
+     * 有了这个提示，用户知道"现在说话"，就不会把开头几个字白白丢掉。
+     */
+    private BroadcastReceiver vmAck;
+    private boolean vmAckRegistered;
+
+    private void armVoiceAck() {
+        if (vmAckRegistered) return;
+        try {
+            vmAck = new BroadcastReceiver() {
+                @Override public void onReceive(Context c, Intent in) {
+                    String msg = in == null ? null : in.getStringExtra("msg");
+                    if (msg == null) return;
+                    if (msg.startsWith("down")) {
+                        emitVoice("holding", "");
+                        try {
+                            Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                            if (v != null) v.vibrate(25);
+                        } catch (Throwable ignored) { }
+                    }
+                }
+            };
+            IntentFilter f = new IntentFilter("com.pj.voicemap.ACK");
+            // 本 App targetSdk=28，注册出来的 receiver 默认就是 exported，
+            // 不需要 API 33 的 RECEIVER_EXPORTED 标志（编译用的 android.jar 也没这个常量）。
+            registerReceiver(vmAck, f);
+            vmAckRegistered = true;
+        } catch (Throwable t) {
+            Log.w("VoiceAck", "register failed: " + t);
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (vmAckRegistered && vmAck != null) {
+            try { unregisterReceiver(vmAck); } catch (Throwable ignored) { }
+            vmAckRegistered = false;
+        }
+        super.onDestroy();
+    }
 
     private void emitVoice(final String evt, final String text) {
         runOnUiThread(new Runnable() {

@@ -49,8 +49,12 @@ public final class VoiceMapControl {
         return sInst;
     }
 
+    private static final String ACTION_TRIGGER = "com.pj.voicemap.TRIGGER";
+
     private final Context app;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    /** 当前默认输入法包名（buildStatus 里从 vmctl status 的 ime= 读回来）。 */
+    private volatile String imePkg = "";
     private volatile String status = "{}";
     private volatile String lastMsg = "";
 
@@ -163,6 +167,10 @@ public final class VoiceMapControl {
 
     /** calibrate / dump / clearcal / stealthon / stealthoff —— 原样转给模块。 */
     public void cmd(final String c) {
+        // stealthon/off 是按住说话路径上的，必须快
+        if (fast(c)) {
+            return;
+        }
         io.execute(new Runnable() {
             @Override public void run() {
                 lastMsg = last(sh("cmd " + c));
@@ -173,6 +181,9 @@ public final class VoiceMapControl {
 
     /** 把本 App 设成"隐身 + 可触发"的目标（模块的 arm_pkg）。 */
     public void registerSelf() {
+        if (fast("register")) {
+            return;
+        }
         io.execute(new Runnable() {
             @Override public void run() {
                 lastMsg = last(sh("cmd register com.glslplayground.app"));
@@ -181,11 +192,15 @@ public final class VoiceMapControl {
         });
     }
 
-    /** 按住说话：down 开始录音，up 结束出字。 */
+    /** 按住说话：down 开始录音，up 结束出字。优先走无 su 的快速广播。 */
     public void trigger(final String dir) {
+        final String d = "up".equals(dir) ? "up" : "down";
+        if (fast(d)) {
+            return;
+        }
         io.execute(new Runnable() {
             @Override public void run() {
-                String out = last(sh("trigger " + ("up".equals(dir) ? "up" : "down")));
+                String out = last(sh("trigger " + d));
                 if (out != null && out.length() > 0) lastMsg = out;
             }
         });
@@ -233,6 +248,33 @@ public final class VoiceMapControl {
 
     // ------------------------------------------------------------- 内部实现
 
+    /**
+     * 直接给输入法进程里的模块发广播，**不经过 su**。
+     *
+     * 一次 `su -c` 要 fork 一个 root shell（实测 200~400ms），按住说话时这一段
+     * 就是"开头那几个字没被录到"的主要来源；而普通 App 本来就能给别的包发显式广播，
+     * 所以按下/松手/隐身开关全走这条路，su 只留作兜底。
+     */
+    private boolean fast(String cmd) {
+        String pkg = imePkg;
+        if (pkg == null || pkg.length() == 0 || "-".equals(pkg)) {
+            return false;
+        }
+        try {
+            Intent i = new Intent(ACTION_TRIGGER);
+            i.setPackage(pkg);
+            i.putExtra("cmd", cmd);
+            if ("register".equals(cmd)) {
+                i.putExtra("pkg", "com.glslplayground.app");
+            }
+            app.sendBroadcast(i);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "fast(" + cmd + ") failed: " + t);
+            return false;
+        }
+    }
+
     private String buildStatus() {
         String raw = sh("status");
         Map<String, String> kv = new LinkedHashMap<String, String>();
@@ -245,6 +287,10 @@ public final class VoiceMapControl {
                 if (e <= 0) { logTail.append(s).append(' '); continue; }
                 kv.put(s.substring(0, e), s.substring(e + 1));
             }
+        }
+        String ime = kv.get("ime");
+        if (ime != null && ime.length() > 0) {
+            imePkg = ime;
         }
         StringBuilder j = new StringBuilder("{");
         boolean first = true;
