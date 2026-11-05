@@ -28,12 +28,23 @@ case "$out" in
 esac
 
 echo "== 2/3 装最新 APK（含「按住说话」不依赖 root 的那条路）"
-if su -c "pm install -r '$APK'" 2>&1 | tail -2; then
-  echo "   OK"
-else
-  echo "   ✗ 装包失败，看上面 pm 的输出"
+# 刚开机时 PackageManager 常常还没就绪，第一次 pm install 会报
+# "Failure calling service package: Failed transaction" —— 重试几次。
+ok=0
+for i in 1 2 3 4 5; do
+  out=$(su -c "pm install -r '$APK'" 2>&1)
+  echo "$out" | sed 's/^/   /'
+  case "$out" in
+    *Success*) ok=1; break ;;
+  esac
+  echo "   （第 $i 次没成功，等 3 秒重试）"
+  sleep 3
+done
+if [ "$ok" != "1" ]; then
+  echo "   ✗ 装包失败：把上面 pm 的输出发我"
   exit 1
 fi
+echo "   OK"
 
 echo "== 3/3 LSPosed / 模块状态"
 if [ -f /data/adb/lspd/config/modules_config.db ]; then
