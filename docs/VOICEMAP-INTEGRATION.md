@@ -93,3 +93,21 @@ VoiceMap: DOWN at (540.0,553.5) handled=true
 - 按住说话的 down/up 是两次广播，中间别切 App。
 - Magisk 的授权是**按 uid** 的：重装本 App 不会换 uid，但如果被拒过一次，
   授权框可能要点「允许」，或者 Magisk → 超级用户 → 本 App 打开开关。
+
+## 六、本次实机踩到的（都写进代码/脚本了）
+
+- **按住说话现在有两条路**，面板上「引擎：」那行写明这次走哪条：
+  - `输入法语音（VoiceMap，键盘隐身）`：要 root + LSPosed + 模块已启用 + 点过「本 App 设为隐身目标」；
+  - `本 App 语音识别（不需要 root）`：`AndroidAsr` 系统识别 → 不行退回 `VoiceCapture` + DSH
+    `speech/transcribe`，结果经 `window.vmOnVoice(evt, text)` 回调进测试输入框。
+    2026-11-06 实机验证：`AndroidAsr: onResults「你好」` → 输入框里出现「你好」。
+- **绝对不要直接写 `/data/adb/magisk.db`**。`magisk --sqlite "UPDATE policies …"` 会把这个
+  Magisk 31.0（Rust 守护进程）写崩，之后 `su` 一律 `Cannot connect to daemon`。
+  授权只能在 Magisk 界面里点，或者改 `magisk` 官方客户端都没有的接口——没有。
+  崩了只能重启（重启会重新拉起 magiskd，boot 补丁不受影响）。
+- **刚开机就 `pm install` 会失败**：`Failure calling service package: Failed transaction (2147483646)`，
+  或 MIUI 的 `SecurityException: need MANAGE_USERS`（XSpace 取默认用户）。等几秒重试即可，
+  `tools/post-reboot-recover.sh` 已带 5 次重试。
+- **Magisk 弹授权框的瞬间**，`su -c` 会立刻返回空（不是超时）：面板会显示
+  「拿不到 root 输出（空）」，点一下页面上的「重新自检」或等下一次轮询就正常了。
+
