@@ -62,23 +62,33 @@ def query():
     c.close()
 
 
+def columns(c, table):
+    """按现有 schema 取列名 —— LSPosed 各版本的表结构不完全一样
+    （v1.9.2 的 modules 就没有 auto_include，老的写死列名会直接 OperationalError）。"""
+    return [r[1] for r in c.execute('PRAGMA table_info(%s)' % table)]
+
+
 def enable(ime):
     apk = apk_path()
     if not apk:
         print('ERR 模块未安装：%s' % MOD)
         sys.exit(1)
     c = connect()
+    mc = columns(c, 'modules')
+    extra_auto = 'auto_include' in mc
     row = c.execute('select mid from modules where module_pkg_name=?', (MOD,)).fetchone()
     if row:
         mid = row[0]
-        c.execute('update modules set apk_path=?, enabled=1, auto_include=0 where mid=?',
-                  (apk, mid))
+        sql = 'update modules set apk_path=?, enabled=1' + (', auto_include=0' if extra_auto else '')
+        c.execute(sql + ' where mid=?', (apk, mid))
     else:
-        cur = c.execute('insert into modules(module_pkg_name,apk_path,enabled,auto_include) '
-                        'values(?,?,1,0)', (MOD, apk))
+        names = ['module_pkg_name', 'apk_path', 'enabled'] + (['auto_include'] if extra_auto else [])
+        vals = [MOD, apk, 1] + ([0] if extra_auto else [])
+        cur = c.execute('insert into modules(%s) values(%s)'
+                        % (','.join(names), ','.join(['?'] * len(names))), vals)
         mid = cur.lastrowid
     c.execute('delete from scope where mid=?', (mid,))
-    c.execute('insert into scope(mid,app_pkg_name,user_id) values(?,?,0)', (mid, ime,))
+    c.execute('insert or replace into scope(mid,app_pkg_name,user_id) values(?,?,0)', (mid, ime))
     c.commit()
     c.close()
     print('ok mid=%s enabled=1 scope=%s' % (mid, ime))

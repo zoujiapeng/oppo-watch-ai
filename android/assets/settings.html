@@ -1043,6 +1043,9 @@
     try { W.vmRefresh(); } catch (e) {}
     vmRender();
     setInterval(vmRender, 1500);
+    // 每 ~10 秒重新跑一次自检：输入法进程重启后 pid / 注入状态会变，
+    // 只读缓存会一直显示上一个 pid（看着像"没注入"）。
+    setInterval(function () { try { W.vmRefresh(); } catch (e) {} }, 10000);
   }
 
   var swAuto = document.getElementById('swAuto');

@@ -111,3 +111,45 @@ VoiceMap: DOWN at (540.0,553.5) handled=true
 - **Magisk 弹授权框的瞬间**，`su -c` 会立刻返回空（不是超时）：面板会显示
   「拿不到 root 输出（空）」，点一下页面上的「重新自检」或等下一次轮询就正常了。
 
+## 七、LSPosed 1.9.2 上「写库 ≠ 生效」（最坑的一条，实机踩到）
+
+`vm_lspd.py` 只改 LSPosed 自己的 sqlite 库。库改对了（管理器里能看到模块、开关是开的、
+作用域也勾着），**但输入法进程里仍然没有模块** —— `logcat -s LSPosed-Bridge` 一片空白。
+原因：lspd 在内存里缓存模块表，并且要给模块 dex 做一次优化，直接写库这两步都不会发生。
+
+实测有效的最小动作（按顺序）：
+
+1. 管理器得先真的装上（模块 zip 里的 `manager.apk` 不会自己出现在 pm 列表里）：
+   ```bash
+   su -c "pm install -r /data/adb/modules/zygisk_lsposed/manager.apk"
+   ```
+2. `vmctl.sh enable`（写库：`enabled=1` + 作用域）。
+3. 打开 LSPosed 管理器 → 模块 → VoiceMap IME Bridge → **把「启用模块」关一次再打开**
+   （这一步让 lspd 重新读库、做 dexopt、通知 zygisk）。
+4. `vmctl.sh restart` 杀掉输入法进程；下次弹键盘时新进程才会带模块起来。
+5. 验收：`logcat -s LSPosed-Bridge` 里应出现
+   ```
+   Loading legacy module com.pj.voicemap.ime from /data/app/…/base.apk
+   Loading class com.pj.voicemap.ime.VoiceMapHook
+   VoiceMap: loaded into com.sohu.inputmethod.sogou.xiaomi
+   VoiceMap: receiver registered
+   ```
+
+之后再按住说话，实测日志（2026-11-06 本机）：
+
+```
+VoiceMap: stealth on (showWindow) alpha=0.0 flags=0x81800118   ← 键盘窗口透明
+VoiceMap: DOWN at (540.0,1958.175) handled=true                ← 真按在搜狗空格键上
+AudioRecord: stop mSessionID=113                               ← 输入法自己录了音
+VoiceMap: UP after 2754ms handled=true
+sInput: VoiceInputResultDispatcher startVoiceView              ← 输入法自己的语音结果视图
+```
+
+同时 `dumpsys window windows | grep -A1 'InputMethod}'` 里是
+`ty=INPUT_METHOD … alpha=0.0` —— 键盘全隐身，屏幕上只有本 App。
+
+LSPosed 1.9.2 的库结构和老版本不同：`modules(mid, module_pkg_name, apk_path, enabled)`
+（**没有** `auto_include`）、`scope(mid, app_pkg_name, user_id)`。`vm_lspd.py` 现在按
+`PRAGMA table_info` 动态取列，新旧版本都能用。
+
+
