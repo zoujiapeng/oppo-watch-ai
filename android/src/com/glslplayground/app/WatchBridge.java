@@ -633,6 +633,18 @@ public class WatchBridge {
         vm().install();
     }
 
+    /** 只装隐身模块（集成之后根本不需要那个独立触发 App）。 */
+    @JavascriptInterface
+    public void vmInstallModule() {
+        vm().installModule();
+    }
+
+    /** 卸载独立触发 App（模块保留）。 */
+    @JavascriptInterface
+    public void vmUninstallApp() {
+        vm().uninstallApp();
+    }
+
     @JavascriptInterface
     public void vmUninstall() {
         vm().uninstall();

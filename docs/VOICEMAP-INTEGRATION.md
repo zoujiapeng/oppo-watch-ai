@@ -153,3 +153,42 @@ LSPosed 1.9.2 的库结构和老版本不同：`modules(mid, module_pkg_name, ap
 `PRAGMA table_info` 动态取列，新旧版本都能用。
 
 
+
+## 八、不再需要那个独立 App（2.0）
+
+本 App 自己就是触发方：`down/up` 由设置页通过 `su` 广播，隐身靠 `arm_pkg`
+（进设置页时自动 `cmd=register com.glslplayground.app`）。
+所以 **`com.pj.voicemap` 那个"一个按钮 + 一个输入框"的 App 已经卸载**，
+面板里那一行从「触发 App」改成「独立 App（已不需要）」，模块还留着。
+
+配套改动：
+- `vmctl.sh` 新增 `install-mod`（只装模块）与 `uninstall-app`；
+- 面板按钮改为「安装 / 更新隐身模块」「卸载独立 App」；
+- 就绪判断去掉独立 App（只看 root + LSPosed + 模块启用）。
+
+## 九、键盘什么时候隐身（2.0 的行为）
+
+原来的实现是「只要输入目标是本 App 就隐身」，于是手动点输入框也看不见键盘。
+现在改成 **只有按住说话期间才隐身**：
+
+1. `VoiceMapHook.sStealthEnabled` 默认 **false**；
+2. `cmd=stealthon` / `stealthoff` 现在会**立刻** `applyWindow()`（旧版只改标志位，
+   键盘已经弹出来时不会变）；
+3. 按住说话时设置页先发 `stealthon` 再聚焦输入框再发 `down` —— 键盘一秒都不露；
+4. 松手：`up` → 关掉隐身 → `hideAfterHold` 3 秒后收起键盘（留时间给输入法跑完识别），
+   再 400ms 把 alpha 还原成 1；
+5. 手动点输入框：页面监听 `focus` 发一次 `stealthoff` 强制显形 ——
+   **于是想手打时键盘正常弹出**。
+
+模块源码（含这几处补丁）在 [`android/voicemap-ime/`](../android/voicemap-ime/)，
+用 `ANDROID_JAR=… bash android/voicemap-ime/build.sh` 就能重新出包（MIT，原仓库作者 zoujiapeng）。
+
+实机验收（2026-11-06）：
+
+```
+cmd stealthoff → VoiceMap: stealth restored (cmd stealthoff) alpha=1.0   ← 键盘可见可打
+cmd stealthon  → VoiceMap: stealth on (cmd stealthon) alpha=0.0          ← 已弹出也能立刻透明
+down/up        → VoiceMap: DOWN at (540.0,1958.175) handled=true
+                 VoiceMap: UP after 2754ms handled=true
+                 VoiceMap: hideAfterHold: hideWindow                      ← 3 秒后自动收起
+```

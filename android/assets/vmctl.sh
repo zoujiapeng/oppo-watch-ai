@@ -126,6 +126,17 @@ case "${1:-status}" in
     echo "== mod"; pm install -r -g --user 0 "$m" 2>&1 | tail -1
     echo "ok app=$(has_pkg $APP) mod=$(has_pkg $MOD)"
     ;;
+  # 只装隐身模块 —— 集成进本 App 之后，独立的触发 App 已经不需要了
+  install-mod)
+    m="${2:-}"
+    if [ -z "$m" ]; then echo "ERR 缺少模块 apk 路径"; exit 1; fi
+    pm install -r -g --user 0 "$m" 2>&1 | tail -1
+    echo "ok mod=$(has_pkg $MOD)"
+    ;;
+  uninstall-app)
+    pm uninstall --user 0 "$APP" 2>&1 | tail -1
+    echo "ok app=$(has_pkg $APP)"
+    ;;
   uninstall)
     pm uninstall --user 0 "$APP" 2>&1 | tail -1
     pm uninstall --user 0 "$MOD" 2>&1 | tail -1

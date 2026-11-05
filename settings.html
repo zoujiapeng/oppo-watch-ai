@@ -76,7 +76,7 @@
 
   <div class="grp" id="grpVoice" style="display:none">
     <div class="gh">语音按键 · VoiceMap</div>
-    <div class="kv"><span>触发 App</span><b id="vmApp">—</b></div>
+    <div class="kv"><span>独立 App（已不需要）</span><b id="vmApp">—</b></div>
     <div class="kv"><span>隐身模块</span><b id="vmMod">—</b></div>
     <div class="kv"><span>模块已启用</span><b id="vmEn">—</b></div>
     <div class="kv"><span>作用域 / 注入目标</span><b id="vmScope">—</b></div>
@@ -88,7 +88,7 @@
     <div class="gh" style="margin-top:12px">作用域：模块注进哪个输入法</div>
     <div class="btns" id="vmImeBtns" style="margin-bottom:8px"></div>
     <div class="btns">
-      <button id="btnVmInstall">安装 / 更新 VoiceMap</button>
+      <button id="btnVmInstall">安装 / 更新隐身模块</button>
       <button id="btnVmEnable">启用模块</button>
       <button id="btnVmDisable">停用模块</button>
     </div>
@@ -111,18 +111,18 @@
     <input type="text" id="vmTestInput" placeholder="识别结果会落到这个框里" style="margin-top:8px">
     <div class="muted" style="margin-top:4px">按住「按住说话」→ 松手出字。两条路自动选，<b>按住说话</b>下面那行会写明这次走哪条：<br>
       · <b>输入法语音（VoiceMap）</b>：往输入法空格键注入一对真实触摸，输入法自己识别、键盘全程隐身
-      —— 要 root + LSPosed + 模块已启用 + 点过「本 App 设为隐身目标」；<br>
+      —— 按住时键盘自动隐身、松手自动收起，之后点输入框又是正常键盘；<br>
       · <b>本 App 语音识别</b>：不碰输入法，直接用系统语音识别（不行退回录音 + DSH 转写）
       —— 没 root 也能用，只是没有"键盘隐身"这回事。</div>
     <div class="muted" style="margin-top:4px">引擎：<b id="vmEngine">—</b> · 状态：<b id="vmTestState">—</b></div>
 
     <div class="btns" style="margin-top:10px">
-      <button id="btnVmOpen">打开 VoiceMap App</button>
+      <button id="btnVmOpen">卸载独立 App</button>
       <button id="btnVmRefresh">重新自检</button>
     </div>
     <div class="btns" style="margin-top:8px">
       <button id="btnVmLspd">下载并安装 LSPosed（需重启）</button>
-      <button id="btnVmUninstall">卸载 VoiceMap</button>
+      <button id="btnVmUninstall">卸载模块</button>
     </div>
     <div class="muted" style="margin-top:8px">最近一次返回：<b id="vmMsg">—</b></div>
     <details style="margin-top:8px">
@@ -870,7 +870,11 @@
     try { s = JSON.parse(W.vmStatus() || '{}') || {}; } catch (e) { s = {}; }
     VM = s;
 
-    vmFlag('vmApp', s.app, '✅ 已安装', '未安装');
+    var appEl = vmEl('vmApp');
+    if (appEl) {
+      if (vmOn(s.app)) { appEl.textContent = '已安装（可卸载）'; appEl.style.color = '#ff9f0a'; }
+      else { appEl.textContent = '✅ 不需要'; appEl.style.color = '#34c759'; }
+    }
     vmFlag('vmMod', s.mod, '✅ 已安装', '未安装');
     var e2 = vmEl('vmEn');
     if (e2) {
@@ -907,15 +911,15 @@
       } else if (!vmOn(s.lspd)) {
         msg = '本机没有 LSPosed —— 模块靠注入输入法进程工作，没它键盘不会隐身、也注入不了触摸。'
             + '点下面的「下载并安装 LSPosed」，重启后回来自检。';
-      } else if (!vmOn(s.app) || !vmOn(s.mod)) {
-        msg = '先点「安装 / 更新 VoiceMap」（两个 APK 已经打进本 App 的 assets，离线可装）。';
+      } else if (!vmOn(s.mod)) {
+        msg = '先点「安装 / 更新隐身模块」（APK 已经打进本 App 的 assets，离线可装）。';
       } else if (!vmOn(s.mod_enabled)) {
         msg = '点「启用模块」把作用域设成选中的输入法，再点「重启输入法进程」让模块注进去。';
       } else if (s.scope && s.ime && s.scope !== s.ime) {
         msg = '作用域是 ' + s.scope + '，但当前默认输入法是 ' + s.ime + ' —— 换过输入法就再点一次「启用模块」。';
       } else {
-        msg = '✅ 环境就绪：输入法进程里已注入模块。点「本 App 设为隐身目标」后按住说话即可；'
-            + '按下去没反应就「重新校准空格键」（不同输入法/分辨率各记一份坐标）。';
+        msg = '✅ 环境就绪：按住说话时键盘自动隐身、字由输入法自己写进框里；'
+            + '平时点输入框是正常键盘，可以手打。按下去没反应就「重新校准空格键」。';
       }
       h.textContent = msg;
     }
@@ -936,7 +940,7 @@
   }
 
   if (typeof W.vmStatus === 'function') {
-    vmBind('btnVmInstall', function () { W.vmInstall(); });
+    vmBind('btnVmInstall', function () { W.vmInstallModule(); });
     vmBind('btnVmEnable', function () { W.vmEnable(vmSel || ''); });
     vmBind('btnVmDisable', function () { W.vmDisable(); });
     vmBind('btnVmRestart', function () { W.vmRestartIme(); });
@@ -946,7 +950,7 @@
     vmBind('btnVmStealthOn', function () { W.vmStealth(true); });
     vmBind('btnVmStealthOff', function () { W.vmStealth(false); });
     vmBind('btnVmReg', function () { W.vmRegister(); });
-    vmBind('btnVmOpen', function () { W.vmOpenApp(); });
+    vmBind('btnVmOpen', function () { W.vmUninstallApp(); });
     vmBind('btnVmRefresh', function () { W.vmRefresh(); });
     vmBind('btnVmLspd', function () { W.vmInstallLsposed(); });
     vmBind('btnVmUninstall', function () { W.vmUninstall(); });
@@ -970,8 +974,8 @@
 
     function vmVoicemapReady() {
       var s = VM || {};
-      return vmOn(s.root) && vmOn(s.lspd) && vmOn(s.mod_enabled)
-          && vmOn(s.app) && vmOn(s.mod);
+      // 独立触发 App 不再需要：down/up 由本 App 自己广播，隐身靠 arm_pkg
+      return vmOn(s.root) && vmOn(s.lspd) && vmOn(s.mod_enabled) && vmOn(s.mod);
     }
 
     window.vmOnVoice = function (evt, text) {
@@ -1006,6 +1010,9 @@
       talkPath = vmVoicemapReady() ? 'voicemap' : 'local';
       var st = vmEl('vmTestState');
       if (talkPath === 'voicemap') {
+        // 先打开隐身：模块会把输入法窗口立刻置 alpha=0（哪怕键盘已经弹出来了），
+        // 再聚焦输入框让输入法起来，最后注入 DOWN —— 全程看不到键盘。
+        try { W.vmStealth(true); } catch (x) {}
         if (testInput) { try { testInput.focus(); } catch (x) {} }
         try { W.vmTrigger('down'); } catch (x) {}
         if (st) st.textContent = '🎙 按住中（走输入法语音）…';
@@ -1028,6 +1035,15 @@
       }
       if (talk) talk.classList.remove('on');
     }
+    // 手动点输入框时强制"显形"：上一次按住说话可能把输入法窗口留在 alpha=0 的状态，
+    // 而窗口已经显示着就不会再触发 showWindow，只能靠这一个 stealthoff 把它拉回来。
+    if (testInput) {
+      testInput.addEventListener('focus', function () {
+        if (talking) return;                      // 按住期间由 vmDown 自己管
+        try { W.vmStealth(false); } catch (e) {}
+      });
+    }
+
     if (talk) {
       talk.addEventListener('pointerdown', vmDown);
       talk.addEventListener('pointerup', vmUp);
@@ -1040,6 +1056,12 @@
       }
     }
 
+    // 进入本页先把隐身关掉：平时点输入框应该是正常键盘，可以手打。
+    // 只有按住说话的那一刻才会临时打开（见 vmDown）。
+    try { W.vmStealth(false); } catch (e) {}
+    // arm_pkg = 本 App：按住说话时模块据此决定"这个进程的输入法窗口要隐身"，
+    // 独立触发 App 卸载后这一条必须自动做掉。
+    try { W.vmRegister(); } catch (e) {}
     try { W.vmRefresh(); } catch (e) {}
     vmRender();
     setInterval(vmRender, 1500);

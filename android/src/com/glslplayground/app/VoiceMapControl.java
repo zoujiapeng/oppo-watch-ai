@@ -80,7 +80,7 @@ public final class VoiceMapControl {
         });
     }
 
-    /** 从 assets 装两个 APK（-r -g）。 */
+    /** 从 assets 装两个 APK（-r -g）。集成之后一般只用 {@link #installModule()}。 */
     public void install() {
         io.execute(new Runnable() {
             @Override public void run() {
@@ -92,6 +92,31 @@ public final class VoiceMapControl {
                 }
                 String out = sh("install " + q(a.getAbsolutePath()) + " " + q(m.getAbsolutePath()));
                 lastMsg = last(out);
+                status = buildStatus();
+            }
+        });
+    }
+
+    /** 只装隐身模块 —— 装进本 App 之后，独立触发 App 已经不需要了。 */
+    public void installModule() {
+        io.execute(new Runnable() {
+            @Override public void run() {
+                File m = asset("voicemap-ime.apk");
+                if (m == null) {
+                    lastMsg = "模块 APK 释放失败（assets 里没有 voicemap-ime.apk）";
+                    return;
+                }
+                lastMsg = last(sh("install-mod " + q(m.getAbsolutePath())));
+                status = buildStatus();
+            }
+        });
+    }
+
+    /** 卸载那个已经不需要的独立触发 App（模块留着）。 */
+    public void uninstallApp() {
+        io.execute(new Runnable() {
+            @Override public void run() {
+                lastMsg = last(sh("uninstall-app"));
                 status = buildStatus();
             }
         });
