@@ -72,6 +72,10 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
     // 只在 cmd=down（按住说话）期间打开，cmd=up 时关掉并收起键盘。
     static volatile boolean sStealthEnabled = false;
     static volatile boolean sPressed;
+    /** 按住/松手的序号：手动操作（stealthon/off、down）会让还没跑的隐式收尾作废 */
+    static volatile int sHoldSeq;
+    /** 每次 down 自增：看门狗据此判断这一轮是不是还该活着 */
+    static volatile int sDownSeq;
     static volatile long sDownTime;
     static volatile float sDownX, sDownY;
     static volatile Object sKeyView;
@@ -226,22 +230,14 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
     }
 
     static boolean stealthArmed() {
-        if (!sStealthEnabled) {
-            return false;
-        }
-        try {
-            if (sService != null) {
-                EditorInfo ei = sService.getCurrentInputEditorInfo();
-                if (ei != null && ei.packageName != null) {
-                    String p = ei.packageName.toString();
-                    if (p.length() > 0) {
-                        return armedPkg(p);
-                    }
-                }
-            }
-        } catch (Throwable ignore) {
-        }
-        return armedPkg(sActivePkg);
+        // 只认"现在是不是按住说话的那一刻"，不再看输入目标是哪个包。
+        //
+        // 旧版靠 arm_pkg / TRIGGER_PKG 判断，实测太脆：arm_pkg 存在输入法进程自己的
+        // SharedPreferences 里，输入法进程一重启、或者页面没重新加载导致 register 没发，
+        // 判断就变成 false —— 按住说话时键盘照样弹出来。
+        // 现在的语义是：sStealthEnabled 只在 cmd=down 期间为 true（设置页按住时先发
+        // stealthon、松手发 up），所以"隐身中"等价于"正在按住说话"。
+        return sStealthEnabled;
     }
 
     /* ---------------------------------------------------------------- stealth */
@@ -288,9 +284,12 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
      * 期间如果又按住了（sPressed / sStealthEnabled 为真），本轮收尾直接放弃。
      */
     static void hideAfterHold() {
+        final int seq = ++sHoldSeq;
+        // 松手后先让隐身继续保持：输入法跑完识别会自己把键盘再弹一次（showWindow），
+        // 这段时间必须仍然是透明的，否则屏幕上会闪一下键盘。
         main().postDelayed(new Runnable() {
             @Override public void run() {
-                if (sStealthEnabled || sPressed) {
+                if (seq != sHoldSeq || sPressed) {
                     return;
                 }
                 final InputMethodService svc = sService;
@@ -306,14 +305,15 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
                 }
                 main().postDelayed(new Runnable() {
                     @Override public void run() {
-                        if (sStealthEnabled || sPressed) {
+                        if (seq != sHoldSeq) {
                             return;
                         }
+                        sStealthEnabled = false;
                         applyWindow(sService, "restore after hold");
                     }
                 }, 400);
             }
-        }, 3000);
+        }, 4000);
     }
 
     static java.lang.ref.WeakReference<Window> sZeroed = new java.lang.ref.WeakReference<Window>(null);
@@ -385,21 +385,23 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
                     }
                     ack(ctx, "calibration cleared");
                 } else if ("stealthoff".equals(cmd)) {
+                    sHoldSeq++;            // 用户要显形了，取消还没跑的收尾
                     sStealthEnabled = false;
                     applyWindow(sService, "cmd stealthoff");   // 立即恢复，不用等下一次 showWindow
                     ack(ctx, "stealth off");
                 } else if ("stealthon".equals(cmd)) {
+                    sHoldSeq++;
                     sStealthEnabled = true;
                     applyWindow(sService, "cmd stealthon");    // 立即透明
                     ack(ctx, "stealth on");
                 } else if ("down".equals(cmd)) {
+                    sHoldSeq++;            // 又按住了，取消上一轮的收尾
                     sStealthEnabled = true;
                     applyWindow(sService, "down");
                     start(ctx, in, strategy);
                 } else if ("up".equals(cmd)) {
                     stop(ctx, strategy);
-                    sStealthEnabled = false;
-                    hideAfterHold();
+                    hideAfterHold();   // 隐身继续保持，4 秒后收键盘并恢复
                 }
             } catch (Throwable t) {
                 log("onReceive failed: " + t);
@@ -432,6 +434,20 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
             return;
         }
         pressDown(ctx, in);
+        // 看门狗：万一 UP 没送到（触摸被系统手势抢走、进程假死…），
+        // 20 秒后强制松手并显出键盘，免得"一直按着 / 键盘一直隐身"。
+        final int seq = ++sDownSeq;
+        main().postDelayed(new Runnable() {
+            @Override public void run() {
+                if (seq != sDownSeq || !sPressed) {
+                    return;
+                }
+                log("watchdog: 按住超过 20s，强制松手");
+                pressUp(sService);
+                sStealthEnabled = false;
+                applyWindow(sService, "watchdog");
+            }
+        }, 20000);
     }
 
     static void stop(Context ctx, String strategy) {

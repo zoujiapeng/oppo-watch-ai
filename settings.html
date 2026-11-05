@@ -971,6 +971,7 @@
     var testInput = vmEl('vmTestInput');
     var talking = false;
     var talkPath = '';
+    var talkWatch = null;
 
     function vmVoicemapReady() {
       var s = VM || {};
@@ -1021,11 +1022,16 @@
       }
       if (talk) talk.classList.add('on');
       try { W.vibrate(30); } catch (x) {}
+      // 兜底：pointerup 可能在系统手势/切 App 时丢掉，20 秒后自动松手，
+      // 免得 JS 一直以为"按住中"（模块那边也有同样的看门狗）。
+      if (talkWatch) clearTimeout(talkWatch);
+      talkWatch = setTimeout(function () { vmUp(null); }, 20000);
     }
     function vmUp(e) {
       if (e && e.preventDefault) e.preventDefault();
       if (!talking) return;
       talking = false;
+      if (talkWatch) { clearTimeout(talkWatch); talkWatch = null; }
       if (talkPath === 'voicemap') {
         try { W.vmTrigger('up'); } catch (x) {}
         var st = vmEl('vmTestState');
