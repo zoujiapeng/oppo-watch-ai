@@ -74,6 +74,63 @@
     <div class="muted" id="kioskHint" style="margin-top:10px"></div>
   </div>
 
+  <div class="grp" id="grpVoice" style="display:none">
+    <div class="gh">语音按键 · VoiceMap</div>
+    <div class="kv"><span>触发 App</span><b id="vmApp">—</b></div>
+    <div class="kv"><span>隐身模块</span><b id="vmMod">—</b></div>
+    <div class="kv"><span>模块已启用</span><b id="vmEn">—</b></div>
+    <div class="kv"><span>作用域 / 注入目标</span><b id="vmScope">—</b></div>
+    <div class="kv"><span>LSPosed 框架</span><b id="vmLspd">—</b></div>
+    <div class="kv"><span>默认输入法</span><b id="vmIme">—</b></div>
+    <div class="kv"><span>输入法进程</span><b id="vmPid">—</b></div>
+    <div class="muted" id="vmHint" style="margin-top:8px">正在自检…</div>
+
+    <div class="gh" style="margin-top:12px">作用域：模块注进哪个输入法</div>
+    <div class="btns" id="vmImeBtns" style="margin-bottom:8px"></div>
+    <div class="btns">
+      <button id="btnVmInstall">安装 / 更新 VoiceMap</button>
+      <button id="btnVmEnable">启用模块</button>
+      <button id="btnVmDisable">停用模块</button>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button id="btnVmRestart">重启输入法进程</button>
+      <button id="btnVmCal">重新校准空格键</button>
+      <button id="btnVmDump">导出键盘视图树</button>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button id="btnVmStealthOn">键盘隐身：开</button>
+      <button id="btnVmStealthOff">临时显形</button>
+      <button id="btnVmReg">本 App 设为隐身目标</button>
+    </div>
+
+    <div class="gh" style="margin-top:14px">按住说话（在本页直接测）</div>
+    <div class="btns">
+      <button id="btnVmTalk" style="flex:1;min-height:56px">🎙 按住说话</button>
+      <button id="btnVmCalClear">清校准</button>
+    </div>
+    <input type="text" id="vmTestInput" placeholder="识别结果会落到这个框里（本 App 是隐身目标时）" style="margin-top:8px">
+    <div class="muted" style="margin-top:4px">按住「按住说话」= 往输入法的空格键注入一对真实触摸 → 输入法自己的长按语音，松手出字。
+      前提：上面「模块已启用」是 ✅，并且点过「本 App 设为隐身目标」。</div>
+
+    <div class="btns" style="margin-top:10px">
+      <button id="btnVmOpen">打开 VoiceMap App</button>
+      <button id="btnVmRefresh">重新自检</button>
+    </div>
+    <div class="btns" style="margin-top:8px">
+      <button id="btnVmLspd">下载并安装 LSPosed（需重启）</button>
+      <button id="btnVmUninstall">卸载 VoiceMap</button>
+    </div>
+    <div class="muted" style="margin-top:8px">最近一次返回：<b id="vmMsg">—</b></div>
+    <details style="margin-top:8px">
+      <summary style="cursor:pointer;color:#9AA5B4;font-size:13px">查看日志（VoiceMap / LSPosed-Bridge）</summary>
+      <div class="muted" id="vmLog" style="white-space:pre-wrap;margin-top:6px;font-size:11px;line-height:1.6">—</div>
+      <div class="btns" style="margin-top:6px"><button id="btnVmLog">刷新日志</button></div>
+    </details>
+    <div class="muted" style="margin-top:8px">原理（github.com/zoujiapeng/voicemap）：LSPosed 模块注进输入法进程，
+      当输入目标是本 App 时把输入法窗口 alpha 置 0（键盘全隐身），并往键盘 View 发真实 ACTION_DOWN/UP，
+      让输入法自己的长按语音跑起来；识别结果由输入法自己 commitText 回来 —— 不录音、不联网、不接任何识别 SDK。</div>
+  </div>
+
   <div class="grp" id="grpFloat" style="display:none">
     <div class="gh">调试覆盖层</div>
     <div class="row"><label>坐标条 / 触摸轨迹（开发者选项）</label><div class="switch" id="swDbgOverlay"></div></div>
@@ -310,7 +367,7 @@
   if (!W) return;
   document.getElementById('grpNone').style.display = 'none';
   ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',
-   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave','grpPreset'].forEach(function (id) {
+   'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave','grpPreset','grpVoice'].forEach(function (id) {
     document.getElementById(id).style.display = 'block';
   });
 
@@ -761,6 +818,170 @@
   });
   document.getElementById('btnPresetReload').addEventListener('click', renderPresets);
   renderPresets();
+
+  // ── 语音按键 · VoiceMap（集成 github.com/zoujiapeng/voicemap）──────────────
+  // 状态全部来自 W.vmStatus()（Java 侧缓存，背后是 su → assets/vmctl.sh），
+  // 动作都是 W.vm*()，这里只负责画皮肤 + 按住说话的两条广播。
+  var VM = {}, vmSel = '', vmImeKey = '', vmMsgShown = '';
+  function vmEl(id) { return document.getElementById(id); }
+  function vmTxt(id, t) { var e = vmEl(id); if (e) e.textContent = t; }
+  function vmOn(v) { return v === '1' || v === 1 || v === 'true' || v === true; }
+  function vmFlag(id, v, yes, no) {
+    var e = vmEl(id); if (!e) return;
+    e.textContent = vmOn(v) ? yes : no;
+    e.style.color = vmOn(v) ? '#34c759' : '#ff6b6b';
+  }
+  function vmShort(p) {
+    var a = (p || '').split('.');
+    return a.length > 2 ? a.slice(-2).join('.') : p;
+  }
+
+  function vmRenderImes(s) {
+    var box = vmEl('vmImeBtns'); if (!box) return;
+    var list = (s.imes || '').split(',').filter(function (x) { return x && x.length > 2; });
+    var key = list.join('|') + '@' + (s.scope || '') + '@' + (s.ime || '');
+    if (key === vmImeKey) return;          // 列表/选中项没变就别重画，免得点空
+    vmImeKey = key;
+    box.innerHTML = '';
+    if (!list.length) { box.innerHTML = '<span class="muted">读不到输入法列表</span>'; return; }
+    list.forEach(function (p) {
+      var b = document.createElement('button');
+      b.textContent = vmShort(p);
+      b.title = p;
+      var chosen = (vmSel || s.scope || '') === p;
+      if (chosen) b.classList.add('on');
+      b.addEventListener('click', function () {
+        vmSel = p;
+        vmImeKey = '';                     // 强制重画选中态
+        vmRenderImes(VM);
+        try { W.toast('作用域候选：' + p + '（点「启用模块」生效）'); } catch (e) {}
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function vmRender() {
+    if (typeof W.vmStatus !== 'function') return;
+    var s = {};
+    try { s = JSON.parse(W.vmStatus() || '{}') || {}; } catch (e) { s = {}; }
+    VM = s;
+
+    vmFlag('vmApp', s.app, '✅ 已安装', '未安装');
+    vmFlag('vmMod', s.mod, '✅ 已安装', '未安装');
+    var e2 = vmEl('vmEn');
+    if (e2) {
+      if (!vmOn(s.lspd)) { e2.textContent = '— 无 LSPosed'; e2.style.color = '#ff9f0a'; }
+      else if (vmOn(s.mod_enabled)) { e2.textContent = '✅ 已启用'; e2.style.color = '#34c759'; }
+      else { e2.textContent = '未启用'; e2.style.color = '#ff6b6b'; }
+    }
+    vmTxt('vmScope', s.scope ? s.scope : '—');
+    vmFlag('vmLspd', s.lspd, '✅ 已安装', '未安装');
+    vmTxt('vmIme', s.ime && s.ime !== '-' ? s.ime : '—');
+    vmTxt('vmPid', s.imepid ? ('pid ' + s.imepid) : '未运行（弹一次键盘就起）');
+    vmRenderImes(s);
+
+    var h = vmEl('vmHint');
+    if (h) {
+      var msg;
+      if (!s.imes && !s.ime) {
+        var raw = (s.raw || '') + '';
+        if (raw.indexOf('Permission denied') >= 0) {
+          msg = 'root 被 Magisk 拒了：去 Magisk → 超级用户 → 本 App 打开开关，或者在弹出的授权框里点「允许」。';
+        } else if (raw.indexOf('Cannot connect to daemon') >= 0) {
+          msg = 'Magisk 守护进程没在跑（su 连不上）。到 Magisk 里点「修复运行环境」（会自动重启），重启后再回来自检。';
+        } else if (raw.indexOf('超时') >= 0) {
+          msg = 'su 没响应：屏幕上可能有 Magisk 的授权弹窗，点「允许」；或者进 Magisk 给本 App 永久授权。';
+        } else {
+          msg = '拿不到 root 输出（' + (raw ? raw.slice(0, 80) : '空') + '）。本页所有操作都需要 root。';
+        }
+      } else if (!vmOn(s.lspd)) {
+        msg = '本机没有 LSPosed —— 模块靠注入输入法进程工作，没它键盘不会隐身、也注入不了触摸。'
+            + '点下面的「下载并安装 LSPosed」，重启后回来自检。';
+      } else if (!vmOn(s.app) || !vmOn(s.mod)) {
+        msg = '先点「安装 / 更新 VoiceMap」（两个 APK 已经打进本 App 的 assets，离线可装）。';
+      } else if (!vmOn(s.mod_enabled)) {
+        msg = '点「启用模块」把作用域设成选中的输入法，再点「重启输入法进程」让模块注进去。';
+      } else if (s.scope && s.ime && s.scope !== s.ime) {
+        msg = '作用域是 ' + s.scope + '，但当前默认输入法是 ' + s.ime + ' —— 换过输入法就再点一次「启用模块」。';
+      } else {
+        msg = '✅ 环境就绪：输入法进程里已注入模块。点「本 App 设为隐身目标」后按住说话即可；'
+            + '按下去没反应就「重新校准空格键」（不同输入法/分辨率各记一份坐标）。';
+      }
+      h.textContent = msg;
+    }
+
+    var lm = '';
+    try { lm = W.vmLastMessage() || ''; } catch (e) {}
+    if (lm && lm !== vmMsgShown) { vmMsgShown = lm; vmTxt('vmMsg', lm); }
+  }
+
+  function vmDo(fn) {
+    try { fn(); } catch (e) { try { W.toast('调用失败：' + e); } catch (e2) {} return; }
+    setTimeout(function () { try { W.vmRefresh(); } catch (e) {} }, 700);
+    setTimeout(vmRender, 1600);
+  }
+  function vmBind(id, fn) {
+    var b = vmEl(id);
+    if (b) b.addEventListener('click', function () { vmDo(fn); });
+  }
+
+  if (typeof W.vmStatus === 'function') {
+    vmBind('btnVmInstall', function () { W.vmInstall(); });
+    vmBind('btnVmEnable', function () { W.vmEnable(vmSel || ''); });
+    vmBind('btnVmDisable', function () { W.vmDisable(); });
+    vmBind('btnVmRestart', function () { W.vmRestartIme(); });
+    vmBind('btnVmCal', function () { W.vmCalibrate(); });
+    vmBind('btnVmCalClear', function () { W.vmClearCalibration(); });
+    vmBind('btnVmDump', function () { W.vmDump(); });
+    vmBind('btnVmStealthOn', function () { W.vmStealth(true); });
+    vmBind('btnVmStealthOff', function () { W.vmStealth(false); });
+    vmBind('btnVmReg', function () { W.vmRegister(); });
+    vmBind('btnVmOpen', function () { W.vmOpenApp(); });
+    vmBind('btnVmRefresh', function () { W.vmRefresh(); });
+    vmBind('btnVmLspd', function () { W.vmInstallLsposed(); });
+    vmBind('btnVmUninstall', function () { W.vmUninstall(); });
+    vmBind('btnVmLog', function () {
+      try { vmTxt('vmLog', W.vmLog() || '（没有日志：模块还没注入过，或 logcat 被清了）'); }
+      catch (e) { vmTxt('vmLog', '读日志失败：' + e); }
+    });
+
+    // 按住说话：pointerdown → down（开始录音），pointerup → up（结束出字）。
+    // preventDefault 是为了别让按钮抢走输入框焦点 —— InputConnection 必须还在这个页面。
+    var talk = vmEl('btnVmTalk');
+    var testInput = vmEl('vmTestInput');
+    var talking = false;
+    function vmDown(e) {
+      if (e && e.preventDefault) e.preventDefault();
+      if (talking) return;
+      talking = true;
+      if (testInput) { try { testInput.focus(); } catch (x) {} }
+      try { W.vmTrigger('down'); } catch (x) {}
+      if (talk) talk.classList.add('on');
+      try { W.vibrate(30); } catch (x) {}
+    }
+    function vmUp(e) {
+      if (e && e.preventDefault) e.preventDefault();
+      if (!talking) return;
+      talking = false;
+      try { W.vmTrigger('up'); } catch (x) {}
+      if (talk) talk.classList.remove('on');
+    }
+    if (talk) {
+      talk.addEventListener('pointerdown', vmDown);
+      talk.addEventListener('pointerup', vmUp);
+      talk.addEventListener('pointercancel', vmUp);
+      talk.addEventListener('pointerleave', vmUp);
+      if (!window.PointerEvent) {
+        talk.addEventListener('touchstart', vmDown, { passive: false });
+        talk.addEventListener('touchend', vmUp, { passive: false });
+        talk.addEventListener('touchcancel', vmUp, { passive: false });
+      }
+    }
+
+    try { W.vmRefresh(); } catch (e) {}
+    vmRender();
+    setInterval(vmRender, 1500);
+  }
 
   var swAuto = document.getElementById('swAuto');
   try { swAuto.classList.toggle('on', W.getAutoKiosk()); } catch (e) {}

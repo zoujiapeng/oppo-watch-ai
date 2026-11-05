@@ -601,4 +601,104 @@ public class WatchBridge {
     public String captureBall() {
         return FloatingBallService.captureBallPng();
     }
+
+    // ---------- 语音按键 · VoiceMap（github.com/zoujiapeng/voicemap）----------
+    //
+    // 设置页那一组开关就是这个模块的控制面：装/卸载、LSPosed 启用与作用域、
+    // 重启输入法进程、校准空格键、键盘隐身、按住说话。
+    // 全部走 su → assets/vmctl.sh，细节见 VoiceMapControl。
+
+    private VoiceMapControl vm() {
+        return VoiceMapControl.get(act);
+    }
+
+    /** 缓存的自检结果（JSON：app / mod / lspd / mod_enabled / scope / ime / imepid / imes…）。 */
+    @JavascriptInterface
+    public String vmStatus() {
+        return vm().statusJson();
+    }
+
+    @JavascriptInterface
+    public void vmRefresh() {
+        vm().refresh();
+    }
+
+    @JavascriptInterface
+    public String vmLastMessage() {
+        return vm().lastMessage();
+    }
+
+    @JavascriptInterface
+    public void vmInstall() {
+        vm().install();
+    }
+
+    @JavascriptInterface
+    public void vmUninstall() {
+        vm().uninstall();
+    }
+
+    /** 启用 LSPosed 模块；ime 传空 = 用当前默认输入法。 */
+    @JavascriptInterface
+    public void vmEnable(final String ime) {
+        vm().enable(ime);
+    }
+
+    @JavascriptInterface
+    public void vmDisable() {
+        vm().disable();
+    }
+
+    @JavascriptInterface
+    public void vmRestartIme() {
+        vm().restartIme();
+    }
+
+    @JavascriptInterface
+    public void vmCalibrate() {
+        vm().cmd("calibrate");
+    }
+
+    @JavascriptInterface
+    public void vmClearCalibration() {
+        vm().cmd("clearcal");
+    }
+
+    @JavascriptInterface
+    public void vmDump() {
+        vm().cmd("dump");
+    }
+
+    @JavascriptInterface
+    public void vmStealth(final boolean on) {
+        vm().cmd(on ? "stealthon" : "stealthoff");
+    }
+
+    /** 把本 App 注册成「隐身 + 可触发」目标（模块的 arm_pkg）。 */
+    @JavascriptInterface
+    public void vmRegister() {
+        vm().registerSelf();
+    }
+
+    /** 按住说话：dir = "down" / "up"。 */
+    @JavascriptInterface
+    public void vmTrigger(final String dir) {
+        vm().trigger(dir);
+    }
+
+    @JavascriptInterface
+    public void vmOpenApp() {
+        vm().openApp();
+    }
+
+    /** 本机没有 LSPosed 时，一键把 zygisk 版下载并装进 magisk（重启生效）。 */
+    @JavascriptInterface
+    public void vmInstallLsposed() {
+        vm().installLsposed();
+    }
+
+    @JavascriptInterface
+    public String vmLog() {
+        return vm().log();
+    }
 }

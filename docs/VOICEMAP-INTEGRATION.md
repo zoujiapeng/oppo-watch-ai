@@ -1,0 +1,95 @@
+# VoiceMap 集成（设置页里的「语音按键」分组）
+
+把 [zoujiapeng/voicemap](https://github.com/zoujiapeng/voicemap) 整个接进本 App 的设置页：
+装/卸、LSPosed 启用与作用域、重启输入法进程、校准空格键、键盘隐身、按住说话，
+全部从 `settings.html` 点，不用再开电脑、不用记 broadcast 命令。
+
+## 一、为什么这么接
+
+voicemap 的能力全在两个进程里：
+
+| 角色 | 包名 | 干什么 |
+|---|---|---|
+| 触发 App | `com.pj.voicemap` | 一个按钮 + 一个输入框；按住按钮 = 按住输入法空格 |
+| LSPosed 模块 | `com.pj.voicemap.ime` | 注入输入法进程：窗口 alpha=0（键盘隐身）+ 往键盘 View 发 ACTION_DOWN/UP |
+
+模块的对外接口只有**明文广播** `com.pj.voicemap.TRIGGER`（`cmd=down/up/calibrate/dump/
+stealthon/stealthoff/register`），模块开关只在 LSPosed 自己的 sqlite 库
+（`/data/adb/lspd/config/modules_config.db`）里。两者都要 root。
+
+所以集成层是三层：
+
+```
+settings.html「语音按键 · VoiceMap」分组
+   ↓ window.Watch.vm*()                （JS 桥）
+WatchBridge.vm*()  →  VoiceMapControl （Java：单线程池排队跑 root）
+   ↓ su -c sh <files>/vmctl.sh <子命令>（assets 释放到私有目录，root 每次重写）
+vmctl.sh  →  am broadcast …           （命令进输入法进程里的模块）
+          →  vm_lspd.py（python3 写 LSPosed 库：启用 + 作用域）
+          →  pm install / kill <ime> / magisk --install-module
+```
+
+不用 Java 直连 LSPosed 库：App 进程没有 root，而且 LSPosed 的库结构会变；脚本能现场改。
+
+## 二、文件
+
+```
+settings.html                          +「语音按键 · VoiceMap」分组（状态 / 按钮 / 按住说话 / 日志）
+android/assets/vmctl.sh                root 侧控制面（status / enable / restart / cmd / trigger / install / log）
+android/assets/vm_lspd.py              写 LSPosed 库：query / enable <ime> / disable
+android/assets/voicemap.apk            触发 App（来自 voicemap 仓库 apk/，已签名）
+android/assets/voicemap-ime.apk        模块（同上）
+android/src/.../VoiceMapControl.java   缓存状态 + 所有 root 动作
+android/src/.../WatchBridge.java       vm* 桥接方法
+```
+
+`vmctl.sh` / `vm_lspd.py` / 两个 APK 都在 APK 的 `assets/` 里，App 运行期释放到
+`/data/user/0/com.glslplayground.app/files/` —— **离线可装、可修**。
+
+## 三、设置页里有什么
+
+**状态**（每秒读 `W.vmStatus()` 的缓存，不碰 UI 线程）
+触发 App / 隐身模块 / 模块已启用 / 作用域 / LSPosed 框架 / 默认输入法 / 输入法进程 PID。
+
+**动作**
+- 安装 / 更新 VoiceMap（两个 APK 从 assets 装，`pm install -r -g`）
+- 启用模块（写 LSPosed 库，作用域 = 下面选中的输入法；默认当前默认输入法）
+- 停用模块
+- 重启输入法进程（`kill <pid>`，下次弹键盘时进程重启才会注入模块）
+- 重新校准空格键 / 清校准 / 导出键盘视图树（`cmd=calibrate/clearcal/dump`）
+- 键盘隐身：开 / 临时显形（`cmd=stealthon/stealthoff`）
+- 本 App 设为隐身目标（`cmd=register --es pkg com.glslplayground.app`）
+- 按住说话：pointerdown → `cmd=down`，pointerup → `cmd=up`
+- 下载并安装 LSPosed（zygisk 版 zip → `magisk --install-module`，重启生效）
+- 卸载 VoiceMap / 打开 VoiceMap App / 重新自检 / 看日志（`logcat -s LSPosed-Bridge`）
+
+**输入法作用域**：从 `ime list -a -s` 读本机所有输入法，点一下选中，
+再点「启用模块」把作用域写成那一个包名（换输入法不用改代码）。
+
+## 四、用起来（顺序）
+
+1. Magisk 里给本 App 授权 root（弹窗点「允许」；否则整组都是灰色的「拿不到 root」）。
+2. 没有 LSPosed → 点「下载并安装 LSPosed」→ **重启**。
+3. 点「安装 / 更新 VoiceMap」。
+4. 选输入法 → 「启用模块」→ 「重启输入法进程」。
+5. 「本 App 设为隐身目标」→ 在下面那个输入框里点一下 → 「按住说话」。
+
+验收：`logcat -s LSPosed-Bridge` 里应出现
+
+```
+VoiceMap: loaded into com.sohu.inputmethod.sogou.xiaomi
+VoiceMap: stealth on (showWindow) alpha=0.0
+VoiceMap: DOWN at (540.0,553.5) handled=true
+```
+
+`dumpsys window | grep -A3 'InputMethod}'` 里窗口应是 `alpha=0.0`。
+
+## 五、坑
+
+- 模块只对「长按空格 = 语音」的中文输入法有效（搜狗/百度/讯飞/QQ）；Gboard 的语音在
+  工具栏麦克风键，自校准会失败 —— 那时改用「校准」→「导出视图树」手点坐标。
+- 作用域必须就是**当前默认输入法**的包名；换输入法要重新「启用模块」+「重启输入法进程」。
+- 触发时本 App 必须前台且输入框有焦点（InputConnection 才是它，字才有地方落）。
+- 按住说话的 down/up 是两次广播，中间别切 App。
+- Magisk 的授权是**按 uid** 的：重装本 App 不会换 uid，但如果被拒过一次，
+  授权框可能要点「允许」，或者 Magisk → 超级用户 → 本 App 打开开关。
