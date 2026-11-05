@@ -461,6 +461,71 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
+    // ── 设置页「按住说话」的无 root 兜底 ────────────────────────────────────
+    //
+    // VoiceMap 那条路的前提是 root + LSPosed（模块注入输入法进程、往键盘发触摸），
+    // 缺一样都出不了字。所以同一个按钮还有第二条路：直接走本 App 自己的语音链路
+    // （AndroidAsr 系统识别 → 不行再 VoiceCapture + DSH speech/transcribe），
+    // 结果用 evaluateJavascript 回调给页面。两条路都不需要输入法配合。
+
+    private BallVoice talk;
+    private volatile String talkState = "";
+
+    public void startVoiceTalk() {
+        if (talk == null) talk = new BallVoice(this);
+        if (talk.busy()) return;
+        talk.start(new BallVoice.Cb() {
+            @Override public void onListening() {
+                talkState = "listening";
+                emitVoice("listening", "");
+            }
+            @Override public void onLevel(float level) { }
+            @Override public void onTranscribing() {
+                talkState = "transcribing";
+                emitVoice("transcribing", "");
+            }
+            @Override public void onHeard(String text, boolean auto) {
+                talkState = "";
+                emitVoice("result", text);
+            }
+            @Override public void onError(String message) {
+                talkState = "";
+                emitVoice("error", message);
+            }
+        });
+    }
+
+    public void stopVoiceTalk() {
+        if (talk != null) talk.tapStop();
+    }
+
+    public String voiceTalkState() { return talkState; }
+
+    private void emitVoice(final String evt, final String text) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (webView == null) return;
+                String js = "window.vmOnVoice&&window.vmOnVoice("
+                        + jsLit(evt) + "," + jsLit(text) + ")";
+                try { webView.evaluateJavascript(js, null); } catch (Throwable ignored) { }
+            }
+        });
+    }
+
+    private static String jsLit(String s) {
+        if (s == null) s = "";
+        StringBuilder b = new StringBuilder("'");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' || c == '\'') b.append('\\').append(c);
+            else if (c == '\n') b.append("\\n");
+            else if (c == '\r') continue;
+            else if (c < 0x20) b.append(' ');
+            else b.append(c);
+        }
+        return b.append("'").toString();
+    }
+
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);

@@ -701,4 +701,27 @@ public class WatchBridge {
     public String vmLog() {
         return vm().log();
     }
+
+    // ---- 按住说话的无 root 兜底（不走输入法：本 App 自己识别）----
+
+    /** 开始听：系统语音识别优先，不行退回 录音 + DSH 转写。结果回 window.vmOnVoice(evt, text)。 */
+    @JavascriptInterface
+    public void vmTalkStart() {
+        ui(new Runnable() {
+            public void run() { act.startVoiceTalk(); }
+        });
+    }
+
+    /** 松手：停止并拿已经听到的字。 */
+    @JavascriptInterface
+    public void vmTalkStop() {
+        ui(new Runnable() {
+            public void run() { act.stopVoiceTalk(); }
+        });
+    }
+
+    @JavascriptInterface
+    public String vmTalkState() {
+        return act.voiceTalkState();
+    }
 }

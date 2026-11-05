@@ -108,9 +108,13 @@
       <button id="btnVmTalk" style="flex:1;min-height:56px">🎙 按住说话</button>
       <button id="btnVmCalClear">清校准</button>
     </div>
-    <input type="text" id="vmTestInput" placeholder="识别结果会落到这个框里（本 App 是隐身目标时）" style="margin-top:8px">
-    <div class="muted" style="margin-top:4px">按住「按住说话」= 往输入法的空格键注入一对真实触摸 → 输入法自己的长按语音，松手出字。
-      前提：上面「模块已启用」是 ✅，并且点过「本 App 设为隐身目标」。</div>
+    <input type="text" id="vmTestInput" placeholder="识别结果会落到这个框里" style="margin-top:8px">
+    <div class="muted" style="margin-top:4px">按住「按住说话」→ 松手出字。两条路自动选，<b>按住说话</b>下面那行会写明这次走哪条：<br>
+      · <b>输入法语音（VoiceMap）</b>：往输入法空格键注入一对真实触摸，输入法自己识别、键盘全程隐身
+      —— 要 root + LSPosed + 模块已启用 + 点过「本 App 设为隐身目标」；<br>
+      · <b>本 App 语音识别</b>：不碰输入法，直接用系统语音识别（不行退回录音 + DSH 转写）
+      —— 没 root 也能用，只是没有"键盘隐身"这回事。</div>
+    <div class="muted" style="margin-top:4px">引擎：<b id="vmEngine">—</b> · 状态：<b id="vmTestState">—</b></div>
 
     <div class="btns" style="margin-top:10px">
       <button id="btnVmOpen">打开 VoiceMap App</button>
@@ -878,6 +882,12 @@
     vmFlag('vmLspd', s.lspd, '✅ 已安装', '未安装');
     vmTxt('vmIme', s.ime && s.ime !== '-' ? s.ime : '—');
     vmTxt('vmPid', s.imepid ? ('pid ' + s.imepid) : '未运行（弹一次键盘就起）');
+    var eng = vmEl('vmEngine');
+    if (eng) {
+      var rdy = vmVoicemapReady();
+      eng.textContent = rdy ? '输入法语音（VoiceMap，键盘隐身）' : '本 App 语音识别（不需要 root）';
+      eng.style.color = rdy ? '#34c759' : '#5b9dff';
+    }
     vmRenderImes(s);
 
     var h = vmEl('vmHint');
@@ -945,17 +955,63 @@
       catch (e) { vmTxt('vmLog', '读日志失败：' + e); }
     });
 
-    // 按住说话：pointerdown → down（开始录音），pointerup → up（结束出字）。
-    // preventDefault 是为了别让按钮抢走输入框焦点 —— InputConnection 必须还在这个页面。
+    // 按住说话：pointerdown → 开始，pointerup → 停止出字。
+    //
+    // 两条路自动选：
+    //   ① VoiceMap 就绪（root + LSPosed + 模块已启用 + 两个 APK 都在）
+    //      → 往输入法键盘注入 DOWN/UP，输入法自己识别，键盘全程隐身（root+模块才有）；
+    //   ② 没就绪 → 本 App 自己的语音链路（系统识别 / 录音+DSH 转写），
+    //      结果由 window.vmOnVoice 回调回来。两条都不需要输入法配合。
+    // preventDefault 是为了别让按钮抢走输入框焦点（① 需要 InputConnection 留在本页）。
     var talk = vmEl('btnVmTalk');
     var testInput = vmEl('vmTestInput');
     var talking = false;
+    var talkPath = '';
+
+    function vmVoicemapReady() {
+      var s = VM || {};
+      return vmOn(s.root) && vmOn(s.lspd) && vmOn(s.mod_enabled)
+          && vmOn(s.app) && vmOn(s.mod);
+    }
+
+    window.vmOnVoice = function (evt, text) {
+      var st = vmEl('vmTestState');
+      if (evt === 'listening') { if (st) st.textContent = '🔴 录音中…'; return; }
+      if (evt === 'transcribing') { if (st) st.textContent = '⏳ 转写中…'; return; }
+      if (st) st.textContent = '—';
+      if (evt === 'error') {
+        vmTxt('vmMsg', text);
+        try { W.toast(text); } catch (e) {}
+        return;
+      }
+      if (evt === 'result') {
+        text = (text || '').trim();
+        if (!text) {
+          try { W.toast('没听清'); } catch (e) {}
+          return;
+        }
+        if (testInput) {
+          testInput.value = testInput.value ? (testInput.value + text) : text;
+          try { testInput.focus(); } catch (e) {}
+        }
+        vmTxt('vmMsg', '识别到：' + text);
+        return;
+      }
+    };
+
     function vmDown(e) {
       if (e && e.preventDefault) e.preventDefault();
       if (talking) return;
       talking = true;
-      if (testInput) { try { testInput.focus(); } catch (x) {} }
-      try { W.vmTrigger('down'); } catch (x) {}
+      talkPath = vmVoicemapReady() ? 'voicemap' : 'local';
+      var st = vmEl('vmTestState');
+      if (talkPath === 'voicemap') {
+        if (testInput) { try { testInput.focus(); } catch (x) {} }
+        try { W.vmTrigger('down'); } catch (x) {}
+        if (st) st.textContent = '🎙 按住中（走输入法语音）…';
+      } else {
+        try { W.vmTalkStart(); } catch (x) { vmTxt('vmMsg', '语音不可用：' + x); }
+      }
       if (talk) talk.classList.add('on');
       try { W.vibrate(30); } catch (x) {}
     }
@@ -963,7 +1019,13 @@
       if (e && e.preventDefault) e.preventDefault();
       if (!talking) return;
       talking = false;
-      try { W.vmTrigger('up'); } catch (x) {}
+      if (talkPath === 'voicemap') {
+        try { W.vmTrigger('up'); } catch (x) {}
+        var st = vmEl('vmTestState');
+        if (st) st.textContent = '—';
+      } else {
+        try { W.vmTalkStop(); } catch (x) {}
+      }
       if (talk) talk.classList.remove('on');
     }
     if (talk) {
