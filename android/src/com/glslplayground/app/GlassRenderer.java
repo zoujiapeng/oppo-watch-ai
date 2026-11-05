@@ -856,6 +856,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             cr = base * svHalfY * svCorner * svMaster;
         }
 
+        // 防"球被窗口裁成方形"：
+        // hx = base*halfX*master，而窗口大小是按 winSize 定的、不跟 master 变。
+        // master 拉到 1.7 之类的值时球比窗口还宽 —— 两侧被裁平（看着像方形），
+        // 折射/色差采样又跑到窗口外，玻璃整个花掉。这里把半宽/半高夹在窗口内，
+        // 宁可让「球体大小」滑块在高位饱和，也不要渲染出一个坏形状。
+        float maxHx = Math.max(1f, winW * 0.5f - 2f);
+        float maxHy = Math.max(1f, winH * 0.5f - 2f);
+        if (hx > maxHx || hy > maxHy) {
+            float f = Math.min(maxHx / Math.max(hx, 1e-3f), maxHy / Math.max(hy, 1e-3f));
+            hx *= f;
+            hy *= f;
+            cr *= f;
+        }
+
         if (captureSource == 1) {
             // root 直采：把原始帧上传进 full（行序已翻转），不经 MediaProjection
             uploadRootFrame();
