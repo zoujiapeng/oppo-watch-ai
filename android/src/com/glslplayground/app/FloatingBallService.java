@@ -5534,8 +5534,12 @@ public class FloatingBallService extends Service {
             // 审批球 / 菜单 / 玻璃全屏在屏上时 enterSearchMode 会直接返回；
             // 这时候千万不能再往输入法里注入空格长按 —— 那会点到别人的界面上。
             Log.w("FloatingBall", "电源键：胶囊没开（别的面板占着），本次不触发语音");
+            searchVoiceMode = false;
             return;
         }
+        // 尽早让键盘隐身：如果上一个 App 的键盘还开着（alpha=1），等到 900ms 后 `down` 才隐身
+        // 就会看见它"亮着→变透明"一下。这里胶囊一开就先把隐身挂上。
+        try { vm().cmd("stealthon"); } catch (Throwable ignored) { }
         powerHoldActive = true;
         powerHoldDown = false;
         holdMusicVolume = musicVolume();
@@ -8795,7 +8799,9 @@ public class FloatingBallService extends Service {
             searchBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
             bar.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 @Override public void onFocusChange(View v, boolean hasFocus) {
-                    if (hasFocus && searchActive && searchOpen) {
+                    // ⚠ 语音期间**不许**补弹键盘：胶囊一拿到窗口焦点这里就会 showSoftInput，
+                    //   而那时 Voicemap 的隐身还没生效 → 屏幕上就是"先弹一个真键盘、再被隐藏"。
+                    if (hasFocus && searchActive && searchOpen && !searchVoiceMode) {
                         main.postDelayed(new Runnable() {
                             @Override public void run() { showSearchIme(); }
                         }, 80);      // 窗口焦点会被系统抢走，拿到就补一次
@@ -8929,6 +8935,12 @@ public class FloatingBallService extends Service {
 
     private void showSearchIme() {
         if (searchBar == null) return;
+        // 语音期间键盘只能由 Voicemap 以隐身方式（alpha=0）拉起来；我们这边一律不主动弹。
+        // 这是最后一道闸：不管哪条路调进来（焦点监听 / 附件回来 / 兜底），都不会让键盘可见。
+        if (searchVoiceMode) {
+            Log.i("FloatingBall", "search: 语音期间不主动弹键盘（showSoftInput 被拦下）");
+            return;
+        }
         try {
             android.view.inputmethod.InputMethodManager imm =
                     (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);

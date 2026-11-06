@@ -2196,3 +2196,29 @@ search: 点输入框 → 结束语音识别（不发送，wasHolding=true）
 search: 单击 → 结束语音并进入编辑
 $ screencap → 搜狗键盘正常显示
 ```
+
+### （十四·补）真正让键盘"闪出来"的是焦点监听
+
+上一版只删了自己那句 `showSoftInput`，用户实测还是"弹出来又自动隐藏"。真正的原因还有两个：
+
+1. `ensureSearchWindows()` 里给胶囊窗口挂了
+   `bar.setOnFocusChangeListener(... hasFocus → 80ms 后 showSearchIme())` ——
+   **胶囊一拿到窗口焦点就补弹一次键盘**，那时 Voicemap 的隐身还没生效 → 真键盘先亮、再被隐身。
+   这条以前是为了"窗口焦点被系统抢走时补一次"，现在加 `!searchVoiceMode` 才跑。
+2. 如果上一个 App 的键盘本来就开着（alpha=1），要等 `down`（胶囊开 900ms 后）才隐身 ——
+   中间能看见它"亮着→变透明"。现在 `beginPowerHold()` 打开胶囊后立刻发一条
+   `vm().cmd("stealthon")`，把隐身提前到胶囊出现的那一刻。
+
+另外在 `showSearchIme()` 里加了最后一道闸：`searchVoiceMode` 期间任何路径调进来都直接 return
+（并打一行 `search: 语音期间不主动弹键盘（showSoftInput 被拦下）`），以后新增调用点也不会再漏。
+
+实测（按住电源键 6 秒，每 0.45s 采一次输入法窗口）：
+
+```
+ime_                       ← 键盘窗口还没建出来
+ime_alpha=0.0              ← 建出来就是全透明，之后一直 0.0（全程没有出现过 1.0）
+...
+$ 点输入框
+search: 点输入框 → 结束语音识别（不发送，wasHolding=true）
+ime_alpha=1.0              ← 键盘显形
+```
