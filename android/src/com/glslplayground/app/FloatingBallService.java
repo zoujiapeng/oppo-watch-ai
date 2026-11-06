@@ -3633,14 +3633,21 @@ public class FloatingBallService extends Service {
             bhx = Math.max(1f, glassHalfW());
             bhy = Math.max(1f, glassHalfH());
         }
-        // 中心按窗口 params 算（屏幕坐标 = params + 状态栏）。以前用 getLocationOnScreen，
-        // 窗口刚被挪过时是旧值 → 代理窗口/命中区整体偏一大截。
+        // 中心按窗口 params 算：overlay 窗口的 params 是"屏幕坐标减掉状态栏"，所以**屏幕**中心
+        // = params.y + winY0() + winH/2。
         float cx = params.x + winW * 0.5f;
         float cy = params.y + Math.round(winY0()) + winH * 0.5f;
         int w = Math.max(2, Math.min(screenW, Math.round(2 * (bhx + pad))));
         int h = Math.max(2, Math.min(screenH, Math.round(2 * (bhy + pad))));
         int x = Math.round(cx - w * 0.5f);
-        int y = Math.round(cy - h * 0.5f);
+        // ★ 2026-11-06（十二）：转回 params 时**必须再减掉状态栏**。
+        //   上面算出来的 cy 是屏幕坐标；而 ballTouchParams.y 是"屏幕坐标 − winY0()"这个空间的
+        //   （窗口管理器会自己再加回去，实测 mAttrs=(327,213) → input frame 顶边 303 = 213+90）。
+        //   以前这里少减了一次 → 代理窗口/可触摸区整体比球**低 90px**（实测：球画在 y 230..475，
+        //   命中区却在 303..612）。后果正是用户报的那两个现象：
+        //     · 球上半截点不动、拖不动；
+        //     · 球**下面**那一条透明区域反而吃掉点击（点在它上面什么都不发生）。
+        int y = Math.round(cy - h * 0.5f) - Math.round(winY0());
         if (ballTouchParams.x == x && ballTouchParams.y == y
                 && ballTouchParams.width == w && ballTouchParams.height == h) return;
         ballTouchParams.x = x;
@@ -4599,8 +4606,10 @@ public class FloatingBallService extends Service {
         //    所以"方形态 → 回初始状态"之后窗口永远是 993×993（实测玻璃只有 661×449）。
         if (!siriEnabled) {
             float b = winSize * 0.9f;
-            float hx = renderer.halfX > 0.02f ? renderer.halfX : 0.37f;
-            float hy = renderer.halfY > 0.02f ? renderer.halfY : 0.25f;
+            // 窗口要贴**画出来的**那颗球（2026-11-06 起普通球也乘了 idleScale，屏宽 1/3）
+            float idle = ballIdleScale();
+            float hx = (renderer.halfX > 0.02f ? renderer.halfX : 0.37f) * idle;
+            float hy = (renderer.halfY > 0.02f ? renderer.halfY : 0.25f) * idle;
             int tw = Math.min(screenW, Math.round(2 * b * hx + 2 * dp(24)));
             int th = Math.min(screenH, Math.round(2 * b * hy + 2 * dp(24)));
             if (Math.abs(tw - winW) > dp(8) || Math.abs(th - winH) > dp(8)) {
@@ -4815,8 +4824,17 @@ public class FloatingBallService extends Service {
         //   所以窗口尺寸取「原版球」和「当前形状」的较大者：球在时 = 原版球窗（和缩小前一模一样），
         //   方形态/卡片更大时才跟着长（和平时的行为一致）。
         float base0 = winSize * 0.9f;
-        float wx = Math.max(hxpx, base0 * minHalfX0);
-        float wy = Math.max(hypx, base0 * minHalfY0);
+        // ★ 2026-11-06（十一）：**光秃秃一颗球**的时候，窗口贴着球缩到最小，不再固定成原版球窗。
+        //   原版球窗（793×579）会在球四周铺开一大片透明玻璃：`makeTouchTransparent()` 把它的
+        //   可触摸区置空了，但个别 ROM / 个别时刻那片"透明玻璃"照样会吃掉点击 —— 用户报的
+        //   「球左上角方向那片屏幕点不动」就在这片里（实测窗口 [137,169]-[930,748]，球只有
+        //   360×243，球外面那一大圈全是不该存在的接触面）。
+        //   带文字/卡片/菜单/六区/胶囊/审批时仍然按原版球窗走（那些排版就是按那个窗算的），
+        //   一点不变。
+        boolean bareBall = !siriTextShown && !textHold && !convoOpen
+                && !menuShown && !zonesActive && !approvalShown && !searchActive && !glassFullscreen;
+        float wx = bareBall ? hxpx : Math.max(hxpx, base0 * minHalfX0);
+        float wy = bareBall ? hypx : Math.max(hypx, base0 * minHalfY0);
         int W = Math.min(screenW, Math.max(2, Math.round(2 * wx + 2 * m)));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * wy + 2 * m)));
         if (Math.abs(W - winW) > 60 || Math.abs(H - winH) > 60) {
@@ -9135,6 +9153,17 @@ public class FloatingBallService extends Service {
         // 铺满（面板窗口四周 14dp 留白、或 surface 刚 resize 的那几帧），它就会露出来。
         // 设成透明后，那层不再是不透明的黑。
         glView.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        // 诊断：玻璃窗的可触摸区应该是空的（`makeTouchTransparent`）。真吃到触摸就记一笔 ——
+        // 用户报「球旁边那片屏幕点不动」时，这一行能直接分辨"是玻璃吃的"还是"别人吃的"。
+        glView.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    Log.w("FloatingBall", "玻璃窗收到触摸 @" + Math.round(e.getRawX()) + ","
+                            + Math.round(e.getRawY()) + "（可触摸区本应为空 → 这一下被玻璃吃掉了）");
+                }
+                return false;
+            }
+        });
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winW, winH);
