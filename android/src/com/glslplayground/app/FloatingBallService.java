@@ -5268,7 +5268,7 @@ public class FloatingBallService extends Service {
         //   以前电源键只会开麦、音量减键只会收麦，输入框里的字根本没有出口 —— 按哪个键都不发。
         if ("text".equals(pkHold)) {
             main.post(new Runnable() {
-                @Override public void run() { sendComposerByKey(pkNewSession); }
+                @Override public void run() { sendComposerByKey(pkNewSession, !pkFromVolume); }
             });
             return START_NOT_STICKY;
         }
@@ -5543,13 +5543,38 @@ public class FloatingBallService extends Service {
     /** 电源键第一次长按：弹胶囊 + 让输入法开始语音识别。 */
     void beginPowerHold() {
         long now = android.os.SystemClock.uptimeMillis();
-        if (searchActive) {
-            if (powerHoldActive && now - powerHoldStartedAt < HOLD_DUP_GUARD_MS) {
+        if (searchActive && powerHoldActive) {
+            if (now - powerHoldStartedAt < HOLD_DUP_GUARD_MS) {
                 Log.i("FloatingBall", "电源键：重复的 start（" + (now - powerHoldStartedAt)
                         + "ms 内又来一次）→ 忽略，不结束语音");
                 return;
             }
-            endPowerHold(false, false);   // 已经开着 → 当第二次按下
+            endPowerHold(false, false);   // 正在语音 → 当第二次按下（收麦发送）
+            return;
+        }
+        if (searchActive) {
+            // ★ 2026-11-07：胶囊开着、但**没在语音**（只是打开了输入框 / 上一次刚被收尾）。
+            //   以前这里直接 endPowerHold() → wasDown=false → 「手太快」→ 把胶囊关掉，
+            //   用户看到的就是「按一下电源键，输入框没了，也没发出去」。
+            //   正确的语义：这一下 = 开始按住说话（胶囊本来就在，不用重开）。
+            Log.i("FloatingBall", "电源键：胶囊已开、没在语音 → 直接开始按住说话");
+            powerHoldStartedAt = now;
+            searchVoiceMode = true;
+            if (searchBar != null) { try { searchBar.focusInput(); } catch (Throwable ignored) { } }
+            try { vm().cmd("stealthon"); } catch (Throwable ignored) { }
+            powerHoldActive = true;
+            powerHoldDown = false;
+            holdMusicVolume = musicVolume();
+            vibrate(18);
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!powerHoldActive || !searchActive) return;
+                    powerHoldDown = true;
+                    vm().trigger("down");
+                    Log.i("FloatingBall", "电源键：输入法语音 down（胶囊已开）");
+                    startVoiceAliveWatch();
+                }
+            }, 500);
             return;
         }
         powerHoldStartedAt = now;
@@ -5835,16 +5860,32 @@ public class FloatingBallService extends Service {
     }
 
     /**
-     * 主线程每拍刷新一次「输入框里有没有字」。
+     * 输入框此刻是不是**开着**（胶囊 / 对话卡输入行）。
+     *
+     * 接收器用它决定电源键是「发送」还是「开麦」：开着就交给服务在 UI 线程
+     * 用最新状态判断（框里有没有字），避免广播线程读到 40ms 前的旧标志 ——
+     * 那个竞态会让"刚说完话、字刚上屏就按电源键"落到"手太快 → 关胶囊"，
+     * 字被丢掉（用户报的「语音输入你好后按电源键没有任何回应」）。
+     */
+    static boolean isComposerOpen() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.composerOpen;
+    }
+
+    /**
+     * 主线程每拍刷新一次「输入框开没开 / 有没有字」。
      * 广播是后台线程进来的，不能碰 View —— 这里在 UI 线程算好，接收器只读 volatile。
      */
     private volatile boolean composerHasText = false;
+    private volatile boolean composerOpen = false;
 
     private void refreshComposerHasText() {
-        boolean has = false;
+        boolean open = false, has = false;
         try {
-            has = !powerHoldActive && !pendingComposerText().isEmpty();
+            open = searchActive || (convoOpen && convoBar != null && convoBar.isShown());
+            has = open && !powerHoldActive && !pendingComposerText().isEmpty();
         } catch (Throwable ignored) { }
+        composerOpen = open;
         composerHasText = has;
     }
 
@@ -5853,9 +5894,22 @@ public class FloatingBallService extends Service {
      * 发完把胶囊收掉，回答照常流回球里。
      */
     private void sendComposerByKey(final boolean toNewSession) {
+        sendComposerByKey(toNewSession, false);
+    }
+
+    /**
+     * @param fallbackVoice 框里没字时要不要改走「开始按住说话」（电源键 = true，音量减键 = false）。
+     *                      这样"字刚上屏就按键"的竞态不会落进「手太快 → 关胶囊 → 字没了」。
+     */
+    private void sendComposerByKey(final boolean toNewSession, final boolean fallbackVoice) {
         final String text = pendingComposerText();
         if (text.isEmpty()) {
-            Log.i("FloatingBall", "输入框发送：框里没字 → 忽略");
+            if (fallbackVoice && !powerHoldActive) {
+                Log.i("FloatingBall", "输入框发送：框里没字 → 电源键改走按住说话");
+                beginPowerHold();
+            } else {
+                Log.i("FloatingBall", "输入框发送：框里没字 → 忽略");
+            }
             return;
         }
         // ① 对话卡下面那条输入框：直接发到这张卡对应的会话（就是「上一次回话」）

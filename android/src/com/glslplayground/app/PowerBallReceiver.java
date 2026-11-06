@@ -69,10 +69,12 @@ public class PowerBallReceiver extends BroadcastReceiver {
             tellService(app, "stop", false, "last", "power_key");
             return;
         }
-        // ② 输入框里已经打好字（状态 2 胶囊开着）→ 这一次是「发送」，不是开麦。
-        //    以前这里直接走 ③，又开了一次语音，框里的字被盖掉，用户看到的就是「按了没反应」。
-        if (FloatingBallService.running && FloatingBallService.hasComposerTextForKeys()) {
-            Log.i(TAG, "输入框有字 → 长按电源键 = 发送到上一次回话");
+        // ② 输入框开着（胶囊 / 对话卡输入行）→ 交给服务在 UI 线程判断「发字还是开麦」。
+        //    以前这里直接走 ③，又开了一次语音，框里的字被盖掉（"按了没反应"）。
+        //    注意：判断必须在服务的主线程做 —— 广播线程读到的标志可能落后 40ms，
+        //    正好卡在"字刚上屏"的那一下就会走错分支、把字关掉。
+        if (FloatingBallService.running && FloatingBallService.isComposerOpen()) {
+            Log.i(TAG, "输入框开着 → 长按电源键 = 发字（框里没字就开麦）");
             FloatingBallService.setUiHidden(false, "电源键发送");
             tellService(app, "text", false, "last", "power_key");
             return;
@@ -109,14 +111,14 @@ public class PowerBallReceiver extends BroadcastReceiver {
             return;
         }
         if (!FloatingBallService.powerHoldActive) {
-            // ★ 2026-11-07：没在语音、但输入框里有打好的字 → 发到**全新会话**。
-            //   以前这里直接 return（"没在按住说话 → 不做事"），所以打完字按音量减毫无反应。
-            if (FloatingBallService.hasComposerTextForKeys()) {
-                Log.i(TAG, "音量减：输入框有字 → 发送到全新会话");
+            // ★ 2026-11-07：没在语音、但输入框开着 → 发到**全新会话**（框里没字就什么都不做）。
+            //   判断交给服务主线程做，避免广播线程读到旧标志。
+            if (FloatingBallService.isComposerOpen()) {
+                Log.i(TAG, "音量减：输入框开着 → 发送到全新会话");
                 tellService(app, "text", false, "new", "vol_key");
                 return;
             }
-            Log.i(TAG, "音量减：没在按住说话、输入框也没字 → 不做事");
+            Log.i(TAG, "音量减：没在按住说话、输入框也没开 → 不做事");
             return;
         }
         Log.i(TAG, "音量减 → 结束按住说话 → 发到全新会话");
