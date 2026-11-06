@@ -7388,6 +7388,10 @@ public class FloatingBallService extends Service {
 
     private void exitZones() {
         zonesActive = false;
+        // ★ 2026-11-07：六区/卡片会把玻璃窗撑大（ensureZoneWindow/ensureHoldWindow），
+        //   退出时必须先收回去 —— 以前没撑过所以不需要，现在不还会留一个 573×573 的大窗，
+        //   球就画在大窗中间、四周全是可触摸区（"球变大/点得到处"）。
+        restoreHoldWindow();
         cardTapMode = false;
         holdWinH0 = 0;          // 下次进状态 3 重新记基准窗口（六区会把它撑大）
         holdWinW0 = 0;
