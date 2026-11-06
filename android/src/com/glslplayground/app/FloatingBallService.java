@@ -5570,9 +5570,69 @@ public class FloatingBallService extends Service {
                 powerHoldDown = true;
                 vm().trigger("down");
                 Log.i("FloatingBall", "电源键：输入法语音 down");
+                startVoiceAliveWatch();
             }
         }, 900);
     }
+
+    // ───────── 按住说话期间「输入法自己收尾了 → 自动续按」─────────
+    // 用户的语义：**只有我按音量减 / 再长按电源键 / 点输入框，语音才结束**。
+    // 但输入法引擎自己有"长时间没听到人声就收尾"的保护（实测按住不说话 12~17 秒，
+    // 搜狗会自己 stop 并把字上屏）。一收尾，我们这边还按着也没用 —— 后面说的话全丢。
+    // 所以按住期间盯一下系统里"还有没有正在录音的客户端"：连续两次（≈2.4s）都没有，
+    // 就再发一次 `down` 让输入法接着听，直到用户真的按结束为止。
+    private int voiceDeadTicks = 0;
+    private long voiceReholdAt = 0;
+    private long voiceHoldStartedAt = 0;
+    /** 自动续按的总时长上限：到点就不再续（和模块那边 180s 的看门狗对齐）。 */
+    private static final long VOICE_REHOLD_MAX_MS = 175000;
+
+    private void startVoiceAliveWatch() {
+        voiceDeadTicks = 0;
+        voiceHoldStartedAt = android.os.SystemClock.uptimeMillis();
+        voiceReholdAt = voiceHoldStartedAt + 3500;   // 开头 3.5s 不判（输入法还在起录音）
+        main.removeCallbacks(voiceAliveWatch);
+        main.postDelayed(voiceAliveWatch, 1200);
+    }
+
+    private void stopVoiceAliveWatch() {
+        main.removeCallbacks(voiceAliveWatch);
+        voiceDeadTicks = 0;
+    }
+
+    private final Runnable voiceAliveWatch = new Runnable() {
+        @Override public void run() {
+            if (!powerHoldActive || !powerHoldDown) return;
+            long now = android.os.SystemClock.uptimeMillis();
+            boolean recording = false;
+            try {
+                android.media.AudioManager am =
+                        (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+                if (am != null) {
+                    java.util.List<android.media.AudioRecordingConfiguration> l =
+                            am.getActiveRecordingConfigurations();
+                    recording = l != null && !l.isEmpty();
+                }
+            } catch (Throwable ignored) { }
+            if (recording) {
+                if (voiceDeadTicks > 0) Log.i("FloatingBall", "语音：录音又回来了");
+                voiceDeadTicks = 0;
+            } else if (now >= voiceReholdAt) {
+                if (++voiceDeadTicks >= 2) {
+                    voiceDeadTicks = 0;
+                    if (now - voiceHoldStartedAt > VOICE_REHOLD_MAX_MS) {
+                        Log.w("FloatingBall", "语音：已经续按到 " + (VOICE_REHOLD_MAX_MS / 1000)
+                                + "s 上限 → 不再续，等用户按结束");
+                        return;
+                    }
+                    voiceReholdAt = now + 4000;      // 续按之后给输入法 4s 重新起录音，别连环按
+                    Log.i("FloatingBall", "语音：输入法自己把录音停了（还按着）→ 自动续按，继续听");
+                    try { vm().trigger("down"); } catch (Throwable ignored) { }
+                }
+            }
+            main.postDelayed(this, 1200);
+        }
+    };
 
     /**
      * 收尾：让输入法把字吐出来，然后发出去。
@@ -5592,6 +5652,7 @@ public class FloatingBallService extends Service {
         if (wasHolding) {
             powerHoldActive = false;
             powerHoldDown = false;
+            stopVoiceAliveWatch();
             try { vm().trigger("up"); } catch (Throwable ignored) { }
         }
         try { vm().cmd("stealthoff"); } catch (Throwable ignored) { }
@@ -5633,6 +5694,7 @@ public class FloatingBallService extends Service {
         final boolean wasDown = powerHoldDown;
         powerHoldActive = false;
         powerHoldDown = false;
+        stopVoiceAliveWatch();
         restoreMusicVolumeIfFromVolumeKey(fromVolume);
         if (!wasDown) {
             Log.i("FloatingBall", "电源键：手太快，语音还没开 → 直接收起");
@@ -8673,6 +8735,7 @@ public class FloatingBallService extends Service {
         if (powerHoldActive) {
             powerHoldActive = false;
             powerHoldDown = false;
+            stopVoiceAliveWatch();
             try { vm().trigger("up"); } catch (Throwable ignored) { }
             Log.i("FloatingBall", "search: 收起胶囊 → 同时结束「按住说话」（清 hold 状态）");
         }

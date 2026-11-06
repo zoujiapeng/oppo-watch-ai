@@ -2287,3 +2287,38 @@ add device 8: /dev/input/event2   name: "uinput-goodix"     KEY_POWER
   `sh android/assets/pkctl.sh daemon-restart`；
 - 改了模块要 `bash android/voicemap-ime/build.sh` → 装 `out/voicemap-ime.apk` →
   **杀掉输入法进程**（LSPosed 只在进程启动时注入）。
+
+### （十五·补）语音长度必须由用户决定 —— 输入法自己收尾就自动续按
+
+用户：「识别的长度不是由用户什么时候按下音量减或者电源键或者点击输入框来结束吗？
+就像输入法长按空格键什么时候松手也是用户决定。」对，这才是目标语义。但实测有第二个"自己结束"的来源：
+
+```
+03:11:14.308 VoiceMap: DOWN at (540,1958) handled=true      ← 语音开始
+（中间没人说话）
+03:11:29.9  rec start session:481 … 03:11:36.2 rec stop     ← 输入法自己收了尾（≠ 我们发的 up）
+```
+
+搜狗在**长时间没听到人声**（实测 6~17 秒，随环境噪声变）时会自己 stop 并把字上屏。
+我们这边 `powerHoldActive` 还是 true，用户后面说的话就全丢了 —— 观感就是"说到一半没了"。
+
+处理：按住期间每 1.2s 看一次 `AudioManager.getActiveRecordingConfigurations()`：
+
+- 有录音 → 正常；
+- 连续两次（≈2.4s）一个录音都没有，且已经过了开头 3.5s 的启动期 → 补发一条 `vm().trigger("down")`
+  （模块侧 `pressDown` 遇到 `sPressed==true` 会先 `re-down` 复位再按，不会把新 DOWN 当成同一串手势）；
+- 续按后 4 秒内不再判定（给输入法重新起录音的时间），总时长封顶 **175s**（和模块看门狗 180s 对齐）。
+
+实测（按住 26 秒不说话，中途输入法自己收了两次尾）：
+
+```
+03:11:29.538 语音：输入法自己把录音停了（还按着）→ 自动续按，继续听
+03:11:29.540 VoiceMap: re-down: 上一次按住已结束但没有 UP，重新按
+03:11:29.542 VoiceMap: DOWN at (540.0,1958.175) handled=true
+…
+03:11:40.805 power-ball 触发（用户按结束）
+03:11:41.209 电源键：输入法还在出字（39 字）
+03:11:42.124 电源键：输入法结果 = 「…」（静默 916ms / 共 1268ms）
+```
+
+于是"什么时候结束"只剩用户那三种动作：音量减 / 再长按电源键 / 点输入框。

@@ -484,6 +484,13 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
         sDownX = x;
         sDownY = y;
         sDownTime = SystemClock.uptimeMillis();
+        if (sPressed) {
+            // 上一次「按住」其实已经结束了（输入法自己收尾 / 输入视图被替换），可 UP 没送到。
+            // 这时再来一个 DOWN 是"续按"（App 那边发现输入法停止录音后会补发 down），
+            // 直接复用旧状态会让这一串手势被当成"还按着"，所以先把按下状态清掉再按。
+            log("re-down: 上一次按住已结束但没有 UP，重新按");
+            sPressed = false;
+        }
         boolean handled = kv.dispatchTouchEvent(motion(sDownTime, sDownTime, MotionEvent.ACTION_DOWN, x, y, 1f));
         sPressed = true;
         log("DOWN at (" + x + "," + y + ") handled=" + handled + " kv=" + kv.getClass().getName()
