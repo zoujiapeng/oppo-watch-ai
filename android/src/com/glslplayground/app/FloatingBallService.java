@@ -1906,9 +1906,9 @@ public class FloatingBallService extends Service {
 
         // 球：接近方形（取文字块与交互层里更宽的那个），高度装下两块 + 留白
         float innerW = Math.max(apTextW, apActW);
-        float halfW = Math.max(base * minHalfX, innerW / 2f + apPadX / 2f + dp(4));
+        float halfW = Math.max(base * minHalfX0, innerW / 2f + apPadX / 2f + dp(4));   // 原版球宽：球缩小不影响审批面板
         float blockTotal = apTextH + apGap + apActH + (apInputH > 0 ? apGap + apInputH : 0);
-        float halfH = Math.max(base * minHalfY,
+        float halfH = Math.max(base * minHalfY0,
                 blockTotal / 2f + apPadY / 2f + dp(6));
         // 面板宽度夹到「聊天界面」那条宽度（siriMaxBallW）：用户要的是审批/提问面板
         // 跟聊天卡片一样宽，别比它还大、挡住操作。
@@ -2169,8 +2169,8 @@ public class FloatingBallService extends Service {
         if (wm == null || glView == null || !approvalShown) return;
         float m = dp(24);
         float base = winSize * 0.9f;
-        float hw = aprHalfX > 0f ? aprHalfX : minHalfX;
-        float hh = aprHalfY > 0f ? aprHalfY : minHalfY;
+        float hw = aprHalfX > 0f ? aprHalfX : minHalfX0;
+        float hh = aprHalfY > 0f ? aprHalfY : minHalfY0;
         int W = Math.min(screenW, Math.max(2, Math.round(2 * (base * hw + m))));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * (base * hh + m))));
         // ★ 2026-11-06：**必须**把「窗口尺寸」写给渲染器。
@@ -2524,6 +2524,21 @@ public class FloatingBallService extends Service {
     private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
+    /**
+     * **原版**球的半宽/半高（未缩放，占基准 base = winSize×0.9 的份额）。
+     *
+     * 用户 2026-11-06：「把所有胶囊形时的大小等比例缩小到宽度为当前屏幕宽度的三分之一」
+     * —— 说的是**刚启动时那颗胶囊状的球**（见 {@link #ballIdleScale()}）。
+     *
+     * 所以这里分成两套：
+     *   · {@link #minHalfX}/{@link #minHalfY} = **球自己**的大小（乘过缩放系数）；
+     *   · minHalfX0/minHalfY0 = **原版**大小，留给「球一放大就变成的那些面板」——
+     *     六区菜单的圆、列表面板、聊天卡片、审批面板。它们一律按原版算，
+     *     球缩了它们也一点没变（用户原话：菜单/聊天/搜索/审批都不能受影响）。
+     */
+    private float minHalfX0 = 0.37f, minHalfY0 = 0.25f;
+    /** 启动时那颗球的宽度 = 屏宽 × 这个比例（用户 2026-11-06 定 1/3）。 */
+    private static final float BALL_W_RATIO = 1f / 3f;
 
     public static void setSiriText(String text) {
         FloatingBallService s = INSTANCE;
@@ -2698,6 +2713,20 @@ public class FloatingBallService extends Service {
         if (siriEnabled) measureSiriTargets(siriStr);
     }
 
+    /**
+     * 球（胶囊形）的整体缩放系数：把球宽从「2 × 基准 × 原版半宽」缩到「屏宽 × {@link #BALL_W_RATIO}」。
+     * 高度、圆角、窗口、触摸区、拖拽夹取、家位置全部跟着它走 —— 等比缩小，形状比例不变。
+     *
+     * ⚠️ 只有**球本身**用它（minHalfX/minHalfY）；菜单/聊天卡/审批面板读的是原版
+     * minHalfX0/minHalfY0，所以球变小不影响它们。
+     */
+    private float ballIdleScale() {
+        if (screenW <= 0 || winSize <= 0) return 1f;      // 还没量到屏幕：按原版走
+        float curW = 2f * winSize * 0.9f * Math.max(0.02f, minHalfX0);
+        float s = (screenW * BALL_W_RATIO) / Math.max(1f, curW);
+        return Math.max(0.02f, Math.min(1f, s));
+    }
+
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
@@ -2709,10 +2738,20 @@ public class FloatingBallService extends Service {
             // 而 Siri 模式下球体几何走 svHalf*/tMaster —— minHalf 只作为「空球时的基准比例」，
             // 球实际多大由 master 决定。两个都乘会让滑块一动就双重缩放。
             if (renderer != null) {
-                if (renderer.halfX > 0.02f) minHalfX = renderer.halfX;
-                if (renderer.halfY > 0.02f) minHalfY = renderer.halfY;
+                if (renderer.halfX > 0.02f) minHalfX0 = renderer.halfX;
+                if (renderer.halfY > 0.02f) minHalfY0 = renderer.halfY;
                 minCorner = Math.max(0.5f, Math.min(1f, renderer.corner));
             }
+            // ★ 2026-11-06 用户：启动时那颗球（胶囊形）整体缩到「屏宽 1/3」，等比缩。
+            //   minHalfX/Y = 球自己的大小；minHalfX0/minHalfY0 保留原版给菜单/卡片用。
+            float bs = ballIdleScale();
+            minHalfX = minHalfX0 * bs;
+            minHalfY = minHalfY0 * bs;
+            Log.i("FloatingBall", "ball: 常态球 " + Math.round(2f * winSize * 0.9f * minHalfX)
+                    + "x" + Math.round(2f * winSize * 0.9f * minHalfY) + "（屏宽 1/"
+                    + Math.round(1f / Math.max(0.001f, BALL_W_RATIO)) + "，×" + round3(bs)
+                    + "；原版 " + Math.round(2f * winSize * 0.9f * minHalfX0) + "x"
+                    + Math.round(2f * winSize * 0.9f * minHalfY0) + "）");
             // 初始形态必须是"原来的水晶球"，避免用默认值(0.30/0.30 → 圆形)一闪
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner;
             aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner;
@@ -3593,7 +3632,9 @@ public class FloatingBallService extends Service {
         if (renderer == null) return winW * 0.5f;
         float ref = renderer.refSize > 0 ? renderer.refSize : winW;
         float base = ref * 0.9f;
-        float normal = base * renderer.halfX * renderer.master;
+        // ★ 2026-11-06：normal 这一路要乘球的缩放 —— 球缩到屏宽 1/3 后，
+        // 触摸代理跟着缩，球四周那圈透明窗口不吃触摸。
+        float normal = base * renderer.halfX * renderer.master * ballIdleScale();
         float siri = base * renderer.svHalfX * renderer.svMaster;
         float v = Math.max(normal, siri);
         return v > 2f ? v : winW * 0.5f;
@@ -3603,7 +3644,7 @@ public class FloatingBallService extends Service {
         if (renderer == null) return winH * 0.5f;
         float ref = renderer.refSize > 0 ? renderer.refSize : winW;
         float base = ref * 0.9f;
-        float normal = base * renderer.halfY * renderer.master;
+        float normal = base * renderer.halfY * renderer.master * ballIdleScale();
         float siri = base * renderer.svHalfY * renderer.svMaster;
         float v = Math.max(normal, siri);
         return v > 2f ? v : winH * 0.5f;
@@ -4176,7 +4217,9 @@ public class FloatingBallService extends Service {
      */
     private float ballTopOnScreen(float halfH) {
         float hy0 = homeCySafe();
-        float minHalfH = winSize * 0.9f * minHalfY;
+        // ★ 2026-11-06：竖直锚点继续用**原版球顶**。球虽然缩到屏宽 1/3，但窗口/方形态/
+        //   聊天卡的位置还是缩小前那一条 —— 用户要求「只改球的大小，别的都不许动」。
+        float minHalfH = winSize * 0.9f * minHalfY0;
         float top = hy0 - minHalfH;
         float bottom = top + halfH * 2f;
         float safeBottom = screenH * SIRI_SAFE_BOTTOM_RATIO;
@@ -4201,6 +4244,16 @@ public class FloatingBallService extends Service {
      * 现在只把"看起来合理"的测量写进缓存，之后一律用缓存值；窗口尺寸/位置怎么变都不影响。
      */
     private float winInsetY = -1f;
+    /**
+     * 最近一次**改窗口几何**（尺寸/位置）的时刻。
+     *
+     * ★ 2026-11-06：窗口尺寸变化（方形态 ↔ 圆球）那一两帧里，getLocationOnScreen() 还是**旧位置**，
+     *   算出来的 inset 是假的（实测读成 22 而不是 90 → 摆球时把球顶到屏幕最上面，还把这个假位置
+     *   记成"家"，球从此永久偏上）。所以：窗口刚动过的那 300ms 内，量到的值和缓存不一致就信缓存。
+     */
+    private long winGeomAt = 0;
+
+    private void markWinGeomChanged() { winGeomAt = android.os.SystemClock.uptimeMillis(); }
 
     private float winY0() {
         float anchor = statusBarH();
@@ -4208,6 +4261,12 @@ public class FloatingBallService extends Service {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             float d = loc[1] - params.y;
+            // 刚改过窗口：测量值不可信（拿的是旧位置），差一点就沿用缓存
+            if (winInsetY >= 0f
+                    && android.os.SystemClock.uptimeMillis() - winGeomAt < 300
+                    && Math.abs(d - winInsetY) > 1f) {
+                return winInsetY;
+            }
             // ★ 2026-11-06：只接受「看起来就是状态栏那一条」的测量。
             //   窗口刚被 updateViewLayout 挪过时，getLocationOnScreen() 还是**旧位置**，
             //   算出来会是几百像素的假 inset（实测被记成 207 → 之后每次摆球都按它压下去
@@ -4441,7 +4500,7 @@ public class FloatingBallService extends Service {
         float hxpx = maxBallW / 2f;
         // 对话卡：底部多留一条"输入区"，输入框就落在玻璃里（而不是浮在玻璃外面）
         float convoExtra = convoOpen ? (dp(40) + dp(8) + dp(6)) : 0f;
-        float hypx = Math.max(base * minHalfY, th / 2f + padY + convoExtra / 2f);
+        float hypx = Math.max(base * minHalfY0, th / 2f + padY + convoExtra / 2f);   // 原版球高：聊天卡的最小高度不变
         hypx = Math.min(hypx, maxBallH / 2f + convoExtra / 2f);       // 高 ≤ 屏高 50%（+输入区）
         // 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，方框不缩回去。
         if (textHold) {
@@ -4540,8 +4599,8 @@ public class FloatingBallService extends Service {
             return;
         }
         float base = winSize * 0.9f;
-        int restW = Math.round(2 * base * minHalfX + 2 * dp(24));
-        int restH = Math.round(2 * base * minHalfY + 2 * dp(24));
+        int restW = Math.round(2 * base * minHalfX0 + 2 * dp(24));   // 窗口 = 原版球窗（球本身缩小）
+        int restH = Math.round(2 * base * minHalfY0 + 2 * dp(24));
         boolean ballAtRest = aHalfX <= minHalfX * 1.06f && aHalfY <= minHalfY * 1.06f;
         // 让「方框缩回圆球」那段缓动先走完再动窗口：动画中途就抢着缩窗，
         // 用户看到的是"啪一下跳回去"（代码里其它地方专门为这个调过 siriEaseTau）。
@@ -4674,7 +4733,7 @@ public class FloatingBallService extends Service {
         // 位置 —— 于是把那个位置记成了"家"，球从此永久偏上去。
         // 实测症状：长回复结束后球停在 449..896，而它的家本该是 982..1555（差了 530px），
         // 用户看到的就是"会话结束弹出最后文字时上下跳，然后像跳出屏幕不见了"。
-        float minHalfH = winSize * 0.9f * minHalfY;
+        float minHalfH = winSize * 0.9f * minHalfY0;      // 窗口还是原版球窗（见 updateSiriWindow）
         int minWinH = Math.round(2 * minHalfH + 2 * dp(24));
         boolean minimal = !textHold
                 && tHalfX <= minHalfX * 1.02f && tHalfY <= minHalfY * 1.02f
@@ -4705,8 +4764,10 @@ public class FloatingBallService extends Service {
      */
     private void maybeUpdateSiriWindowSmooth(float hxpx, float hypx) {
         float m = dp(24);
-        int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
-        int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
+        // 同 updateSiriWindow：窗口不小于原版球窗（菜单按它排版）
+        float base0 = winSize * 0.9f;
+        int W = Math.min(screenW, Math.max(2, Math.round(2 * Math.max(hxpx, base0 * minHalfX0) + 2 * m)));
+        int H = Math.min(screenH, Math.max(2, Math.round(2 * Math.max(hypx, base0 * minHalfY0) + 2 * m)));
         if (Math.abs(W - winW) < 14 && Math.abs(H - winH) < 14) return;
         updateSiriWindow(hxpx, hypx);
     }
@@ -4719,8 +4780,15 @@ public class FloatingBallService extends Service {
         //   不挡的话 siriTick → measureSiriTargets → 这里每帧把窗口打回球尺寸 → 卡片又被裁成 4 行。
         if (menuShown || zonesActive || (glassFullscreen && searchActive)) return;
         float m = dp(24);
-        int W = Math.min(screenW, Math.max(2, Math.round(2 * hxpx + 2 * m)));
-        int H = Math.min(screenH, Math.max(2, Math.round(2 * hypx + 2 * m)));
+        // ★ 2026-11-06：球缩到屏宽 1/3，但**窗口还是原版大小** —— 六区菜单、列表面板、
+        //   聊天卡的排版全都按这个窗口算，窗口一缩它们就全变（用户要求：菜单/聊天不能受影响）。
+        //   所以窗口尺寸取「原版球」和「当前形状」的较大者：球在时 = 原版球窗（和缩小前一模一样），
+        //   方形态/卡片更大时才跟着长（和平时的行为一致）。
+        float base0 = winSize * 0.9f;
+        float wx = Math.max(hxpx, base0 * minHalfX0);
+        float wy = Math.max(hypx, base0 * minHalfY0);
+        int W = Math.min(screenW, Math.max(2, Math.round(2 * wx + 2 * m)));
+        int H = Math.min(screenH, Math.max(2, Math.round(2 * wy + 2 * m)));
         if (Math.abs(W - winW) > 60 || Math.abs(H - winH) > 60) {
             Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
         }
@@ -4729,6 +4797,7 @@ public class FloatingBallService extends Service {
         final float hx0 = homeCxSafe(), hy0 = homeCySafe();
         winW = W; winH = H;
         params.width = W; params.height = H;
+        markWinGeomChanged();                   // 刚改过窗口 → 这一刻的 getLocationOnScreen 不可信
         setGlassBufferScale((long) W * H);      // 大方框降分辨率渲染玻璃（否则每帧 45~55ms = 卡顿）
         // 水平：以"家"为中心（宽固定 85% 屏宽，左右对称）。
         params.x = Math.round(hx0 - W * 0.5f);
@@ -5687,7 +5756,11 @@ public class FloatingBallService extends Service {
         // 用户 2026-10-23：**左右居中**，上下跟"触发那一刻球在哪"（再夹进屏幕）。
         float cx = screenW * 0.5f;
         float cy = loc[1] + winH * 0.5f;
-        float halfH = winSize * 0.9f * minHalfY;
+        // ★ 2026-11-06：球缩到屏宽 1/3 了，但**六区菜单不能跟着缩**（用户要求）。
+        //   圆半径还按**原版球高**算，装不装得下也按**原版球窗**算 —— 于是 R、环半径、
+        //   圆心屏幕坐标和缩小前完全一样；球窗太小时由 ensureZoneWindow() 临时撑到原版大小，
+        //   退出状态 3 再缩回小球（见 exitZones）。
+        float halfH = winSize * 0.9f * minHalfY0;
         zoneR = Math.max(dp(46), halfH * 0.48f);
         // 六个圆围成一圈：半径 = 2.35 × 圆半径。
         //   相邻圆心弦长 = ring × 2sin30° = ring = 2.35R，两个圆之间的空隙 ≈ 0.35R；
@@ -6725,7 +6798,10 @@ public class FloatingBallService extends Service {
         params.x = newX; params.y = newY;
         params.width = newW; params.height = newH;
         winW = newW; winH = newH;
+        markWinGeomChanged();
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        // 绘制缓冲尺寸要跟窗口一起改，否则 shader 里 k = winW/winPixelW ≠ 1 —— 六圆按 k 缩放、和图标错位
+        if (renderer != null) { renderer.winPixelW = newW; renderer.winPixelH = newH; }
         resetGlassBufferFull();          // 六区要精确对齐 → 关掉降采样，并把 surface 钉成窗口尺寸
         // 立刻再钉一次：updateViewLayout 之后系统还会走一趟 layout，可能把 surface 改回旧尺寸
         main.postDelayed(new Runnable() {
@@ -6928,7 +7004,7 @@ public class FloatingBallService extends Service {
         //   窗口按这个假家定位，整颗球（连同里面的 Siri 波/圆点）落在低 117px 的地方，
         //   看起来就是「和刚启动时不一样、波和点没居中」。窗口没落定时交给
         //   auditWindowAgainstBall() 落定后再补记（见那边）。
-        float hyNow = siriEnabled ? minHalfY
+        float hyNow = siriEnabled ? minHalfY0        // 窗口还是原版球窗（球缩小不影响窗口）
                 : (renderer != null && renderer.halfY > 0.02f ? renderer.halfY : 0.25f);
         int expectH = Math.round(2 * winSize * 0.9f * hyNow + 2 * dp(24));
         if (winY0() > 0 && Math.abs(winH - expectH) <= dp(10)) {
