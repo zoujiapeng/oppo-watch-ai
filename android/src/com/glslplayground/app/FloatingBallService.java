@@ -6066,6 +6066,7 @@ public class FloatingBallService extends Service {
                 + " zoneMode=" + renderer.zoneMode + " win=" + winW + "x" + winH
                 + " z0=(" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0]) + ")");
         showZonesOverlay();
+        ensureZoneWindow();          // 球窗比环小（球缩到屏宽 1/3）→ 只撑到够装下六个圆
         applyBallTouchability();
         vibrate(22);
         Log.i("FloatingBall", "zones: 几何 i0=(" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0])
@@ -6098,7 +6099,14 @@ public class FloatingBallService extends Service {
         // ★ 2026-10-23 用户确认"小一号那版效果很好"：六圆按**当前球窗**装下（不放大窗口），
         //   这样 GL 的 surface 不会失配（k=1），玻璃圆和图标天然对齐。
         //   ring = 2.1R：相邻圆心距 2.1R，命中圈 1.15R → 留 0.2R 空隙，不会选错。
-        float maxR = (Math.min(winW, winH) * 0.5f - dp(8)) / 3.1f;
+        // ★ 2026-11-07：上限按**原版球窗**算（= 菜单一直以来的"小一号"），不按当前球窗。
+        //   球缩到屏宽 1/3 之后，空闲时窗口贴着小球缩（492×375），拿它当上限会把六圆
+        //   缩成一小坨、卡片再被窗口裁掉（用户：「菜单显示错位还被裁切，工作目录页面也变小了」）。
+        //   装不下由 ensureZoneWindow() 只撑到够装下这个环，退出状态 3 再缩回小球。
+        float ob = winSize * 0.9f;
+        float origW = 2f * ob * minHalfX0 + 2f * dp(24);
+        float origH = 2f * ob * minHalfY0 + 2f * dp(24);
+        float maxR = (Math.min(origW, origH) * 0.5f - dp(8)) / 3.1f;
         zoneR = Math.min(zoneR, Math.max(dp(30), maxR));
         zoneRing = zoneR * 2.1f;
         // 角度从正上方开始、每 60° 一个（屏幕 y 向下 → sin 取正即向下）
@@ -6133,6 +6141,8 @@ public class FloatingBallService extends Service {
     private int holdWinH0 = 0;
     /** 进状态 3 时的球窗宽度（六区环形排布要先把窗口撑大，退出时按这个还回去）。 */
     private int holdWinW0 = 0;
+    /** 进状态 3 时的球窗 x（卡片变宽会把窗口左右挪，关掉卡片要挪回去）。 */
+    private int holdWinX0 = Integer.MIN_VALUE;
 
     /** 按住的那一刻就把"工作目录 + 最近目录下的会话"取回来，卡片一出现就是热的。 */
     private void prefetchZonesData() {
@@ -6903,6 +6913,9 @@ public class FloatingBallService extends Service {
         holdDwellProgress = 0f;
         titleHoverAt = 0;
         computeCardRects();
+        // ★ 2026-11-07：这行以前丢了 —— 卡片比球窗大时窗口不会长，多出来的行直接被裁掉
+        //   （用户：「工作目录页面也变小了 / 还被裁切」）。
+        if (holdListRect != null) ensureHoldWindow(holdListRect[1], holdListRect[3]);
         if (zonesView != null) {
             zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
                     holdListLocal, -1);
@@ -6978,14 +6991,19 @@ public class FloatingBallService extends Service {
         int n = Math.max(1, holdItems.size());
         int[] loc = new int[2];
         glView.getLocationOnScreen(loc);
-        float bw = Math.min(dp(260), winW - dp(36));
+        // ★ 2026-11-07：宽度按**屏幕**算，不按球窗。球缩到屏宽 1/3 之后 winW 只有 492，
+        //   以前 Math.min(dp(260), winW - dp(36)) 会把卡片压到 393px（"工作目录页面变小了"），
+        //   行数也被 winH 卡成 2 行。窗口装不下由 ensureHoldWindow() 撑大。
+        float bw = Math.min(dp(260), screenW - dp(36));
         float th = dp(26);                 // 标题行
         float pad = dp(6);
         float rh = dp(34);                 // 行高固定 = 原来那个大小（用户：保持当前大小）
         // ★ 面板**尺寸不变**，改成"列表在面板里滚动"（用户 2026-10-23：
         //   「相当于弄成文字显示区不变但是可滚动不就行了吗」）。
         //   先算这个窗口最多能放几行，多出来的靠 holdFirst 滚上来。
-        float avail = Math.max(dp(80), winH - dp(20));
+        // 行数上限按"卡片最多能占屏幕多高"算（窗口随后由 ensureHoldWindow 撑到够）
+        float cardH = Math.min(screenH * 0.72f, screenH - winY0() - dp(24));
+        float avail = Math.max(dp(80), cardH - dp(20));
         holdVisible = Math.max(1, Math.min(n, (int) ((avail - th - pad) / rh)));
         int shown = Math.min(n, holdVisible);
         float total = th + shown * rh + pad;
@@ -7049,14 +7067,32 @@ public class FloatingBallService extends Service {
         int newBot = Math.max(curBot, Math.min(screenH - Math.round(dp(6)), wantBot));
         newBot = Math.min(newBot, newTop + Math.round(screenH * 0.72f));
         int newH = Math.max(winH, newBot - newTop);
-        if (newH <= winH && newTop == curTop) return;
+        // ★ 2026-11-07：宽度也要够 —— 卡片是 715px 宽（按屏幕算），球窗只有 492px 时右边整条被裁掉
+        int panelW = holdListRect == null ? 0 : Math.round(holdListRect[2]);
+        int panelL = holdListRect == null ? 0 : Math.round(holdListRect[0]);
+        int needW = Math.min(screenW, Math.max(winW, panelW + 2 * m));
+        int newX = params.x;
+        if (needW > winW || panelW > 0) {
+            newX = Math.round(panelL - m);
+            newX = Math.max(Math.round(dp(6)), Math.min(screenW - needW - Math.round(dp(6)), newX));
+        }
+        if (newH <= winH && newTop == curTop && needW <= winW && newX == params.x) return;
         if (holdWinH0 <= 0) holdWinH0 = winH;
+        if (holdWinW0 <= 0) holdWinW0 = winW;
+        if (holdWinX0 == Integer.MIN_VALUE) holdWinX0 = params.x;
+        params.x = newX;
+        params.width = needW;
         params.y = newTop - inset;
         params.height = newH;
+        winW = needW;
         winH = newH;
+        if (renderer != null) { renderer.winPixelW = needW; renderer.winPixelH = newH; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();
         // 文字/图标那层也跟着长，否则卡片文字会被覆盖层自己裁掉
         if (zonesView != null && zonesParams != null) {
+            zonesParams.x = newX;
+            zonesParams.width = needW;
             zonesParams.y = newTop - inset;
             zonesParams.height = newH;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
@@ -7171,13 +7207,16 @@ public class FloatingBallService extends Service {
             w0 = Math.max(w0, need);
             h0 = Math.max(h0, need);
         }
-        if (winH == h0 && winW == w0) return;
+        int x0 = holdWinX0 == Integer.MIN_VALUE ? params.x : holdWinX0;
+        if (winH == h0 && winW == w0 && params.x == x0) return;
         winH = h0;
         winW = w0;
+        params.x = x0;
         params.width = w0;
         params.height = h0;
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         if (zonesView != null && zonesParams != null) {
+            zonesParams.x = x0;
             zonesParams.width = w0;
             zonesParams.height = h0;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
@@ -7352,6 +7391,7 @@ public class FloatingBallService extends Service {
         cardTapMode = false;
         holdWinH0 = 0;          // 下次进状态 3 重新记基准窗口（六区会把它撑大）
         holdWinW0 = 0;
+        holdWinX0 = Integer.MIN_VALUE;
         zoneActive = -1;
         if (zonesView != null) {
             zonesView.hideCards();
