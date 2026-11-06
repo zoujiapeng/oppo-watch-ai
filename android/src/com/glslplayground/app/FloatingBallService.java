@@ -7214,7 +7214,11 @@ public class FloatingBallService extends Service {
         params.x = x0;
         params.width = w0;
         params.height = h0;
+        // ★ 2026-11-07：窗口缩回来时，GL 的绘制缓冲必须跟着缩 —— 否则 surface 还停在卡片的宽度，
+        //   GLSurfaceView 会把那张宽图压进窄窗口 → 球被"压扁"（用户：「胶囊都被你压扁了」）。
+        if (renderer != null) { renderer.winPixelW = w0; renderer.winPixelH = h0; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();
         if (zonesView != null && zonesParams != null) {
             zonesParams.x = x0;
             zonesParams.width = w0;
@@ -7416,6 +7420,9 @@ public class FloatingBallService extends Service {
             measureSiriTargets(siriStr);
             clampBallOnScreen();
         }
+        // 六区/卡片把窗口撑大过：退出时把绘制缓冲钉回当前窗口尺寸（不然球会被横向压扁）
+        if (renderer != null) { renderer.winPixelW = winW; renderer.winPixelH = winH; }
+        resetGlassBufferFull();
         applyBallTouchability();
         centerBallOnScreen();
     }

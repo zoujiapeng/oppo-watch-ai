@@ -2358,3 +2358,14 @@ add device 8: /dev/input/event2   name: "uinput-goodix"     KEY_POWER
 
 > 踩过的坑：第一版把半径直接按屏幕算，六圆变得比原来大一圈（用户：「菜单怎么变这么大了？原本可是小小的」）。
 > 正确做法是"半径按原版球窗（小一号）"，只把**窗口**撑到够，而不是把圆放大。
+
+### （十六·补）「胶囊被压扁」—— 窗口缩回来时 GL 缓冲没跟着缩
+
+`ensureHoldWindow` 会把窗口撑宽到卡片宽度（715px），关卡片/退出状态 3 时窗口缩回 492×375，
+但 **`renderer.winPixelW/H` 和 SurfaceView 的 buffer 还停在 715**。GLSurfaceView 会把那张
+宽图硬压进窄窗口 → 球被横向压扁（用户：「胶囊都被你压扁了」）。
+
+修法：`restoreHoldWindow()` 和 `exitZones()` 在改完 params 之后统一
+`renderer.winPixelW/H = winW/winH` + `resetGlassBufferFull()`（= `setFixedSize(winW, winH)`）。
+
+验证：`files/ballshot` 抓一帧，`ball-capture.png` 是 492×375，球是 360×243 的胶囊（宽高比正确）。
