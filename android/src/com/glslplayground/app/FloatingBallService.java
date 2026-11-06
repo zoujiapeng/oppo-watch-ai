@@ -5620,13 +5620,26 @@ public class FloatingBallService extends Service {
             } else if (now >= voiceReholdAt) {
                 if (++voiceDeadTicks >= 2) {
                     voiceDeadTicks = 0;
+                    // ★ 2026-11-07：**框里已经有字就别再按下去**。
+                    //   搜狗自己收尾时是"stop + 把识别结果上屏"；这时候再补一条 down 会开一次
+                    //   **新的**语音会话，输入法通常会把刚上屏的那句清掉重来 —— 用户看到的是
+                    //   「字识别出来了，但按结束时框是空的 → 没听清 → 发送不成功」。
+                    //   所以只有在**一个字都还没上屏**的时候才续按。
+                    String box = "";
+                    try { box = searchBar == null ? "" : searchBar.text(); } catch (Throwable ignored) { }
+                    if (box != null && !box.trim().isEmpty()) {
+                        Log.i("FloatingBall", "语音：输入法收尾了但已经上屏 " + box.trim().length()
+                                + " 字 → 不续按（保住已识别的文字）");
+                        main.postDelayed(this, 1200);
+                        return;
+                    }
                     if (now - voiceHoldStartedAt > VOICE_REHOLD_MAX_MS) {
                         Log.w("FloatingBall", "语音：已经续按到 " + (VOICE_REHOLD_MAX_MS / 1000)
                                 + "s 上限 → 不再续，等用户按结束");
                         return;
                     }
                     voiceReholdAt = now + 4000;      // 续按之后给输入法 4s 重新起录音，别连环按
-                    Log.i("FloatingBall", "语音：输入法自己把录音停了（还按着）→ 自动续按，继续听");
+                    Log.i("FloatingBall", "语音：输入法自己把录音停了（还没出字）→ 自动续按，继续听");
                     try { vm().trigger("down"); } catch (Throwable ignored) { }
                 }
             }
@@ -5721,6 +5734,8 @@ public class FloatingBallService extends Service {
     private static final long IME_FIRST_WAIT_MS = 350;  // up 之后先给输入法一点时间出终稿
     private static final long IME_MAX_WAIT_MS = 12000;  // 兜底：最多等这么久
     private String imeLastText = "";
+    /** 这一轮里**见过的最长/最后一个非空**结果（框被输入法清空时的兜底）。 */
+    private String imeBestText = "";
     private long imeLastChangeAt = 0;
     private long imeWaitStartedAt = 0;
     private long imeWaitGen = 0;
@@ -5729,6 +5744,7 @@ public class FloatingBallService extends Service {
         if (attempt == 0) {
             imeWaitStartedAt = android.os.SystemClock.uptimeMillis();
             imeLastText = "";
+            imeBestText = "";
             imeLastChangeAt = imeWaitStartedAt;
             imeWaitGen++;
             Log.i("FloatingBall", "电源键：等输入法出终稿（字停稳 " + IME_SETTLE_MS + "ms 才取）");
@@ -5740,6 +5756,7 @@ public class FloatingBallService extends Service {
                 long now = android.os.SystemClock.uptimeMillis();
                 String t = searchBar == null ? "" : searchBar.text();
                 t = t == null ? "" : t.trim();
+                if (!t.isEmpty()) imeBestText = t;              // ★ 记住见过的非空结果
                 if (!t.equals(imeLastText)) {                   // 还在出字 → 静默计时重来
                     if (!t.isEmpty()) {
                         Log.i("FloatingBall", "电源键：输入法还在出字（" + t.length() + " 字）");
@@ -5755,9 +5772,17 @@ public class FloatingBallService extends Service {
                     return;
                 }
                 if (t.isEmpty()) {
-                    Log.w("FloatingBall", "电源键：等不到输入法出字（" + total + "ms）");
-                    toast("没听清");
-                    return;
+                    // ★ 2026-11-07：框被输入法自己清空了，但这一轮**明明已经出过字** ——
+                    //   用那句发出去，别把用户刚说的话丢掉（用户报的「识别到了但发送不成功」）。
+                    if (!imeBestText.isEmpty()) {
+                        Log.w("FloatingBall", "电源键：末次读到空框，回退到本轮已识别的「"
+                                + imeBestText + "」");
+                        t = imeBestText;
+                    } else {
+                        Log.w("FloatingBall", "电源键：等不到输入法出字（" + total + "ms）");
+                        toast("没听清");
+                        return;
+                    }
                 }
                 Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」（静默 " + quiet
                         + "ms / 共 " + total + "ms）");
@@ -6078,14 +6103,21 @@ public class FloatingBallService extends Service {
     }
 
     private void computeZones() {
-        int[] loc = new int[2];
-        glView.getLocationOnScreen(loc);
+        // ⚠ 2026-11-07：窗口原点**只能取 params**。
+        //   ensureZoneBaseWindow() 刚刚 updateViewLayout 过（把球窗定成 793×579），
+        //   这一刻 glView.getLocationOnScreen() 还是**旧窗口的位置**（实测 y=281，新的是 179），
+        //   配上新的 winH 一算，菜单中心就低了 ~100px：六圆环整体下移、最下面那个圆被窗口裁掉、
+        //   卡片标题/列表跟着往下跑（用户报的「菜单/工作目录/会话页面都不正常」）。
+        //   params 是我们自己刚写的，和 updateViewLayout 同帧，才是准的。
+        int inset = Math.round(winY0());
+        int winLeft = params != null ? params.x : 0;
+        int winTop = params != null ? (params.y + inset) : 0;
         // 2026-10-23：菜单**整体居中于屏幕**（不再跟球心跑）。
         // 球可能贴着屏幕边/底，跟着它算菜单就会有一角出屏 —— 用户报的就是这个。
-        int topInset = Math.round(winY0());
+        int topInset = inset;
         // 用户 2026-10-23：**左右居中**，上下跟"触发那一刻球在哪"（再夹进屏幕）。
         float cx = screenW * 0.5f;
-        float cy = loc[1] + winH * 0.5f;
+        float cy = winTop + winH * 0.5f;
         // ★ 2026-11-06：球缩到屏宽 1/3 了，但**六区菜单不能跟着缩**（用户要求）。
         //   圆半径还按**原版球高**算，装不装得下也按**原版球窗**算 —— 于是 R、环半径、
         //   圆心屏幕坐标和缩小前完全一样；球窗太小时由 ensureZoneWindow() 临时撑到原版大小，
@@ -6121,8 +6153,8 @@ public class FloatingBallService extends Service {
         zoneLocalX = new float[ZONE_COUNT];
         zoneLocalY = new float[ZONE_COUNT];
         for (int i = 0; i < ZONE_COUNT; i++) {
-            zoneLocalX[i] = zoneCx[i] - loc[0];
-            zoneLocalY[i] = zoneCy[i] - loc[1];
+            zoneLocalX[i] = zoneCx[i] - winLeft;
+            zoneLocalY[i] = zoneCy[i] - winTop;
         }
         // 窗口保持球的尺寸（放大窗口会让 GL surface 失配 → 玻璃和图标错位）
     }

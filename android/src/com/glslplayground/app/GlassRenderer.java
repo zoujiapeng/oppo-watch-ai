@@ -763,7 +763,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             float hx = Math.max(1f, s[i * 4 + 2] * k);
             float hy = Math.max(1f, s[i * 4 + 3] * k);
             float cx = (s[i * 4] - winX) * k;
-            float cy = (s[i * 4 + 1] - winY) * k;
+            // ⚠ 2026-11-07：FS_COMP 里的 uCenter 是 **gl_FragCoord 空间（y 向上）**，
+            //   shader 里 `c = fc - uCenter; c.y = -c.y;`。而这里的 s.y 是**屏幕像素、y 向下**。
+            //   以前直接把 y 向下的值当 y 向上传 → 所有形状都绕画布中线上下镜像：
+            //   球的圆心本来就在中线（winH*0.5）上，所以一直看不出来；
+            //   六区和卡片一旦离开中线，玻璃就整体跑到另一半 —— 正是用户报的
+            //   「图标离圆」「文字跑到玻璃外面」「标题行点不到」。
+            //   这里翻一次 y：uCenter.y = 画布高 − 窗口内 y 向下值。
+            float cy = (winH - (s[i * 4 + 1] - winY)) * k;
             float cr = Math.max(0f, Math.min(1f, m[i * 4 + 2])) * Math.min(hx, hy);
             float shortHalf = Math.min(hx, hy);
             boolean panel = m[i * 4 + 1] >= 0.5f;                  // dark>=0.5 视作"面板"
