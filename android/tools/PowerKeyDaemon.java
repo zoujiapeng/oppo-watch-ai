@@ -63,6 +63,21 @@ public class PowerKeyDaemon {
     static final Object lock = new Object();
     static volatile long downAt = -1;
     static volatile boolean fired = false;
+    /**
+     * 这一次物理按键是不是还按着（**跨设备**共用）。
+     *
+     * 本机有两路节点都报 KEY_POWER：`qpnp_pon`（event1）和 `uinput-goodix`（event2）。
+     * 同一次长按会被两路各报一次 down —— 以前每来一个 down 就把 downAt/fired 重置，
+     * 定时器于是**再**发一条 POWER_BALL。App 那边把第二条当成「用户又按了一下」→ 立刻收麦，
+     * 表现就是用户报的「语音刚开始说就自己结束 / 一句话都识别不出来」，
+     * 以及收麦后 4 秒键盘恢复显形 ——「说着说着键盘自己弹出来」。
+     * 现在：只要还有一路按着，后面来的 down 一律忽略；任意一路报 up 才算松手。
+     */
+    static volatile boolean pressActive = false;
+    /** 同一路节点上，按下超过这么久还没等到 up，就认为 up 丢了，允许下一次按下。 */
+    static final long STALE_PRESS_MS = 8000;
+    /** 上一次 fire 的时刻：两路节点几乎同时到点时，只发一条广播。 */
+    static volatile long lastPowerFireMs = 0L;
     /** 音量减：按下即触发，700ms 内只算一次（多个节点 / 注入节点同时上报时去重）。 */
     static volatile long lastVolFireMs = 0L;
     /** 音量加：同样按下即触发，700ms 去重。 */
@@ -93,6 +108,12 @@ public class PowerKeyDaemon {
                 while (true) {
                     try { Thread.sleep(20); } catch (InterruptedException ignored) { }
                     long t = downAt;
+                    // up 丢了（节点拔掉 / 注入设备消失）：别让按键永久"按着"，8 秒后放开
+                    if (t > 0 && pressActive && SystemClock.uptimeMillis() - t >= STALE_PRESS_MS) {
+                        Log.w(TAG, "KEY_POWER 按住超过 " + STALE_PRESS_MS + "ms 没等到 up → 强制复位");
+                        synchronized (lock) { downAt = -1; pressActive = false; fired = false; }
+                        continue;
+                    }
                     if (t > 0 && !fired && SystemClock.uptimeMillis() - t >= holdMs) {
                         fired = true;
                         fire();
@@ -144,16 +165,27 @@ public class PowerKeyDaemon {
                     if (code != KEY_POWER) continue;
                     long now = SystemClock.uptimeMillis();
                     if (value == 1) {                       // 按下
+                        boolean dup;
                         synchronized (lock) {
-                            downAt = now;
-                            fired = false;
+                            // 已经有一路按着了 → 这是同一颗按键的另一路节点，别再重置定时器
+                            dup = pressActive && now - downAt < STALE_PRESS_MS;
+                            if (!dup) {
+                                pressActive = true;
+                                downAt = now;
+                                fired = false;
+                            }
                         }
-                        Log.i(TAG, "KEY_POWER down @" + dev);
+                        if (dup) {
+                            Log.i(TAG, "KEY_POWER down 重复（同一颗按键的另一路节点）→ 忽略 @" + dev);
+                        } else {
+                            Log.i(TAG, "KEY_POWER down @" + dev);
+                        }
                     } else if (value == 0) {                // 松开
                         long held = 0;
                         synchronized (lock) {
                             if (downAt > 0) held = now - downAt;
                             downAt = -1;
+                            pressActive = false;
                         }
                         Log.i(TAG, "KEY_POWER up held=" + held + "ms fired=" + fired);
                     }
@@ -169,6 +201,14 @@ public class PowerKeyDaemon {
 
     /** 触发：只发一条广播，由 App（PowerBallReceiver）决定「起球 / 收球 / 回桌面」。 */
     static void fire() {
+        long now = SystemClock.uptimeMillis();
+        synchronized (lock) {
+            if (now - lastPowerFireMs < 1200L) {      // 两路节点几乎同时到点：只发一条
+                Log.i(TAG, "长按到点但 1.2s 内已经发过 → 去重");
+                return;
+            }
+            lastPowerFireMs = now;
+        }
         Log.i(TAG, "长按到点 → 发 POWER_BALL" + (dry ? "（dry）" : ""));
         if (dry) return;
         try {

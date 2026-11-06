@@ -434,20 +434,22 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
             return;
         }
         pressDown(ctx, in);
-        // 看门狗：万一 UP 没送到（触摸被系统手势抢走、进程假死…），
-        // 20 秒后强制松手并显出键盘，免得"一直按着 / 键盘一直隐身"。
+        // 看门狗：万一 UP 没送到（触摸被系统手势抢走、进程假死…）才强制松手。
+        // ⚠️ 时间必须给足：用户要「说很长的话」，20 秒一到就把按住状态强行松掉，
+        //    输入法那边等于"说到一半突然结束"，后半句全丢。3 分钟足够长，真丢了 UP
+        //    也还有这条兜底（避免键盘永久隐身/按键永久按着）。
         final int seq = ++sDownSeq;
         main().postDelayed(new Runnable() {
             @Override public void run() {
                 if (seq != sDownSeq || !sPressed) {
                     return;
                 }
-                log("watchdog: 按住超过 20s，强制松手");
+                log("watchdog: 按住超过 180s，强制松手");
                 pressUp(sService);
                 sStealthEnabled = false;
                 applyWindow(sService, "watchdog");
             }
-        }, 20000);
+        }, 180000);
     }
 
     static void stop(Context ctx, String strategy) {

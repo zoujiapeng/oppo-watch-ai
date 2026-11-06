@@ -2222,3 +2222,68 @@ $ 点输入框
 search: 点输入框 → 结束语音识别（不发送，wasHolding=true）
 ime_alpha=1.0              ← 键盘显形
 ```
+
+## 2026-11-07（十五）：语音「说着就自己结束 / 只识别到前面 / 说着键盘自己弹出来」
+
+用户三连问：「语音识别的开始后没多久它就自动结束了，我说很长的话只识别到前面的」「为什么说着它就自动弹出键盘？」
+「为什么一句话都识别不出来？」。**同一个根因**：电源键长按被送进来两次，第二次被当成"又按了一下"。
+
+### 根因 1：两路输入节点都在报 KEY_POWER
+
+```
+$ su -c 'getevent -pl' | grep -B12 KEY_POWER
+add device 4: /dev/input/event1   name: "qpnp_pon"          KEY_POWER
+add device 8: /dev/input/event2   name: "uinput-goodix"     KEY_POWER
+```
+
+`PowerKeyDaemon` 对所有带 KEY_POWER 的节点开一个线程。一次物理长按被两路各报一次
+`KEY_POWER down` —— 旧代码每收到一个 down 就 `downAt=now; fired=false`，定时器于是
+**再发一条 POWER_BALL**。App 侧 `PowerBallReceiver` 只看 `powerHoldActive`：
+
+```
+03:01:06.19  power-ball 触发 holdActive=false → 开始按住说话
+03:01:07.87  输入法语音 down
+03:01:08.10  VoiceMap: DOWN at (540,1958) handled=true     ← 语音真的开始了
+03:01:09.31  power-ball 触发 holdActive=true → 「第二次长按」→ 收麦   ← 1.2s 就结束
+```
+
+1.2 秒后 `up`，一句话都还没说完 → "一句话都识别不出来"。
+`hideAfterHold()` 又会在 4 秒后把输入法窗口恢复成 alpha=1 → **键盘在说话途中自己弹出来**。
+
+### 根因 2：`up` 之后"看到字就发"发的是中间结果
+
+搜狗是流式出字：按住期间它一直往输入框里写中间结果（实测 31 字时还在变）。
+旧 `waitImeTextAndSend` 每 200ms 轮询，**一看到非空就发** —— 发走的是前半句，
+终稿到达时胶囊已经关了。这就是"只识别到前面的"。
+
+### 改法（全部在"调度输入法"这一层，没有换引擎、没有手搓识别）
+
+| 文件 | 改动 |
+|---|---|
+| `tools/PowerKeyDaemon.java` | `pressActive` 跨设备共享：还有一路按着时，后面来的 down 一律忽略；任意一路 up 才复位；`fire()` 1.2s 去重；8s 没等到 up 自动复位（防节点拔掉后卡死） |
+| `FloatingBallService.beginPowerHold()` | 2.5s 内的重复 `start` 直接忽略（冷启动「直连 FGS 被拦 → root 跳板又起一次」也会造成双 start），不再当成"第二次按下" |
+| `FloatingBallService.waitImeTextAndSend()` | 改成**等字停稳**：连续 `IME_SETTLE_MS=900ms` 没有新字才取；最长等 12s；`up` 后先等 350ms 给终稿；日志会打"输入法还在出字（N 字）" |
+| `FloatingBallService.closeSearchMode()` | 顺手清 `powerHoldActive/powerHoldDown` 并补一条 `up`（以前胶囊被点空白关掉后 hold 状态一直挂着，下一次长按变成"结束一个不存在的语音"） |
+| `voicemap-ime` `VoiceMapHook.start()` | 看门狗 20s → **180s**（长语音不再被强行松手） |
+
+### 实测（新 APK + 新 daemon + 新模块）
+
+```
+03:04:54.406 电源键：弹胶囊 + 交给输入法语音
+03:04:55.583 电源键：输入法语音 down
+03:04:56.057 VoiceMap: DOWN at (540.0,1958.175) handled=true
+   …（13.5 秒里没有任何第二条 power-ball）
+03:05:09.567 power-ball 触发 holdActive=true → 第二次长按（这次是真的）
+03:05:09.592 VoiceMap: UP after 13542ms handled=true
+03:05:09.935 电源键：输入法还在出字（31 字）
+03:05:10.850 电源键：输入法结果 = 「你好，你好，刚刚语音识别。本来就退出了，现在能识别很长一段吗？」（静默 915ms / 共 1266ms）
+```
+
+按住时长从 1.2s → 13.5s，取到的是终稿整句。
+
+### 部署注意
+
+- 改了 daemon 要 `cp android/assets/powerkey-daemon.jar /data/adb/powerkey/` 再
+  `sh android/assets/pkctl.sh daemon-restart`；
+- 改了模块要 `bash android/voicemap-ime/build.sh` → 装 `out/voicemap-ime.apk` →
+  **杀掉输入法进程**（LSPosed 只在进程启动时注入）。

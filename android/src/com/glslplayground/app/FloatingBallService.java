@@ -5519,9 +5519,29 @@ public class FloatingBallService extends Service {
         applyBallTouchability();          // 藏着的时候代理层也别吃触摸
     }
 
+    /**
+     * 同一个「长按」可能被送进来两次：服务冷启动时直连 startForegroundService 被后台限制
+     * 拦掉 → 700ms 后 root 跳板又起一次；电源键监听同时听到两个输入节点时也会连发两条广播。
+     * 第二次要是被当成「用户又按了一下」，就会立刻 `up` —— 表现正是
+     * 「语音刚开始没多久就自己结束、只说出了前面几个字」。所以这段时间内的重复 start 一律忽略。
+     */
+    private static final long HOLD_DUP_GUARD_MS = 2500;
+    /** 本次「按住说话」真正开始的时刻（用来识别重复 start）。 */
+    private long powerHoldStartedAt = 0;
+
     /** 电源键第一次长按：弹胶囊 + 让输入法开始语音识别。 */
     void beginPowerHold() {
-        if (searchActive) { endPowerHold(false, false); return; }   // 已经开着 → 当第二次按下
+        long now = android.os.SystemClock.uptimeMillis();
+        if (searchActive) {
+            if (powerHoldActive && now - powerHoldStartedAt < HOLD_DUP_GUARD_MS) {
+                Log.i("FloatingBall", "电源键：重复的 start（" + (now - powerHoldStartedAt)
+                        + "ms 内又来一次）→ 忽略，不结束语音");
+                return;
+            }
+            endPowerHold(false, false);   // 已经开着 → 当第二次按下
+            return;
+        }
+        powerHoldStartedAt = now;
         Log.i("FloatingBall", "电源键：弹胶囊 + 交给输入法语音");
         // ⚠ 按住说话：**只要焦点、不要键盘**。键盘由 Voicemap 自己以"隐身"（alpha=0）拉起来，
         //   我们自己 showSoftInput 的话会先弹出一个真的键盘、再被隐身 —— 用户看到的就是
@@ -5624,23 +5644,66 @@ public class FloatingBallService extends Service {
         waitImeTextAndSend(0, toNewSession);
     }
 
-    /** 轮询胶囊里的字（输入法出字是异步的），拿到就发出去并收起胶囊。 */
+    /**
+     * 输入法出字是**流式**的：按住说话的整个过程里它一直在往输入框里写"中间结果"，
+     * `up` 之后终稿还会再来一下（有时是把整句重写一遍），延迟几百毫秒到 1 秒多。
+     *
+     * 旧实现里"输入框里只要有字就立刻发出去"——于是在你说到一半时框里已经有前半句了，
+     * 一 `up` 就 200ms 后把**中间结果**发走、胶囊关掉，终稿到达时已经没有输入框可写。
+     * 用户看到的就是「说很长的话只识别到前面的」。
+     *
+     * 现在改成**等字停稳**再取：连续 {@link #IME_SETTLE_MS} 没有新字才算说完；
+     * 最多等 {@link #IME_MAX_WAIT_MS}（防止输入法一直不吐终稿时卡住）。
+     */
+    private static final long IME_SETTLE_MS = 900;      // 字连续这么久没变 = 出完了
+    private static final long IME_FIRST_WAIT_MS = 350;  // up 之后先给输入法一点时间出终稿
+    private static final long IME_MAX_WAIT_MS = 12000;  // 兜底：最多等这么久
+    private String imeLastText = "";
+    private long imeLastChangeAt = 0;
+    private long imeWaitStartedAt = 0;
+    private long imeWaitGen = 0;
+
     private void waitImeTextAndSend(final int attempt, final boolean toNewSession) {
+        if (attempt == 0) {
+            imeWaitStartedAt = android.os.SystemClock.uptimeMillis();
+            imeLastText = "";
+            imeLastChangeAt = imeWaitStartedAt;
+            imeWaitGen++;
+            Log.i("FloatingBall", "电源键：等输入法出终稿（字停稳 " + IME_SETTLE_MS + "ms 才取）");
+        }
+        final long gen = imeWaitGen;
         main.postDelayed(new Runnable() {
             @Override public void run() {
+                if (gen != imeWaitGen) return;                  // 这一轮已经被取消/重开
+                long now = android.os.SystemClock.uptimeMillis();
                 String t = searchBar == null ? "" : searchBar.text();
                 t = t == null ? "" : t.trim();
+                if (!t.equals(imeLastText)) {                   // 还在出字 → 静默计时重来
+                    if (!t.isEmpty()) {
+                        Log.i("FloatingBall", "电源键：输入法还在出字（" + t.length() + " 字）");
+                    }
+                    imeLastText = t;
+                    imeLastChangeAt = now;
+                }
+                long quiet = now - imeLastChangeAt;
+                long total = now - imeWaitStartedAt;
+                boolean settled = !t.isEmpty() && quiet >= IME_SETTLE_MS;
+                if (!settled && total < IME_MAX_WAIT_MS) {
+                    waitImeTextAndSend(attempt + 1, toNewSession);
+                    return;
+                }
                 if (t.isEmpty()) {
-                    if (attempt < 30) { waitImeTextAndSend(attempt + 1, toNewSession); return; }
+                    Log.w("FloatingBall", "电源键：等不到输入法出字（" + total + "ms）");
                     toast("没听清");
                     return;
                 }
-                Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」");
+                Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」（静默 " + quiet
+                        + "ms / 共 " + total + "ms）");
                 sendTextToHoldSession(t, toNewSession);
                 try { if (searchBar != null) searchBar.setText(""); } catch (Throwable ignored) { }
                 closeSearchMode("电源键说话完成");
             }
-        }, 200);
+        }, attempt == 0 ? IME_FIRST_WAIT_MS : 150);
     }
 
     /**
@@ -8602,6 +8665,17 @@ public class FloatingBallService extends Service {
         searchOpen = false;
         sqPhase = 3;
         final long gen = ++searchGen;
+        imeWaitGen++;                    // 作废还在等的「轮询输入法结果」（别在关掉之后弹"没听清"）
+        // ★ 胶囊被关掉（点空白 / 返回键 / 审批弹出来 / 音量加隐藏…）→ 这一次「按住说话」就结束了。
+        //   以前这里不清 hold 状态：powerHoldActive 一直挂着 → 下一次长按电源键会被当成
+        //   「第二次按下」去结束一个根本不存在的语音（表现为"按了没反应 / 语音不起来"），
+        //   输入法的语音也还停在按住状态（键盘隐身不恢复）。
+        if (powerHoldActive) {
+            powerHoldActive = false;
+            powerHoldDown = false;
+            try { vm().trigger("up"); } catch (Throwable ignored) { }
+            Log.i("FloatingBall", "search: 收起胶囊 → 同时结束「按住说话」（清 hold 状态）");
+        }
         Log.i("FloatingBall", "search: 退出（" + why + "）");
         if (searchBar != null) {
             searchBar.materialize(false, 0);
