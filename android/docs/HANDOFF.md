@@ -2369,3 +2369,19 @@ add device 8: /dev/input/event2   name: "uinput-goodix"     KEY_POWER
 `renderer.winPixelW/H = winW/winH` + `resetGlassBufferFull()`（= `setFixedSize(winW, winH)`）。
 
 验证：`files/ballshot` 抓一帧，`ball-capture.png` 是 492×375，球是 360×243 的胶囊（宽高比正确）。
+
+### （十六·补二）图标没对准 / 卡片点不了返回 —— 状态 3 期间**不许再动窗口**
+
+对照 GitHub 上正常那版（`origin/main`）发现关键差别：**它的球窗本来就是原版 793×579，进状态 3 从不改窗口**，
+所以 GL 的 `k = winW/winPixelW = 1`、图标层和玻璃层用同一套窗口坐标，天然同心。
+
+球缩到 1/3 之后我们这版窗口只有 492×375，我上一版用 `ensureZoneWindow()` 把它撑到 573 —— 这一改就出问题：
+`updateViewLayout` 之后 GL surface 和 View 坐标系差一拍，图标离圆；触摸代理窗口也没跟着卡片走，标题行点不到（回不去）。
+
+改法（对齐 main）：
+- 新增 `ensureZoneBaseWindow()`：进状态 3 的**第一件事**把窗口摆回原版球窗（793×579，以球心为中心），
+  之后整个状态 3（六圆 + 卡片）**一次都不再改窗口**；
+- `ensureZoneWindow()` 保留但已成 no-op（793 已经够装下 R=86 的环）；
+- `ensureHoldWindow()` 只在卡片真的比窗口宽时才挪 x（以前 `panelW>0` 就挪）。
+
+实测：`zones: 基准窗口回到原版球窗 793x579 @(144,90)` → `六区窗口 793x579` → `R=86`。

@@ -6050,6 +6050,7 @@ public class FloatingBallService extends Service {
         holdDir = null;
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
+        ensureZoneBaseWindow();                          // ★ 先把窗口摆回"原版球窗"（k=1）—— 六圆/卡片都在这个窗里算
         computeZones();
         // 六区的**玻璃圆仍由 GL 画**（用户：玻璃要通透），**图标由文字层画**。
         // 关键：窗口不放大（见 computeZones）→ GL 的 surface 不失配（k=1）→ 两者同心。
@@ -7072,7 +7073,7 @@ public class FloatingBallService extends Service {
         int panelL = holdListRect == null ? 0 : Math.round(holdListRect[0]);
         int needW = Math.min(screenW, Math.max(winW, panelW + 2 * m));
         int newX = params.x;
-        if (needW > winW || panelW > 0) {
+        if (needW > winW) {
             newX = Math.round(panelL - m);
             newX = Math.max(Math.round(dp(6)), Math.min(screenW - needW - Math.round(dp(6)), newX));
         }
@@ -7138,6 +7139,51 @@ public class FloatingBallService extends Service {
             glView.getHolder().setFixedSize(Math.max(2, winW), Math.max(2, winH));
         } catch (Throwable ignored) { }
         Log.i("FloatingBall", "glass buffer -> 全分辨率 " + winW + "x" + winH);
+    }
+
+    /**
+     * 进状态 3 之前，把玻璃窗先摆回**原版球窗**（球缩小之前那个 793×579），以球心为中心。
+     *
+     * 为什么必须：六圆的玻璃是 GL 画的、图标是另一个 View 画的，两边都按"窗口坐标"换算。
+     * 窗口只要在中途被 updateViewLayout 改过尺寸，GL 的 surface 和 View 的坐标系就会差一拍
+     * —— 图标离圆、卡片点不中都是这么来的（GitHub 那版之所以正常，是因为它的球窗本来就是原版大小，
+     * 六区从头到尾**没动过窗口**）。
+     * 这里只在进状态 3 的那一刻动一次，退出时由 restoreHoldWindow() 还回小球窗。
+     */
+    private void ensureZoneBaseWindow() {
+        if (wm == null || glView == null || params == null) return;
+        int inset = Math.round(winY0());
+        float base = winSize * 0.9f;
+        int W = Math.min(screenW, Math.max(2, Math.round(2f * base * minHalfX0 + 2f * dp(24))));
+        int H = Math.min(screenH, Math.max(2, Math.round(2f * base * minHalfY0 + 2f * dp(24))));
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        int cx = loc[0] + winW / 2;
+        int cy = loc[1] + winH / 2;
+        int x = Math.max(0, Math.min(screenW - W, cx - W / 2));
+        int y = Math.max(inset, Math.min(Math.max(inset, screenH - H), cy - H / 2));
+        if (W == winW && H == winH && x == params.x && y - inset == params.y) return;
+        // 记下"小球窗"，退出状态 3 时还回去（computeZones 里 if (holdWinW0<=0) 就不会覆盖）
+        holdWinW0 = winW;
+        holdWinH0 = winH;
+        holdWinX0 = params.x;
+        params.x = x;
+        params.y = y - inset;
+        params.width = W;
+        params.height = H;
+        winW = W;
+        winH = H;
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();
+        if (zonesView != null && zonesParams != null) {
+            zonesParams.x = x;
+            zonesParams.y = y - inset;
+            zonesParams.width = W;
+            zonesParams.height = H;
+            try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
+        }
+        Log.i("FloatingBall", "zones: 基准窗口回到原版球窗 " + W + "x" + H + " @(" + x + "," + y + ")");
     }
 
     private void ensureZoneWindow() {
