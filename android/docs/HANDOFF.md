@@ -2152,3 +2152,47 @@ $ touch files/ballshot            → files/ball-capture.png：桌面文字被�
 实测（Sogou 输入法，`dumpsys input_method` 轮询）：点一下 → 0.25s 内 `mInputShown=true`；
 日志顺序 `search: 单击 → 进入编辑` → IME 起来。之前这一步光是我们自己的延时就有 240ms，
 再叠加"第一次点击只拿到窗口焦点、键盘没弹"的重试，观感就是"点了好久"。
+
+## 2026-11-06（十四）：按住说话不再闪键盘；点输入框 = 结束语音 + 弹键盘
+
+用户：「我不要弹出键盘，我要我主动能弹键盘。语音输入结束的触发条件是音量减或长按电源键，
+我想**点输入框**也是结束语音识别并且同时弹出键盘，而不是每次长按进语音时突然弹键盘再隐藏。」
+
+### 为什么会"闪一下键盘"
+
+VoiceMap 模块的机制（`android/voicemap-ime`）：
+
+- `down` → `sStealthEnabled=true` + `applyWindow()` 把输入法窗口 **alpha=0**（隐身），再 `start()` 语音；
+- `up`   → 停止识别，继续隐身 4 秒后把键盘收掉。
+
+而我们这边 `enterSearchMode(autoFocus=true)` 走 `focusSearchInput()` → 240ms 后 `showSoftInput()`：
+键盘**先**被我们以"正常可见"拉起来，**然后**才被模块隐身 —— 屏幕上就是闪一下。
+
+### 改法
+
+| 位置 | 改动 |
+|---|---|
+| `focusSearchInputForVoice()`（新增） | 按住说话期间只 `setShowSoftInputOnFocus(false)` + `requestFocus()`：**拿焦点、不弹键盘**。焦点必须有 —— Voicemap 是靠输入连接把字塞进"当前焦点输入框"的；键盘由模块自己 `requestShowSelf()` 拉起来，并且是隐身状态 |
+| `beginPowerHold()` | 打开胶囊时置 `searchVoiceMode=true`（这个标记要活到 `sqToCapsule()`，胶囊 250ms 后才落定，所以不能用 try/finally 立刻清） |
+| `sqToCapsule()` 的 `barAutoFocus` 分支 | 语音路走 `focusSearchInputForVoice()`，其它路照旧 `focusSearchInput()` |
+| `endVoiceByTap()`（新增） | **点输入框**：`vm().trigger("up")` 结束识别（**不发送**）+ `vm().cmd("stealthoff")` 让键盘立刻显形 + `setShowSoftInputOnFocus(true)` + `focusSearchInputNow()` |
+| `closeSearchMode()` | 顺手补一条 `stealthoff`，别让下次键盘还是透明的 |
+
+三条"结束语音"的路径现在是：
+
+- 音量减 → 结束 + 取字 + **发到新会话**；
+- 再长按电源键 → 结束 + 取字 + **发回上一次回话**；
+- **点输入框 → 结束（不发送），字留在框里，键盘立刻出来接着打**。
+
+实机验证（Sogou + Voicemap）：
+
+```
+search: 按住说话 → 输入框拿焦点（不弹键盘，等 Voicemap 隐身接管）
+电源键：输入法语音 down
+$ dumpsys window windows | grep -A1 "InputMethod}"
+    mAttrs={... ty=INPUT_METHOD ... alpha=0.0        ← 键盘在、但完全透明
+$ input tap 540 264
+search: 点输入框 → 结束语音识别（不发送，wasHolding=true）
+search: 单击 → 结束语音并进入编辑
+$ screencap → 搜狗键盘正常显示
+```

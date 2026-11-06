@@ -5523,7 +5523,13 @@ public class FloatingBallService extends Service {
     void beginPowerHold() {
         if (searchActive) { endPowerHold(false, false); return; }   // 已经开着 → 当第二次按下
         Log.i("FloatingBall", "电源键：弹胶囊 + 交给输入法语音");
-        enterSearchMode("电源键·按住说话", "", true, BAR_SEND);   // autoFocus=true → 弹输入法
+        // ⚠ 按住说话：**只要焦点、不要键盘**。键盘由 Voicemap 自己以"隐身"（alpha=0）拉起来，
+        //   我们自己 showSoftInput 的话会先弹出一个真的键盘、再被隐身 —— 用户看到的就是
+        //   「每次长按进入语音识别时突然弹出键盘再隐藏」（2026-11-06 报的）。
+        // ⚠ 这个标记要活到 sqToCapsule()（胶囊 250ms 后才落定，barAutoFocus 那一段在里面才跑），
+        //   所以不能 try/finally 立刻复位 —— 由 closeSearchMode() / 点输入框 负责清。
+        searchVoiceMode = true;
+        enterSearchMode("电源键·按住说话", "", true, BAR_SEND);
         if (!searchActive) {
             // 审批球 / 菜单 / 玻璃全屏在屏上时 enterSearchMode 会直接返回；
             // 这时候千万不能再往输入法里注入空格长按 —— 那会点到别人的界面上。
@@ -5551,6 +5557,27 @@ public class FloatingBallService extends Service {
      *                     false = 发回**上一次回话**那个会话（第二次长按电源键）。
      * @param fromVolume   这一次是不是音量减键按的（它顺带把那格音量按下去了，要调回来）。
      */
+    /**
+     * 点输入框 = 结束语音识别（**不发送**）+ 立刻把键盘显出来。
+     *
+     * Voicemap 那边 `up` 之后默认是"继续隐身 4 秒再把键盘收掉"，这里直接补一条
+     * `stealthoff`，让输入法窗口立刻显形 —— 用户点一下就能看到键盘、接着打字。
+     */
+    private void endVoiceByTap() {
+        boolean wasHolding = powerHoldActive;
+        if (wasHolding) {
+            powerHoldActive = false;
+            powerHoldDown = false;
+            try { vm().trigger("up"); } catch (Throwable ignored) { }
+        }
+        try { vm().cmd("stealthoff"); } catch (Throwable ignored) { }
+        if (searchBar != null) {
+            try { searchBar.input().setShowSoftInputOnFocus(true); } catch (Throwable ignored) { }
+        }
+        searchVoiceMode = false;            // 接下来是打字，不是语音了
+        Log.i("FloatingBall", "search: 点输入框 → 结束语音识别（不发送，wasHolding=" + wasHolding + "）");
+    }
+
     void endPowerHold(boolean toNewSession, boolean fromVolume) {
         // ★ 2026-11-06：第二次按得太快（输入法语音还没开起来，powerHoldDown=false）时
         //   不要再「直接收起」——那会在胶囊还在弹开的半路上把它收回去，屏幕上是半截怪形状
@@ -7274,6 +7301,11 @@ public class FloatingBallService extends Service {
     // 所以这里不新造界面：球的方形（Siri 文字态）+ 底部一条输入 + 左边一个侧栏按钮。
 
     private boolean convoOpen = false;
+    /**
+     * 这一次 enterSearchMode 是「按住说话」那条语音路：输入框要拿焦点（Voicemap 往这儿塞字），
+     * 但**不能弹键盘**。见 focusSearchInputForVoice()。
+     */
+    private boolean searchVoiceMode = false;
     private boolean convoStashed = false;
     private long convoOpenedAt = 0;
     private boolean convoHadText = false;
@@ -8543,7 +8575,8 @@ public class FloatingBallService extends Service {
             searchBar.materialize(true, 0);          // 演示页 #search.appear：从模糊里凝聚（0.55s）
         }
         if (barAutoFocus) {
-            focusSearchInput();
+            if (searchVoiceMode) focusSearchInputForVoice();   // 按住说话：拿焦点、不弹键盘
+            else focusSearchInput();
         } else {
             // 不抢焦点：这样"单击一下"才等于"进入编辑"（状态 2 的语法）
             main.removeCallbacks(searchFocusTask);
@@ -8570,6 +8603,8 @@ public class FloatingBallService extends Service {
             searchBar.materialize(false, 0);
         }
         hideSearchIme();
+        try { vm().cmd("stealthoff"); } catch (Throwable ignored) { }   // 万一还停在隐身态
+        searchVoiceMode = false;
         main.postDelayed(new Runnable() {
             @Override public void run() { removeSearchWindows(); }
         }, 170);
@@ -8720,10 +8755,13 @@ public class FloatingBallService extends Service {
                 @Override public void onSubmit(String text) { submitSearch(text); }
 
                 @Override public void onTapEdit() {
-                    // 状态 2 的单击：进入编辑（弹键盘），文字已在这儿，不用再取一次
+                    // 状态 2 的单击：**结束语音识别 + 进入编辑（弹键盘）**。
+                    // 这是用户 2026-11-06 要的第三条"结束语音"的路径（另外两条是音量减、
+                    // 再长按电源键，那两条会**发出去**；这一条只结束、字留在框里接着手打）。
+                    endVoiceByTap();
                     focusSearchInputNow();
                     if (searchBar != null) searchBar.focusInput();
-                    Log.i("FloatingBall", "search: 单击 → 进入编辑");
+                    Log.i("FloatingBall", "search: 单击 → 结束语音并进入编辑");
                 }
 
                 @Override public void onLongPressAdd() {
@@ -8823,6 +8861,27 @@ public class FloatingBallService extends Service {
     private void focusSearchInput() {
         main.removeCallbacks(searchFocusTask);
         main.postDelayed(searchFocusTask, 240);   // 抬手之后再要焦点（键盘一弹窗口会动）
+    }
+
+    /**
+     * 「按住说话」期间：输入框拿焦点，但**不让系统弹键盘**。
+     *
+     * 为什么要焦点：Voicemap 是注入在输入法进程里的模块，识别出来的字是通过输入连接
+     * 塞进**当前焦点**的 EditText 的 —— 没焦点就塞不进来。
+     * 为什么不弹键盘：键盘由 Voicemap 自己 `requestShowSelf()` 拉起来，并且它会在
+     * `down` 的那一刻把输入法窗口 alpha 设成 0（隐身）。我们先 showSoftInput 的话，
+     * 顺序就反了：先弹出一个真键盘、再被隐身 —— 屏幕上就是"闪一下又没了"。
+     */
+    private void focusSearchInputForVoice() {
+        if (searchBar == null || !searchActive) return;
+        try {
+            searchBar.input().setShowSoftInputOnFocus(false);   // 拿焦点也不弹键盘
+            searchBar.requestFocus();
+            searchBar.focusInput();
+            Log.i("FloatingBall", "search: 按住说话 → 输入框拿焦点（不弹键盘，等 Voicemap 隐身接管）");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "voice focus failed: " + t);
+        }
     }
 
     /**
