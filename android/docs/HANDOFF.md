@@ -2385,3 +2385,105 @@ add device 8: /dev/input/event2   name: "uinput-goodix"     KEY_POWER
 - `ensureHoldWindow()` 只在卡片真的比窗口宽时才挪 x（以前 `panelW>0` 就挪）。
 
 实测：`zones: 基准窗口回到原版球窗 793x579 @(144,90)` → `六区窗口 793x579` → `R=86`。
+
+## 2026-11-07（十七）：搜索胶囊变黑/跑偏、"菜单图标对不准" —— 两个结构性根因 + 取证工具
+
+用户报的两件事：
+1. 「搜索框有时候会无缘无故从好好的图 1 自动变成图 2」（图 2 = 顶部只剩 "Search or Ask" 一行字，
+   下面一颗黑色实心块，胶囊玻璃整个不见）；
+2. 「菜单界面多尝试几次长按滑动到菜单选项就有概率出现图 3」（六区图标浮在桌面上、没玻璃/对不准）。
+
+### 根因 A：状态 2（胶囊）和状态 3（六区/卡片）能**同时为真**
+
+`enterSearchMode()` 以前不检查 `zonesActive`：六区菜单还开着的时候按电源键 / 语音 / 点球，
+`zoneMode` 和 `searchMode` 同时为 true。GL 那条分支先判 `zoneMode` →
+
+* 画出来的是**六区那一层**（暗玻璃圆 / 卡片），胶囊的玻璃就"没了"；
+* 输入行窗口（`BallSearchBar`）还照旧摆在顶部 → 屏幕上只剩一行 "Search or Ask" 文字；
+* 用户看到的正是图 2（文字 + 旁边一颗黑块）。
+
+取证（`files/witness` 钩子，见下）：
+
+```
+flags=searchActive:true ... zonesActive:true      ← 两个都开着
+blob=540,264,959,137   barReal=60,195,960,137     ← 胶囊矩形本身是对的
+```
+
+改法（两处，互为兜底）：
+* `enterSearchMode()` 开头：`zonesActive` → 先 `exitZones()`；`menuShown` → 先 `hideMenu()`；
+* `GlassRenderer.onDrawFrame()`：**搜索层先判**（`if (searchMode)` 放到 `if (zoneMode)` 前面）。
+
+实测（六区 + 卡片都开着时开胶囊）：
+
+```
+search: 状态 3 还开着 → 先退出状态 3 再开胶囊
+search: 小黑球弹开成胶囊 cx=540 cy=264 半宽/半高=480/69
+flags=... zonesActive:false   blob=540,264,959,137   barReal=60,195,960,137
+```
+
+### 根因 B：`restoreHoldWindow()` 改窗口却**不改绘制缓冲**
+
+卡片列表关掉、回到六区时，窗口从 793×579 缩成 574×574（`need = 2*(ring+R)+14dp`），
+但 `renderer.winPixelW/H` 和 SurfaceView 的 buffer 还停在 793×579 →
+`k = 缓冲 ÷ 窗口` 不再是 1，六个玻璃圆被**横向压扁 0.72 倍、整体左移 110px**，
+而图标是 View 按"屏幕坐标 − 窗口原点"画的，两边就对不上了。
+
+实测（修前，`files/witness`）：
+
+```
+hb: zones=1 win=144,0,574x574 view=574x574 pixel=793x579
+hb 不一致 → 形状会被压扁/错位：params=574x574 view=574x574 pixel=793x579
+```
+
+从 `ballshot` 量出来的六圆中心/尺寸 vs 图标：
+
+| | 玻璃圆（实测） | 图标（zoneCx/zoneCy） |
+|---|---|---|
+| 环心 x | 430 | 540 |
+| 圆直径 | 125×172（压扁） | — |
+
+改法：
+* `restoreHoldWindow()`：改完 params 补 `renderer.winPixelW/H = w0/h0` + `resetGlassBufferFull()`
+  （和 `ensureZoneWindow()` 同一套）；同时在 `zonesActive` 时**以环心重新摆位** ——
+  以前只改宽高不改 x/y，窗口右边停在 718，而六环最右到 807，右边两个圆会被窗口裁掉；
+* `heartbeatTick()`（新增，状态 2/3/菜单开着时每秒一行）：发现 `params / view / pixel`
+  三者不一致就**按 View 真实尺寸自愈**（同步 pixel + 重新钉 buffer），并在 logcat 里留 WARN。
+  以后谁再漏同步，日志里直接能看见、且不会一直坏在屏幕上。
+
+修后：
+
+```
+hb: zones=1 win=144,0,574x574 view=574x574 pixel=574x574   ← 三者一致
+```
+
+### 顺手修的：长按回调迟到 → 幽灵状态 3
+
+`postDelayed(longPress, 480)` 在主线程被占住时会**迟到**到手指抬起之后才跑，
+那时照样 `enterZones()` —— 屏幕上凭空冒出六区，接着随便点一下就变成"菜单操作"。
+现在 `longPress` 里加了 `fingerDown` 判据（手指已抬起就不弹）。
+
+### 新工具：取证快门 `files/witness` / `tools/witness.sh` / 双击音量减
+
+玻璃层带 `SKIP_SCREENSHOT`，所以**普通截图 / 录屏里它是完全隐身的** —— 出问题时根本拍不到证据。
+现在有三条入口，产出同一套三件套：
+
+| 入口 | 说明 |
+|---|---|
+| `bash tools/witness.sh`（Termux） | 一条命令，拍完自动把 png/txt/log 收进 `shots/witness/<时间>/` |
+| `su -c 'touch .../files/witness'` | 文件钩子（脚本/调试用） |
+| **双击音量减**（0.8s 内两次，没在按住说话时） | 手上正在看 bug、又不想碰屏幕时用 |
+
+产出：
+* `/sdcard/Pictures/Screenshots/glass_<时间>.png` —— **普通截图**，玻璃层在里面（相册可见，可直接发给 AI）；
+* `.../files/glass_<时间>.txt` —— 状态快照（`blob` / `barReal` / `springs` / `window` / `pixel` / `k` …）；
+* `.../files/glass_<时间>.log` —— logcat 里本 App 最近 400 行。
+
+实现要点（`witnessCapture()`）：
+1. 临时 `setSkipScreenshot(false)`，让这一层进 screencap；
+2. `renderer.freezeCapture = true` **冻结采集** —— 否则我们自己的抓屏会拍到球本身，
+   球开始折射自己，玻璃当场变暗变糊（实测对比图见 `shots/witness/`），拍下来就是伪证；
+3. root `screencap -p` 一张（≈2s），落盘 + `MEDIA_SCANNER_SCAN_FILE`；
+4. 立刻恢复 `SKIP_SCREENSHOT` 与解冻。
+
+⚠️ 旁挂文件**不能**写 `/sdcard/glass-evidence`：本 App 没有 `WRITE_EXTERNAL_STORAGE`，
+直接写 /sdcard 根目录会 ENOENT（第一次就这么丢的 txt/log）；只有截图那张走 root 才能放 Pictures 下。

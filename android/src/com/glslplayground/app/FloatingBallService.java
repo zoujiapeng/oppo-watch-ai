@@ -2436,6 +2436,231 @@ public class FloatingBallService extends Service {
         return path;
     }
 
+    // ══════════════════════ 取证快门（witness）═══════════════════════════════
+    //  触发：**双击音量减**（没在按住说话时）／ files/witness 文件钩子 ／ tools/witness.sh
+    //  产出：/sdcard/Pictures/Screenshots/glass_<时间>.png  ← 普通截图（玻璃层在里面，相册可见）
+    //        /sdcard/glass-evidence/glass_<时间>.txt      ← 那一刻的状态机快照（数值全在里面）
+    //        /sdcard/glass-evidence/glass_<时间>.log      ← logcat 里 FloatingBall 最近 400 行
+    //
+    //  为什么不是直接按 MIUI 的「音量减 + 电源」：玻璃层带 SKIP_SCREENSHOT（抓屏排除），
+    //  系统截图/录屏里那一层是**完全隐身**的，拍下来只有字、没有胶囊。
+    //  这里用 root 的 screencap 拍：拍之前临时撤掉排除 + **冻结采集**（见 GlassRenderer.freezeCapture），
+    //  拍完立刻恢复 —— 拍到的就是眼睛此刻看到的那一帧；不冻结的话自己抓屏会拍到自己，
+    //  玻璃当场变暗变糊，取证就成了伪证。
+
+    private volatile boolean witnessBusy = false;
+    private long witnessCount = 0;
+    private long lastVolDownShotAt = 0;
+
+    /**
+     * 取证文件的旁挂目录 = App 自己的外部目录（这个目录**一定可写**）。
+     * ⚠️ 别写成 /sdcard/glass-evidence：本 App 没申请 WRITE_EXTERNAL_STORAGE，
+     *    直接写 /sdcard 根下会 ENOENT（实测第一次取证就是这么丢的 txt/log）。
+     *    截图那张走 root 的 screencap，所以可以放 /sdcard/Pictures/Screenshots。
+     */
+    private File witnessDir() {
+        return gateDir();
+    }
+
+    private void witnessCapture(final String why) {
+        if (witnessBusy) { Log.i("FloatingBall", "witness: 上一张还没拍完，忽略这次"); return; }
+        if (wm == null || glView == null || renderer == null) return;
+        witnessBusy = true;
+        final long n = ++witnessCount;
+        final String ts = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS",
+                java.util.Locale.US).format(new java.util.Date());
+        final String base = "glass_" + ts + (n > 1 ? "_" + n : "");
+        final File dir = witnessDir();
+        final File png = new File("/sdcard/Pictures/Screenshots", base + ".png");
+        try { writeAtomic(new File(dir, base + ".txt"), witnessStateText(why)); }
+        catch (Throwable t) { Log.w("FloatingBall", "witness: 状态快照写失败 " + t); }
+        Log.i("FloatingBall", "witness: 快门 " + base + (why == null || why.isEmpty() ? "" : "（" + why + "）"));
+        vibrate(25);
+        // ① 撤掉玻璃层的抓屏排除：这一层才会出现在 screencap 里
+        if (!debugShowGlass) {
+            try { skipScreenshotOf(glView.getSurfaceControl(), "glass", false); } catch (Throwable ignored) { }
+        }
+        // ② 冻结采集：这一小段玻璃的输入不变 → 屏上那一帧就是"真样子"
+        renderer.freezeCapture = true;
+        // ③ 等两帧（~220ms）让 SurfaceFlinger 吃到新状态，再拍
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            if (shootTo(png)) {
+                                dumpWitnessLog(new File(dir, base + ".log"));
+                                toast("已截图（含玻璃）：" + base + ".png");
+                            } else {
+                                toast("取证截图失败：root 不可用？");
+                            }
+                        } finally {
+                            main.post(new Runnable() { @Override public void run() { witnessRestore(); } });
+                        }
+                    }
+                }, "witness-shot").start();
+            }
+        }, 220);
+    }
+
+    /** 快门结束：解冻 + 把抓屏排除打回去（下一帧起球又"隐身"了）。 */
+    private void witnessRestore() {
+        if (renderer != null) renderer.freezeCapture = false;
+        if (!debugShowGlass && glView != null) {
+            try {
+                SurfaceControl sc = glView.getSurfaceControl();
+                if (skipScreenshotOf(sc, "glass", true)) {
+                    glassMarkedSc = sc;
+                    if (renderer != null) renderer.selfExcluded = true;
+                }
+            } catch (Throwable ignored) { }
+        }
+        witnessBusy = false;
+        Log.i("FloatingBall", "witness: 快门结束（抓屏排除已恢复）");
+    }
+
+    /** root `screencap -p` 拍一张到 dst。成功返回 true。 */
+    private boolean shootTo(File dst) {
+        String tmp = "/data/local/tmp/_witness.png";
+        String d = dst.getAbsolutePath();
+        String cmd = "screencap -p " + tmp
+                + " && chmod 644 " + tmp
+                + " && mkdir -p " + dst.getParent()
+                + " && cp " + tmp + " " + d
+                + " && chmod 644 " + d
+                + " && rm -f " + tmp;
+        try {
+            Process p = new ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start();
+            String out = readAllText(p.getInputStream());
+            int rc = p.waitFor();
+            Log.i("FloatingBall", "witness: screencap rc=" + rc
+                    + " size=" + (dst.exists() ? dst.length() : -1)
+                    + (out.isEmpty() ? "" : " out=" + out.trim()));
+            if (rc == 0 && dst.exists() && dst.length() > 1024) {
+                scanMedia(dst);
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "witness: screencap 失败 " + t);
+        }
+        return false;
+    }
+
+    /** 让相册立刻看到这张图（MIUI 的新图库要扫描）。 */
+    private void scanMedia(File f) {
+        try {
+            sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, android.net.Uri.fromFile(f)));
+        } catch (Throwable ignored) { }
+    }
+
+    /** logcat 里本 App 的最近 400 行（带毫秒时间戳）：和截图放一起就是完整证据。 */
+    private void dumpWitnessLog(File out) {
+        try {
+            Process p = new ProcessBuilder("su", "-c",
+                    "logcat -d -v time | grep -E 'FloatingBall|PowerBall|VoiceMap' | tail -n 400")
+                    .redirectErrorStream(true).start();
+            String s = readAllText(p.getInputStream());
+            p.waitFor();
+            writeAtomic(out, s);
+            Log.i("FloatingBall", "witness: 日志 " + s.length() + " 字符 → " + out.getName());
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "witness: 日志转储失败 " + t);
+        }
+    }
+
+    private static String readAllText(java.io.InputStream in) throws Exception {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+        return new String(bo.toByteArray(), "UTF-8");
+    }
+
+    /**
+     * 状态快照：一行一个键值，脚本/人都能直接对。
+     * 关键就是 **blob（弹簧算出来的胶囊矩形）** 和 **barReal（输入行窗口的真实屏幕矩形）**
+     * 这两组数 —— 用户报的"搜索框自己变样/跑偏"在这一对数字上一定是先分开的。
+     */
+    private String witnessStateText(String why) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("time=").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS",
+                java.util.Locale.US).format(new java.util.Date())).append('\n');
+        sb.append("why=").append(why == null ? "" : why).append('\n');
+        sb.append("uptime=").append(android.os.SystemClock.uptimeMillis()).append('\n');
+        sb.append("screen=").append(screenW).append('x').append(screenH)
+          .append(" density=").append(sqDensity());
+        if (renderer != null) sb.append(" refSize=").append(Math.round(renderer.refSize));
+        sb.append('\n');
+        try {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            sb.append("glassWin=").append(loc[0]).append(',').append(loc[1]).append(',')
+              .append(glView.getWidth()).append(',').append(glView.getHeight()).append('\n');
+            sb.append("glassParams=").append(params.x).append(',').append(params.y).append(',')
+              .append(params.width).append(',').append(params.height).append('\n');
+        } catch (Throwable ignored) { }
+        if (renderer != null) {
+            sb.append("renderer=winX:").append(renderer.winX)
+              .append(" winY:").append(renderer.winY)
+              .append(" winPixel:").append(renderer.winPixelW).append('x').append(renderer.winPixelH)
+              .append(" selfExcluded:").append(renderer.selfExcluded)
+              .append(" freeze:").append(renderer.freezeCapture).append('\n');
+        }
+        sb.append("winY0=").append(Math.round(winY0())).append('\n');
+        sb.append("flags=searchActive:").append(searchActive)
+          .append(" searchOpen:").append(searchOpen)
+          .append(" searchClosing:").append(searchClosing)
+          .append(" zonesActive:").append(zonesActive)
+          .append(" menuShown:").append(menuShown)
+          .append(" glassFullscreen:").append(glassFullscreen)
+          .append(" convoOpen:").append(convoOpen)
+          .append(" approval:").append(approvalShown)
+          .append(" uiHidden:").append(uiHidden)
+          .append(" holdActive:").append(powerHoldActive).append('\n');
+        if (searchActive) {
+            float d = sqDensity();
+            sb.append("search=phase:").append(sqPhase)
+              .append(" capsH:").append(Math.round(searchCapsH))
+              .append(" open:").append(searchOpen).append('\n');
+            sb.append("springs=cx:").append(round3(sqCx.x))
+              .append(" cy:").append(round3(sqCy.x))
+              .append(" bx:").append(round3(sqBx.x))
+              .append(" by:").append(round3(sqBy.x))
+              .append(" k:").append(round3(sqK.x))
+              .append(" dark:").append(round3(sqDark.x))
+              .append(" cont:").append(round3(sqCont.x)).append('\n');
+            sb.append("blob=").append(Math.round(sqCx.x * d)).append(',')
+              .append(Math.round(sqCy.x * d)).append(',')
+              .append(Math.round(2 * sqBx.x * d)).append(',')
+              .append(Math.round(2 * sqBy.x * d)).append('\n');
+            sb.append("barReq=").append(sqBarX).append(',').append(sqBarY).append(',')
+              .append(sqBarW).append(',').append(sqBarH).append('\n');
+            if (searchBar != null) {
+                int[] bl = new int[2];
+                searchBar.getLocationOnScreen(bl);
+                sb.append("barReal=").append(bl[0]).append(',').append(bl[1]).append(',')
+                  .append(searchBar.getWidth()).append(',').append(searchBar.getHeight()).append('\n');
+                sb.append("barView=vis:").append(searchBar.getVisibility())
+                  .append(" alpha:").append(round3(searchBar.getAlpha()))
+                  .append(" editing:").append(searchBar.isEditing()).append('\n');
+            }
+        }
+        if (zonesActive) {
+            sb.append("zones=center:").append(Math.round(holdCenterX)).append(',')
+              .append(Math.round(holdCenterY)).append(" R:").append(Math.round(zoneR))
+              .append(" ring:").append(Math.round(zoneRing))
+              .append(" level:").append(holdLevel)
+              .append(" hover:").append(holdZoneHover).append('\n');
+        }
+        if (menuShown && menuRect != null) {
+            sb.append("menu=").append(Math.round(menuRect[0])).append(',')
+              .append(Math.round(menuRect[1])).append(',')
+              .append(Math.round(menuRect[2])).append(',')
+              .append(Math.round(menuRect[3])).append('\n');
+        }
+        return sb.toString();
+    }
+
     /** 助手开始工作前确保球在 Siri 形变模式下（否则内容没有地方显示）。 */
     public static void ensureSiriForAssistant() {
         FloatingBallService s = INSTANCE;
@@ -3718,6 +3943,8 @@ public class FloatingBallService extends Service {
             float downX, downY;
             int startX, startY;
             boolean dragging, longFired;
+            /** 手指此刻是否还按着（长按回调迟到时靠它判断，见 longPress 里那段注释）。 */
+            boolean fingerDown;
             /** 双指按住不动 SEARCH_HOLD_MS = 唤起搜索胶囊（用户要的入口）。 */
             final Runnable twoFingerHold = new Runnable() {
                 @Override public void run() {
@@ -3741,6 +3968,13 @@ public class FloatingBallService extends Service {
             final Runnable longPress = new Runnable() {
                 @Override public void run() {
                     if (dragging || longFired) return;
+                    // ★ 2026-11-07：主线程被别的活占住时，这个 480ms 的回调会**迟到**，
+                    //   可能拖到手指抬起之后才跑 —— 那时状态 3 会自己凭空弹出来（"幽灵菜单"），
+                    //   用户再点一下屏幕就变成"菜单操作"了。手指已经抬起就别弹了。
+                    if (!fingerDown) {
+                        Log.i("FloatingBall", "长按回调迟到（手指已抬起）→ 不弹状态 3");
+                        return;
+                    }
                     longFired = true;
                     Log.i("FloatingBall", "长按 480ms → 状态 3（四个圆区）");
                     vibrate(35);
@@ -3773,6 +4007,7 @@ public class FloatingBallService extends Service {
                         if (approvalShown) return false;
                         if (searchActive) return false;         // 搜索胶囊期间屏幕归胶囊
                         if (menuShown) return false;            // 玻璃菜单开着时归菜单
+                        fingerDown = true;
                         // ── 状态 3 的"点击模式"：卡片落定后 / 六区（松手后仍在）都靠点击 ──
                         if (zonesActive) {
                             cardDownX = e.getRawX(); cardDownY = e.getRawY();
@@ -3845,6 +4080,7 @@ public class FloatingBallService extends Service {
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        fingerDown = false;
                         if (zonesActive) {                               // 松手 = 一次点击（六区或卡片）
                             boolean dragged = cardDragged;
                             cardDragged = false;
@@ -3889,6 +4125,7 @@ public class FloatingBallService extends Service {
                         main.removeCallbacks(longPress);
                         main.removeCallbacks(twoFingerHold);
                         twoDown = false;
+                        fingerDown = false;
                         if (zonesActive) return true;                    // 别把卡片/菜单关掉
                         if (zonesActive) finishZones(true);
                         return true;
@@ -4674,6 +4911,49 @@ public class FloatingBallService extends Service {
     };
 
     /** 回合是否已经结束（turn/end 或本地流收完）且当前没有在跑的状态。 */
+    // ══════════ 对齐心跳：窗口 / 视图 / 绘制缓冲三者不一致 = 形状被压扁、图标对不准 ══════════
+    // 这段只在 状态 2 / 状态 3 / 菜单 / 审批 挂着的时候每秒打一行，平时一条都不打。
+    // 事后拿 logcat 就能看出"从哪一刻开始 winPixelW 和窗口宽度不一样了"。
+    private long lastHbAt = 0;
+
+    private void heartbeatTick(long now) {
+        if (now - lastHbAt < 1000) return;
+        lastHbAt = now;
+        if (!zonesActive && !menuShown && !searchActive && !approvalShown) return;
+        if (renderer == null || params == null || glView == null) return;
+        int gw = glView.getWidth(), gh = glView.getHeight();
+        Log.i("FloatingBall", "hb: search=" + (searchActive ? ("1/phase" + sqPhase) : "0")
+                + " zones=" + (zonesActive ? "1" : "0")
+                + " menu=" + (menuShown ? "1" : "0")
+                + " approval=" + (approvalShown ? "1" : "0")
+                + " win=" + params.x + "," + params.y + "," + params.width + "x" + params.height
+                + " view=" + gw + "x" + gh
+                + " pixel=" + renderer.winPixelW + "x" + renderer.winPixelH
+                + " rWin=" + renderer.winX + "," + renderer.winY
+                + " zone0=" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0]));
+        boolean bad = gw > 0 && (Math.abs(gw - params.width) > 2 || Math.abs(gh - params.height) > 2
+                || Math.abs(renderer.winPixelW - gw) > 2 || Math.abs(renderer.winPixelH - gh) > 2);
+        if (bad) {
+            Log.w("FloatingBall", "hb 不一致 → 形状会被压扁/错位：params=" + params.width + "x"
+                    + params.height + " view=" + gw + "x" + gh + " pixel="
+                    + renderer.winPixelW + "x" + renderer.winPixelH);
+            // ★ 自愈：谁的路径忘了同步，这里都按 **View 的真实尺寸** 纠正一次 ——
+            //   k = 缓冲 ÷ 窗口 差一点点，形状就整体缩放/偏移（六区图标对不准就是这么来的）。
+            //   只在 View 已经落定（和 params 一致）时纠正，避免和窗口动画打架。
+            if (gw > 0 && gh > 0 && Math.abs(gw - params.width) <= 2 && Math.abs(gh - params.height) <= 2
+                    && (Math.abs(renderer.winPixelW - gw) > 2 || Math.abs(renderer.winPixelH - gh) > 2)) {
+                int ow = renderer.winPixelW, oh = renderer.winPixelH;
+                renderer.winPixelW = gw;
+                renderer.winPixelH = gh;
+                winW = gw;
+                winH = gh;
+                setGlassBufferScale((long) gw * gh);
+                Log.w("FloatingBall", "hb 自愈：pixel " + ow + "x" + oh + " → " + gw + "x" + gh
+                        + "，buffer 重新按窗口钉");
+            }
+        }
+    }
+
     private boolean isIdleSettled() {
         String st = SiriAssistant.stateName();
         if (!("IDLE".equals(st) || "OFF".equals(st))) return false;
@@ -4750,6 +5030,7 @@ public class FloatingBallService extends Service {
             } else if (!searchActive) {
                 updateSiriTextPos();
             }
+            heartbeatTick(now);
             main.postDelayed(this, 16);
         }
     };
@@ -5463,7 +5744,18 @@ public class FloatingBallService extends Service {
                 }
                 Log.i("FloatingBall", "收到 VOLUME_SEND：holdActive=" + powerHoldActive);
                 if (!powerHoldActive) {
-                    Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（不呼球）");
+                    // ★ 2026-11-07 取证：没在说话时 **双击音量减 = 拍一张带玻璃的截图**。
+                    //   为什么要它：玻璃层带 SKIP_SCREENSHOT，MIUI 的「音量减+电源」截图拍不到它；
+                    //   而手指一碰屏幕搜索框就收起，也不适合点按钮。音量键是唯一"不碰屏幕"的键。
+                    long nowMs = android.os.SystemClock.uptimeMillis();
+                    if (nowMs - lastVolDownShotAt <= 800) {
+                        lastVolDownShotAt = 0;
+                        Log.i("FloatingBall", "音量减双击 → 取证快门");
+                        witnessCapture("双击音量减");
+                        return;
+                    }
+                    lastVolDownShotAt = nowMs;
+                    Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（0.8s 内再按一次 = 取证截图）");
                     return;
                 }
                 Log.i("FloatingBall", "音量减 → 结束按住说话 → 发到全新会话");
@@ -7404,20 +7696,56 @@ public class FloatingBallService extends Service {
             w0 = Math.max(w0, need);
             h0 = Math.max(h0, need);
         }
-        if (winH == h0 && winW == w0) return;
+        if (winH == h0 && winW == w0 && !zonesActive) return;
         winH = h0;
         winW = w0;
         params.width = w0;
         params.height = h0;
+        if (zonesActive) {
+            // ★ 2026-11-07：缩回来的时候**必须重新以环心为中心摆位**。
+            //   以前只改宽高、x/y 原封不动 —— 窗口是 793 那一档时 x=144，缩到 574 还留 144，
+            //   于是窗口右边到 718，而六圆环最右边到 807：右边那两个圆被窗口裁掉
+            //   （用户说的「菜单右边似乎被裁切了」）。和 ensureZoneWindow() 同一套摆法。
+            int inset = Math.round(winY0());
+            int m = Math.round(dp(8));
+            int cx = Math.round(holdCenterX > 0 ? holdCenterX : screenW * 0.5f);
+            int cy = Math.round(holdCenterY > 0 ? holdCenterY : winH * 0.5f);
+            int nx = Math.round(cx - w0 * 0.5f);
+            int nxMax = screenW - m - w0;
+            if (nxMax < m) nxMax = m;
+            nx = Math.max(m, Math.min(nxMax, nx));
+            int nys = Math.round(cy - h0 * 0.5f);
+            int nyMin = inset + m, nyMax = screenH - m - h0;
+            if (nyMax < nyMin) nyMax = nyMin;
+            nys = Math.max(nyMin, Math.min(nyMax, nys));
+            params.x = nx;
+            params.y = nys - inset;
+        }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         if (zonesView != null && zonesParams != null) {
             zonesParams.width = w0;
             zonesParams.height = h0;
+            zonesParams.x = params.x;
+            zonesParams.y = params.y;
             try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
             syncZoneLocal();
             zonesView.setZones(zoneCx, zoneCy, zoneR);   // **屏幕**坐标：View 自己按真实窗口位置换算
         }
-        if (renderer != null) { renderer.winX = params.x; renderer.winY = params.y + Math.round(winY0()); }
+        if (renderer != null) {
+            renderer.winX = params.x;
+            renderer.winY = params.y + Math.round(winY0());
+        }
+        // ★ 2026-11-07：这里原来**只改窗口、不改绘制缓冲/winPixel** ——
+        //   卡片关掉、窗口从 793 缩回 574 之后，renderer.winPixelW/H 还停在 793x579，
+        //   SurfaceView 的 buffer 也还钉在 793x579，于是 shader 里 winW/winPixelW 不再代表
+        //   "缓冲÷窗口"，六圆被横向压扁成 0.72 倍、整体左移 110px（实测：
+        //   玻璃环中心 x=430，而图标中心 x=540 —— 用户说的「图标一个都没对准」）。
+        //   和 ensureZoneWindow() 一样，改完窗口必须同步 pixel + 重新钉死 buffer。
+        if (renderer != null) {
+            renderer.winPixelW = w0;
+            renderer.winPixelH = h0;
+        }
+        resetGlassBufferFull();
         pushZoneScene();
         Log.i("FloatingBall", "zones: 卡片关闭，球窗回到 " + w0 + "x" + h0);
     }
@@ -8866,6 +9194,19 @@ public class FloatingBallService extends Service {
             return;
         }
         if (wm == null || glView == null || params == null || renderer == null) return;
+        // ★ 2026-11-07：**状态 3 / 玻璃菜单 还开着就不能直接开胶囊**。
+        //   以前这里没有互斥：zoneMode 和 searchMode 同时为真时，GL 先判 zoneMode，
+        //   画的是六区那一层 —— 屏幕上胶囊的玻璃**整个不见了**，只剩顶部那行
+        //   "Search or Ask" 文字和旁边一颗黑圆。用户报的「搜索框自己变成图 2」就是这个
+        //   （六区菜单开着时按电源键 / 语音 / 点球，都会走到这里）。
+        if (zonesActive) {
+            Log.i("FloatingBall", "search: 状态 3 还开着 → 先退出状态 3 再开胶囊");
+            exitZones();
+        }
+        if (menuShown) {
+            Log.i("FloatingBall", "search: 玻璃菜单还开着 → 先关菜单再开胶囊");
+            hideMenu("开胶囊");
+        }
         if (!siriEnabled) applySiriEnabled(true);   // 窗口/节拍那条路要活着（球本身不参与渲染）
         if (!siriEnabled) return;
         searchActive = true;
@@ -9401,6 +9742,13 @@ public class FloatingBallService extends Service {
         if (now < nextGestureCheck) return;
         nextGestureCheck = now + 120;
         File dir = gateDir();
+        // files/witness → 取证三件套（玻璃层原图 + 状态快照；全屏截图由 tools/witness.sh 做）
+        File fWitness = new File(dir, "witness");
+        if (fWitness.exists()) {
+            String tag = readSmallString(fWitness, 200);
+            fWitness.delete();
+            witnessCapture(tag == null ? "" : tag.trim());
+        }
         File fShowGlass = new File(dir, "show-glass");
         if (fShowGlass.exists()) {
             fShowGlass.delete();

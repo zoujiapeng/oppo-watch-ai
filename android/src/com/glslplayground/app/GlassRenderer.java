@@ -169,6 +169,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      */
     public volatile int winPixelW = 0, winPixelH = 0;
 
+    /**
+     * 取证快门：**暂停吃新帧**，让玻璃停在上一帧的样子。
+     *
+     * 为什么需要：玻璃层平时带着 SKIP_SCREENSHOT（抓屏排除），普通截图/录屏里它是隐身的。
+     * 要"用音量键那种普通截图把它也拍进去"，只能临时撤掉那个标记 —— 可一旦撤掉，
+     * **我们自己的抓屏**（CapLive / screencap）也会把球拍进去，球就会折射自己，
+     * 屏幕上立刻变成另一副样子（实测：整体发暗、折射细节全糊）。这样拍下来的"证据"
+     * 是假象，不是用户看到的东西。
+     *
+     * 所以快门期间冻结采集：这一小段（≈250ms）玻璃的输入不变 → 渲染结果不变 →
+     * 系统截图拍到的就是**眼睛此刻看到的**那一帧。
+     */
+    public volatile boolean freezeCapture = false;
+
     // ── GL 资源 ──
     private int capProg, blurProg, compProg, maskProg;
     private int quadBuf;
@@ -960,8 +974,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             // root 直采：把原始帧上传进 full（行序已翻转），不经 MediaProjection
             uploadRootFrame();
             if (!sawFrame) return;
-        } else {
+        } else if (!freezeCapture) {
             // Pass 1: 抓屏 OES → 全分辨率实时帧
+            // （freezeCapture = 取证快门：这一小段不更新 full，玻璃停在上一帧，见字段注释）
             useProgram(capProg);
             bindFullscreen(capProg);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, full.fbo);
@@ -1038,18 +1053,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         buildBlur(bgTex);
 
         // ── 状态 3 / 玻璃菜单层（同一套材质，多个形状）────────────────────────
+        // ── 搜索层：演示页那一套（球整趟让路）──────────────────────────────
+        // 抓屏/抠图/模糊三趟照旧复用（搜索层的折射就是要"球窗之外的真实桌面"），
+        // 只是合成换成 metaball-search 的 FS。
+        // ★ 2026-11-07：**搜索层先判**。以前 zoneMode 在前，两种状态同时为真时
+        //   画的是六区、胶囊玻璃直接消失（用户报的"搜索框自己变成图 2"）。
+        //   服务侧已经加了互斥（enterSearchMode 会先退状态 3），这里再兜一层。
+        if (searchMode) {
+            drawSearchLayer(bgTex);
+            return;
+        }
         if (zoneMode) {
             // ★ 2026-10-23：直接用**球 / 聊天卡片那颗 shader（FS_COMP）**画菜单与四区，
             //   每个形状单独一趟、预乘 alpha 混合叠上去（用户：「直接复用聊天界面那个方形」）。
             drawZoneLayerBall(bgTex);
-            return;
-        }
-
-        // ── 搜索层：演示页那一套（球整趟让路）──────────────────────────────
-        // 抓屏/抠图/模糊三趟照旧复用（搜索层的折射就是要"球窗之外的真实桌面"），
-        // 只是合成换成 metaball-search 的 FS。
-        if (searchMode) {
-            drawSearchLayer(bgTex);
             return;
         }
 
@@ -1118,6 +1135,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     private void uploadRootFrame() {
         byte[] f = readyFrame.getAndSet(null);
         if (f == null) return;
+        if (freezeCapture) { framePool.offer(f); return; }   // 取证快门：丢掉这一帧，纹理保持上一帧
         int need = full.w * full.h * 4;
         if (f.length >= need) {
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, full.tex);
