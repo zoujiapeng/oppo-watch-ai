@@ -51,6 +51,11 @@ public class BallSearchBar extends LinearLayout {
         void onAttachmentTap();
         /** 单击胶囊 / 输入框：进入编辑（状态 2 的"单击=编辑"）。 */
         void onTapEdit();
+        /**
+         * 输入框需要多高（**屏幕像素**）：字多到换行时胶囊要跟着长高。
+         * 服务侧拿这个值重设胶囊弹簧的高度目标（见 FloatingBallService#onSearchInputHeight）。
+         */
+        void onInputHeight(int px);
     }
 
     // 颜色/透明度照 metaball-search.html 的 #search 抄：图标 #fff @ .72、
@@ -121,11 +126,19 @@ public class BallSearchBar extends LinearLayout {
         input.setHintTextColor(COL_HINT);
         input.setHint("Search or Ask");
         input.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(16));   // 演示页窄屏档 font-size:16px
-        input.setSingleLine(true);
+        // ── 多行：语音识别/长句子把一行挤满时**换行**，胶囊跟着长高 ───────────
+        // 原来 setSingleLine(true)：字一多就在一行里横向滚，后面写的字看不见（用户报的
+        // 「语音识别的字挤满输入框」）。现在允许换行、最多 4 行；回车仍然 = 发送（IME 的
+        // 发送键 / OnKeyListener 两条都还在），所以不会变成"回车换行卡住发不出去"。
+        input.setSingleLine(false);
+        input.setMaxLines(4);
+        input.setHorizontallyScrolling(false);
         input.setGravity(Gravity.CENTER_VERTICAL);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         input.setImeOptions(EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        input.setPadding(Math.round(dp(8)), 0, Math.round(dp(8)), 0);   // 窄屏档 padding:0 8px
+        input.setPadding(Math.round(dp(8)), Math.round(dp(6)), Math.round(dp(8)), Math.round(dp(6)));
         input.setShadowLayer(dp(5), 0f, dp(1), 0x59000000);
         input.setCursorVisible(false);          // 原生光标换成下面自绘的那颗发光光标（演示页 #caret）
         input.setOnEditorActionListener(new android.widget.TextView.OnEditorActionListener() {
@@ -161,8 +174,13 @@ public class BallSearchBar extends LinearLayout {
         input.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { keepCaretSolid(); }
-            @Override public void afterTextChanged(android.text.Editable s) { }
+            @Override public void afterTextChanged(android.text.Editable s) {
+                // 字多到换行 → 告诉服务侧把胶囊拉高（下一帧才准：Layout 这时还没重排完）
+                post(new Runnable() { @Override public void run() { recomputeHeight(); } });
+            }
         });
+        // 窗口宽度/高度变化也会改变换行位置，跟着重新算一次
+        input.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> recomputeHeight());
         input.setOnClickListener(new OnClickListener() {
             @Override public void onClick(View v) {
                 keepCaretSolid();
@@ -178,6 +196,38 @@ public class BallSearchBar extends LinearLayout {
     }
 
     private float dp(float v) { return v * d; }
+
+    // ── 输入框按行数要高度 ────────────────────────────────────────────────
+    private int lastWantH = -1;
+
+    /** 行数变了才回调（屏幕像素）：服务侧据此把胶囊弹簧的高度目标改掉。 */
+    private void recomputeHeight() {
+        int want = desiredHeightPx();
+        // 多行时左右多留一点：胶囊两端是大圆角，字贴着圆弧会像被啃掉一口
+        int lines = 1;
+        try {
+            if (input.getLayout() != null) lines = Math.max(1, input.getLayout().getLineCount());
+        } catch (Throwable ignored) { }
+        int side = Math.round(dp(lines > 1 ? 22 : 14));
+        if (getPaddingLeft() != side || getPaddingRight() != side) setPadding(side, 0, side, 0);
+        if (want == lastWantH) return;
+        lastWantH = want;
+        if (listener != null) listener.onInputHeight(want);
+    }
+
+    /**
+     * 当前文字需要多高（屏幕像素）。
+     * 下限 = 常态胶囊高（50dp）、上限 ≈ 4 行 —— 再多就在框里滚（EditText 自己会滚）。
+     */
+    private int desiredHeightPx() {
+        int min = Math.round(dp(50));
+        android.text.Layout lay = input.getLayout();
+        if (lay == null) return min;
+        int want = lay.getHeight() + input.getTotalPaddingTop() + input.getTotalPaddingBottom()
+                + Math.round(dp(10));
+        int cap = Math.round(dp(50) * 2.4f);     // ≈ 4 行（16sp 字号）
+        return Math.min(cap, Math.max(min, want));
+    }
 
     public void setListener(Listener l) { this.listener = l; }
     public EditText input() { return input; }
@@ -407,6 +457,17 @@ public class BallSearchBar extends LinearLayout {
         }
         float w = dp(2), h = dp(19);                  // 窄屏档 caret 高 19px
         float cy = getHeight() * 0.5f;
+        // 多行时竖线跟着**当前那一行**走（单行时等价于居中，位置一点没变）
+        try {
+            android.text.Layout lay2 = input.getLayout();
+            if (lay2 != null && lay2.getLineCount() > 1) {
+                int line = lay2.getLineForOffset(sel);
+                float top = input.getTop() + input.getTotalPaddingTop() + lay2.getLineTop(line);
+                float bot = input.getTop() + input.getTotalPaddingTop() + lay2.getLineBottom(line);
+                cy = (top + bot) * 0.5f;
+                h = Math.max(dp(10), Math.min(dp(19), (bot - top) * 0.78f));
+            }
+        } catch (Throwable ignored) { }
         x = Math.max(dp(2), Math.min(x, input.getRight() - dp(12)));
         caretRect.set(x, cy - h * 0.5f, x + w, cy + h * 0.5f);
         // 两层光晕（对应 box-shadow 0 0 5px / 0 0 14px）+ 本体白条

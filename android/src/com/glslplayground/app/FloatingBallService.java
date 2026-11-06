@@ -1070,7 +1070,25 @@ public class FloatingBallService extends Service {
         SiriAssistant a = SiriAssistant.peek();
         if (a == null) return;
         DshApprovalClient c = a.approvals();
-        if (c != null) c.pumpDebugRequest();
+        if (c == null) return;
+        // 文件钩子：`files/approval.json` = 一条假审批/提问（JSON 格式同 HTTP 回路）。
+        // 为什么不用 HTTP 那条：它固定走 DSH 端口 + 1（3081），那个端口常常被 DSH 自己的
+        // 代理占着，喂不进去。文件这条路只依赖 App 自己的外部目录，Termux 能直接写。
+        try {
+            java.io.File f = new java.io.File(gateDir(), "approval.json");
+            if (f.exists()) {
+                String json = readSmallString(f, 64 * 1024).trim();
+                if (!f.delete() && f.exists()) return;      // 删不掉就别反复消费
+                if (!json.isEmpty()) {
+                    Log.i("FloatingBall", "approval debug（文件）: " + json.length() + " 字节");
+                    c.feedDebugPayload(json);
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "approval debug 文件读失败：" + t);
+        }
+        c.pumpDebugRequest();
     }
 
     void onApprovalRequest(Object request) {
@@ -1324,6 +1342,10 @@ public class FloatingBallService extends Service {
         approvalActionsScroll = new android.widget.ScrollView(this);
         approvalActionsScroll.setVerticalScrollBarEnabled(false);
         approvalActionsScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        // 选项多于放得下的时候这里是滚的：上下边缘加一层淡出，别让最后一行**硬生生被切一半**
+        // （用户 2026-11-06 让压测多选项面板，切一半看着像坏了）。
+        approvalActionsScroll.setVerticalFadingEdgeEnabled(true);
+        approvalActionsScroll.setFadingEdgeLength(Math.round(dp(26)));
         approvalActionsScroll.addView(col, new android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
@@ -1816,7 +1838,10 @@ public class FloatingBallService extends Service {
         if (base <= 0) base = 1f;
         int textMaxW = approvalMaxContentW();
         int actMaxW = textMaxW + 2 * apPadX;      // 交互层可以比文字块宽一点（按钮要有存在感）
-        float cap = screenH * 0.66f;              // 面板总高上限（球也按它收）
+        // 面板总高上限（球也按它收）。★ 2026-11-06：别再按「玻璃内高」收 ——
+        //   那样 8 个选项时会把选项层压到只剩 4 行。上限就是屏幕的 66%，
+        //   装不下的选项在它自己的 ScrollView 里滚（上下带淡出，不会硬切一半）。
+        float cap = screenH * 0.66f;
 
         String key = textMaxW + "|" + actMaxW + "|" + apBodyPx + "|" + approvalOptValues.size()
                 + "|" + (approvalInput != null);
@@ -1885,13 +1910,27 @@ public class FloatingBallService extends Service {
         // 面板宽度夹到「聊天界面」那条宽度（siriMaxBallW）：用户要的是审批/提问面板
         // 跟聊天卡片一样宽，别比它还大、挡住操作。
         float maxHalfW = Math.min(screenW * 0.92f / 2f, siriMaxBallW() / 2f);
-        float maxHalfH = screenH * 0.68f / 2f;
+        // ★ 2026-11-06：高度上限从「屏高 68%」收到「屏幕里真能放下」——
+        //   8 个选项那种面板原来会长到快顶满屏幕，最后一个选项被顶出玻璃。
+        float maxHalfH = Math.min(screenH * 0.62f,
+                screenH - winY0() - dp(28)) / 2f;
         halfW = Math.min(halfW, maxHalfW);
         halfH = Math.min(halfH, maxHalfH);
         halfH = Math.max(halfH, halfW * 0.9f);            // 别扁成一条：至少接近方形
         halfW = Math.max(halfW, halfH * 0.62f);
         halfW = Math.min(halfW, maxHalfW);
         halfH = Math.min(halfH, maxHalfH);
+
+        // ★ 选项层必须在玻璃里收住：可用高 = 玻璃内高 − 文字块 − 缝 − 输入行。
+        //   超出的选项在自己的 ScrollView 里滚（下面 updateApprovalLayout 也按这个高度贴底摆）。
+        float innerH = halfH * 2f - apPadY * 1.15f - dp(10);
+        float maxActH = innerH - apTextH - apGap - (apInputH > 0 ? apGap + apInputH : 0);
+        int actFloor = Math.round(dp(72));
+        if (apActH > maxActH) {
+            apActH = Math.max(actFloor, Math.round(maxActH));
+            Log.i("FloatingBall", "approval: 选项层收到 " + apActH + "px（玻璃内高 "
+                    + Math.round(innerH) + "，文字 " + apTextH + "）");
+        }
 
         float cr = 0.28f * Math.min(halfW, halfH);        // squircle：比方角柔、比椭圆方正
         aprCorner = Math.max(0.28f, Math.min(minCorner, cr / Math.max(1f, halfH)));
@@ -2138,7 +2177,12 @@ public class FloatingBallService extends Service {
         params.x = Math.round(bcx - W * 0.5f);
         params.y = Math.round(bcy - H * 0.5f);
         params.x = Math.max(-W / 2, Math.min(screenW - W / 2, params.x));
-        params.y = Math.max(-Math.round(dp(24)), Math.min(screenH - H + Math.round(dp(24)), params.y));
+        // ★ 2026-11-06：面板竖着的位置改成「能放进屏幕就放进屏幕」——
+        //   以前保持球心再夹 ±24dp，面板一高就被顶到屏幕外（顶边压在状态栏上、
+        //   底下被屏幕切掉）。现在：请求 y 的合法区间 = [状态栏下 8dp, 屏幕底 − 40dp]。
+        int minReqY = Math.round(dp(8));
+        int maxReqY = Math.round(screenH - H - dp(40) - winY0());
+        params.y = Math.max(minReqY, Math.min(Math.max(minReqY, maxReqY), params.y));
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         glView.post(winSync);
         Log.i("FloatingBall", "approval window -> " + W + "x" + H + " at " + params.x + "," + params.y);
@@ -2159,15 +2203,24 @@ public class FloatingBallService extends Service {
         float ballTop = sy - hypx;
         float sysOffset = winYnow - params.y;
 
-        float blockH = apTextH + apGap + apActH + (apInputH > 0 ? apGap + apInputH : 0);
-        float topPad = Math.max(dp(4), (hypx - Math.max(0f, aBlack) * hypx - blockH) / 2f);
-        if (apImeUp) topPad = dp(6);      // 键盘弹起：内容顶到球顶，尽量离键盘远一点
+        // ★ 2026-11-06：从**玻璃内底边往上**摆（原来是从球顶往下累加）。
+        //   往下累加时，选项一多整块就顶出玻璃底边 —— 用户看到的就是「最后几个选项
+        //   被输入行/球底切掉」。现在输入行贴内底边、选项层贴它上面、文字块贴最上面，
+        //   三者永远在玻璃里；选项超出就在自己的 ScrollView 里滚（高度已在
+        //   applyApprovalGeometry 里按玻璃内高夹过）。
+        float pad = dp(10);
+        float glassBottom = ballTop + hypx * 2f - pad;
+        int inY = (apInputH > 0) ? Math.round(glassBottom - apInputH) : 0;
+        float actBottom = (apInputH > 0) ? (glassBottom - apInputH - apGap) : glassBottom;
+        int actY = Math.round(actBottom - apActH);
+        int textY = Math.round(actY - apGap - apTextH);
+        float topLimit = ballTop + pad;
+        if (apImeUp) topLimit = ballTop + dp(4);      // 键盘弹起：内容顶到球顶，尽量离键盘远一点
+        if (textY < topLimit) textY = Math.round(topLimit);
         int textX = Math.round(winXnow + winW / 2f - apTextW / 2f);
-        int textY = Math.round(ballTop + topPad - sysOffset);
         int actX = Math.round(winXnow + winW / 2f - apActW / 2f);
-        int actY = Math.round(textY + apTextH + apGap);
 
-        int key = textX * 31 + textY * 17 + actX * 7 + actY * 3
+        int key = textX * 31 + textY * 17 + actX * 7 + actY * 3 + inY
                 + apTextW + apActW + apActH + apInputH + (apImeUp ? 1 : 0);
         if (key == apLayoutKey) return;
         apLayoutKey = key;
@@ -2189,10 +2242,9 @@ public class FloatingBallService extends Service {
         approvalActionsParams.y = actY;
         try { wm.updateViewLayout(actBox, approvalActionsParams); } catch (Throwable ignored) { }
 
-        // 输入行：自己一个窗口，接在按钮层下面
+        // 输入行：自己一个窗口，贴玻璃内底边（inY 是上面按底边倒算出来的）
         if (approvalInputRow != null && apInputH > 0) {
             int inX = Math.round(winXnow + winW / 2f - apInputW / 2f);
-            int inY = actY + apActH + apGap;
             if (approvalInputParams.width != apInputW || approvalInputParams.height != apInputH) {
                 approvalInputParams.width = Math.max(1, apInputW);
                 approvalInputParams.height = Math.max(1, apInputH);
@@ -4130,26 +4182,40 @@ public class FloatingBallService extends Service {
     private float winInsetY = -1f;
 
     private float winY0() {
+        float anchor = statusBarH();
         if (glView != null && params != null) {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
             float d = loc[1] - params.y;
-            if (d >= 0 && d < screenH / 4f) { winInsetY = d; return d; }
+            // ★ 2026-11-06：只接受「看起来就是状态栏那一条」的测量。
+            //   窗口刚被 updateViewLayout 挪过时，getLocationOnScreen() 还是**旧位置**，
+            //   算出来会是几百像素的假 inset（实测被记成 207 → 之后每次摆球都按它压下去
+            //   117px，聊天结束缩回球时 Siri 波/圆点就不在启动时的那个位置了）。
+            //   真 inset 不可能比状态栏高太多（这里给到 48dp 的余量）。
+            float limit = Math.max(dp(48), anchor < 0 ? dp(48) : anchor + dp(8));
+            if (d >= 0 && d <= limit) { winInsetY = d; return d; }
         }
+        if (anchor >= 0) { winInsetY = anchor; return anchor; }   // 量不到就用状态栏高度兜底
         if (winInsetY >= 0f) return winInsetY;          // 刚改过 params：用上次测到的真值
         if (renderer != null && winH > 0 && renderer.winY > 0 && params != null) {
             float d = renderer.winY - params.y;
-            if (d >= 0 && d < screenH / 4f) { winInsetY = d; return d; }
+            if (d >= 0 && d <= Math.max(dp(48), (statusBarH() < 0 ? dp(48) : statusBarH() + dp(8)))) {
+                winInsetY = d; return d;
+            }
         }
-        // 最后兜底：直接问系统状态栏高度（悬浮窗 TYPE_APPLICATION_OVERLAY 的父容器顶边就是它）
+        return 0f;
+    }
+
+    /** 系统状态栏高度（px）；取不到返回 -1。 */
+    private float statusBarH() {
         try {
             int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
             if (id > 0) {
                 float h = getResources().getDimensionPixelSize(id);
-                if (h >= 0 && h < screenH / 4f) { winInsetY = h; return h; }
+                if (h >= 0 && h < screenH / 4f) return h;
             }
         } catch (Throwable ignored) { }
-        return 0f;
+        return -1f;
     }
 
     /**
@@ -4237,7 +4303,17 @@ public class FloatingBallService extends Service {
         // 直接落回初始形态，**不要**拿残留文字再量一遍 —— 那会量出「按最后那段文字算的方形」
         // （实测结束时停在 705x705 而不是 787x573 的圆球）。文字已在方法开头彻底隐藏。
         tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
-        if (renderer != null) renderer.waveInGlass = 0f;   // 球底那截波跟着收掉
+        if (renderer != null) {
+            renderer.waveInGlass = 0f;   // 球底那截波跟着收掉
+            // ★ 2026-11-06：方形态期间圆点被沉到了「底部动效带」（orbOffset 0.05~0.85），
+            //   波闸门也可能被文字压到 0。收字回球时必须**当场**把这两样放回常态 ——
+            //   否则球缩回胶囊了，圆点还挂在原来那条低带上（用户报的「dots 没像启动时那样
+            //   居中」就是这么来的），波也还是关着的。这里不等下一次 applyAssistantState()。
+            orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
+            renderer.orbOffset = orbOffsetTarget;
+            waveGateTarget = 1f;
+            waveGateLastMs = 0;
+        }
         if (glView != null) {                              // 回最小形态 → 恢复全分辨率渲染
             glassBufW = glassBufH = -1;
             try { glView.getHolder().setFixedSize(0, 0); } catch (Throwable ignored) { }
@@ -4458,6 +4534,13 @@ public class FloatingBallService extends Service {
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             updateSiriWindow(base * minHalfX, base * minHalfY);
         }
+        // ★ 2026-11-06：窗口已经**落定**在常态最小球窗（不是动画途中）→ 顺手校准一次「家」。
+        //   centerBallOnScreen() 在启动那一帧记不了（窗口还是 993×993 / winY0=0），
+        //   不在这里补记的话，家会永远停在那个偏低 117px 的假值上 —— 之后每次从
+        //   聊天卡片缩回球，球都落在低一截的位置，波和圆点看着就不是启动那几个位置。
+        if (!textHold && Math.abs(winW - restW) <= dp(2) && Math.abs(winH - restH) <= dp(2)) {
+            rememberHomeIfMinimal();
+        }
     }
 
     /** 每 400ms 巡检一次窗口/触摸区域。Siri 关着时 siriTick 会直接 return，所以必须独立一条。 */
@@ -4578,7 +4661,7 @@ public class FloatingBallService extends Service {
                 && winH <= minWinH * 1.12f;
         if (!minimal) return;
         float cx = params.x + winW * 0.5f;
-        float cy = params.y + winH * 0.5f;
+        float cy = params.y + winH * 0.5f + winY0();       // ★ home 一律是**屏幕坐标**（ballTopOnScreen 按屏幕 y 用）
         if (cx < -screenW || cx > screenW * 2f || cy < -screenH || cy > screenH * 2f) return;   // 离谱值直接丢弃
         homeCx = cx;
         homeCy = cy;
@@ -4868,6 +4951,12 @@ public class FloatingBallService extends Service {
     /** 面板窗口的抓屏排除：窗口刚建时 SurfaceControl 可能无效，重试几次。 */
     private void scheduleApprovalSkipScreenshot() {
         if (Build.VERSION.SDK_INT < 29) return;
+        // 调试口子 show-glass：审批面板也一起留在抓屏里 —— 否则截出来只有一块玻璃，
+        // 面板的排版（太大/圆角/溢出）根本没法验。
+        if (debugShowGlass) {
+            Log.i("FloatingBall", "debug: 审批面板留在抓屏里（show-glass）");
+            return;
+        }
         for (int i = 0; i < 6; i++) {
             final int attempt = i;
             main.postDelayed(new Runnable() {
@@ -6736,10 +6825,24 @@ public class FloatingBallService extends Service {
         int topMargin = Math.round(winY0() + dp(10));          // 玻璃顶 ≈ 状态栏下沿
         params.y = Math.max(Math.round(winY0()), topMargin - Math.round(dp(24)));  // 窗口比玻璃多 24dp 留白
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
-        homeCx = params.x + winW * 0.5f;
-        homeCy = params.y + winH * 0.5f + winY0();              // home 用屏幕坐标
-        Log.i("FloatingBall", "球回到初始状态 → 居中靠顶 (" + params.x + "," + params.y
-                + ") home=(" + Math.round(homeCx) + "," + Math.round(homeCy) + ")");
+        // ★ 2026-11-06：「家」只在**窗口已经是常态最小球窗、且 inset 已经量到**时才记。
+        //   以前无条件记 —— 启动那一帧窗口还是 993×993、winY0() 也还是 0（布局没回来），
+        //   记下来的家比真实球心低 117px（实测 587 vs 470）。后果：从聊天卡片缩回球时
+        //   窗口按这个假家定位，整颗球（连同里面的 Siri 波/圆点）落在低 117px 的地方，
+        //   看起来就是「和刚启动时不一样、波和点没居中」。窗口没落定时交给
+        //   auditWindowAgainstBall() 落定后再补记（见那边）。
+        float hyNow = siriEnabled ? minHalfY
+                : (renderer != null && renderer.halfY > 0.02f ? renderer.halfY : 0.25f);
+        int expectH = Math.round(2 * winSize * 0.9f * hyNow + 2 * dp(24));
+        if (winY0() > 0 && Math.abs(winH - expectH) <= dp(10)) {
+            homeCx = params.x + winW * 0.5f;
+            homeCy = params.y + winH * 0.5f + winY0();          // home 用屏幕坐标
+            Log.i("FloatingBall", "球回到初始状态 → 居中靠顶 (" + params.x + "," + params.y
+                    + ") home=(" + Math.round(homeCx) + "," + Math.round(homeCy) + ")");
+        } else {
+            Log.i("FloatingBall", "球回到初始状态 → 居中靠顶 (" + params.x + "," + params.y
+                    + ") home 暂不记（窗口 " + winW + "x" + winH + " 还没落到 " + expectH + "）");
+        }
     }
 
     private void exitZones() {
@@ -6909,6 +7012,7 @@ public class FloatingBallService extends Service {
                 @Override public void onTapEdit() {
                     if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
                 }
+                @Override public void onInputHeight(int px) { onConvoInputHeight(px); }
             });
             convoBarParams = overlayParams(2, 2,
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
@@ -6937,9 +7041,24 @@ public class FloatingBallService extends Service {
         convoBar.materialize(true, 0);      // 凝聚出现（构造时 alpha=0，不调这个就永远看不见）
     }
 
+    /**
+     * 对话卡里的输入行：字换行了就把这条小窗也拉高（底边不动，往上长）。
+     * 卡片本身的玻璃高度由 measureSiriTargets 的 convoExtra 兜着，所以最多给到 ~2 行。
+     */
+    private void onConvoInputHeight(int px) {
+        if (!convoOpen || convoBar == null || convoBarParams == null || wm == null) return;
+        int minH = Math.round(dp(40));
+        int maxH = Math.round(dp(40) * 2.2f);
+        int want = Math.max(minH, Math.min(maxH, px));
+        if (want == convoBarParams.height) return;
+        convoBarParams.height = want;
+        convoBarParams.y = convoChromeY(want) - Math.round(winY0());
+        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+        Log.i("FloatingBall", "convo: 输入行按行数拉到 " + want + "px");
+    }
+
     /** 输入行贴着方形球的下沿（球被上下拖动后也要跟着走）。 */
-    private int convoChromeY(int h) {
-        int y = Math.round(screenH * 0.70f);
+    private int convoChromeY(int h) {        int y = Math.round(screenH * 0.70f);
         if (glView != null) {
             int[] loc = new int[2];
             glView.getLocationOnScreen(loc);
@@ -7855,6 +7974,13 @@ public class FloatingBallService extends Service {
     private View searchOutside;
     private WindowManager.LayoutParams searchOutsideParams;
     private int sqBarX = Integer.MIN_VALUE, sqBarY, sqBarW, sqBarH;
+    /**
+     * 胶囊当前高度（CSS px / dp）。默认就是演示页的 50；语音识别/长句子把输入框挤满时，
+     * BallSearchBar 会回调 {@link #onSearchInputHeight(int)} 把它按行数调大（最多约 4 行），
+     * 胶囊弹簧跟着长高 —— 这就是用户要的「输入框灵活一点变高让文字换行」。
+     */
+    private float searchCapsH = SQ_CAP_H;
+    private static final float SQ_CAP_H_MAX = SQ_CAP_H * 2.6f;
 
     /** 一维欠阻尼弹簧（半隐式欧拉）—— 与 metaball-search.html 的 class Spring 逐行一致。 */
     private static final class MorphSpring {
@@ -7886,8 +8012,25 @@ public class FloatingBallService extends Service {
     private float[] capsuleRect() {
         float sw = screenW / sqDensity();                       // 屏宽（dp）
         float w = sw < 600f ? sw - SQ_CAP_MARGIN : Math.min(SQ_CAP_MAX_W, sw * 0.62f);
-        float h = sw < 600f ? SQ_CAP_H : 56f;
+        float h = sw < 600f ? searchCapsH : Math.max(searchCapsH, 56f);   // 高度跟着输入框行数走
         return new float[]{ sw / 2f, SQ_EDGE + (sw < 600f ? SQ_CAP_TOP : 96f), w, h };
+    }
+
+    /**
+     * 输入框报上来的「我需要多高」（屏幕像素）→ 胶囊高度目标。
+     * 只在胶囊落定（CAPSULE 阶段）时改弹簧目标；进场/出场途中不动，免得和 morph 打架。
+     */
+    void onSearchInputHeight(int px) {
+        float d = sqDensity();
+        if (d <= 0f) return;
+        float h = Math.max(SQ_CAP_H, Math.min(SQ_CAP_H_MAX, px / d));
+        if (Math.abs(h - searchCapsH) < 0.5f) return;
+        searchCapsH = h;
+        if (!searchActive) return;
+        if (sqPhase == 2) {
+            sqBy.to(searchCapsH * 0.5f);
+            Log.i("FloatingBall", "search: 输入框要 " + px + "px → 胶囊高 " + Math.round(searchCapsH) + "dp");
+        }
     }
 
     /** 演示页的 setMorphSprings()：四个形状弹簧都换成 P.om/P.ze。 */
@@ -7998,6 +8141,7 @@ public class FloatingBallService extends Service {
             renderer.sValid = 1f;
             renderer.sDensity = d;
         }
+        searchCapsH = SQ_CAP_H;                      // 每次进场都从演示页的标准胶囊高开始
         ensureSearchWindows();
         searchArmAt = android.os.SystemClock.uptimeMillis() + 900;
         Log.i("FloatingBall", "search: 进入（" + why + "）小黑球 @(" + Math.round(sqDropCx)
@@ -8125,6 +8269,7 @@ public class FloatingBallService extends Service {
     private void finishSearchClose(long gen) {
         if (gen != searchGen) return;
         Log.i("FloatingBall", "search: 收回到顶部黑边，交还给球");
+        searchCapsH = SQ_CAP_H;                        // 下次进场从标准高度开始
         searchActive = false;                          // 先交还几何通道，下面立刻把窗口收回球窗
         glassFullscreen = false;                       // ★ 面板标志不清，updateSiriWindow 会一直早退 → 球窗停在全屏、样式全变
         if (renderer != null) { renderer.searchMode = false; renderer.sValid = 0f; }
@@ -8226,6 +8371,8 @@ public class FloatingBallService extends Service {
                     if (convoBar != null) convoBar.setHint("发消息…");
                     toast("已移除附件");
                 }
+
+                @Override public void onInputHeight(int px) { onSearchInputHeight(px); }
             });
             // 故意**不带** FLAG_NOT_FOCUSABLE：悬浮窗能拿焦点，EditText 才收得到输入法
             // （审批面板那三个坑同源，见 HANDOFF「自由输入」一节）。

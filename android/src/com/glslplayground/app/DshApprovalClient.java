@@ -574,6 +574,20 @@ public final class DshApprovalClient {
         return current != null && current.eventId != null && current.eventId.startsWith("debug-");
     }
 
+    /**
+     * 调试回路（**文件版**）：把一段假请求 JSON 直接喂进来。
+     *
+     * 为什么还要这一条：HTTP 回路固定在「DSH 端口 + 1」（本机 3081），而那个端口
+     * 经常被 DSH 自己的代理占着 —— 占着就永远喂不进假审批。文件版由
+     * FloatingBallService 从 `files/approval.json` 读出来交给这里，
+     * JSON 格式和 HTTP 那条完全一样（见 handleDebugPayload）。
+     */
+    void feedDebugPayload(String json) {
+        if (!enabled()) return;
+        String err = handleDebugPayload(json);
+        if (err != null) Log.w(TAG, "debug payload rejected: " + err);
+    }
+
     void writeDebugAnswer(final String value) {
         runAsync(new Runnable() {
             @Override public void run() {

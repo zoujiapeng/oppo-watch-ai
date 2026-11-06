@@ -1726,3 +1726,69 @@ DSH 的 `mobile` 工具用的是 `~/.dsh/.agent-presets/mobile-use/mobile_plugin
 
 所以插件里 `action == "swipe"` 不再走 vd 注入：直接 `su -c "input swipe x1 y1 x2 y2 dur"`
 （`/system/bin/input` 已是门控包装器），随后用 vd 的 `observe` 取无障碍树。点击仍走 vd。
+
+
+## 2026-11-06（五）：回球位置 / 输入框换行 / 审批面板压测
+
+用户报的三件事，都在这一轮修掉并实机拍过：
+
+### 1. 「聊天结束缩回胶囊时 dots 和 Siri 波不在启动那个位置」
+
+根因是**「家」（home）被记错**，不是波形本身：
+- `centerBallOnScreen()` 在启动那一帧就记 home，可那会儿窗口还是 `993×993`、
+  `winY0()` 还没量到（=0）→ 记下来 `(541,587)`，而真实球心是 `(541,470)`。
+- 更坑的是 `winY0()` 自己：它用 `loc[1] - params.y` 量 inset，但 `updateViewLayout`
+  之后 `getLocationOnScreen()` 还是**旧位置**，算出来 207 也被当成"状态栏高度"缓存住了。
+
+修法（`FloatingBallService`）：
+- `winY0()`：只接受「量出来的值和状态栏高度差 ≤ 48dp」的测量，否则用
+  `status_bar_height` 兜底；`winInsetY` 不会再被几百像素的假值污染。
+- `centerBallOnScreen()`：只有「窗口已经落到常态最小球窗 + inset 有效」才写 home，
+  否则留空，交给 `auditWindowAgainstBall()` 在窗口落定后补记。
+- `rememberHomeIfMinimal()`：home 统一用**屏幕坐标**（补上 `winY0()`）。
+- `releaseTextHold()`：收字回球时**当场**把圆点偏移 `orbOffset` 放回默认值、
+  把波闸门 `waveGate` 放开 —— 方形态里圆点被沉到"底部动效带"的那一档不能带回来
+  （这就是「dots 没像启动时那样居中」的直接原因）。
+
+实机：启动 `home=(541,470)`、`球顶=246`；开一次对话卡再缩回来，窗口仍是
+`(144,90)`、`球顶=246` —— 和启动完全一致。**最终回复时那道波照旧沉在球底（不居中）**，
+这一条没动。
+
+### 2. 输入框按行数长高（语音识别字多时换行）
+
+- `BallSearchBar`：`EditText` 从单行改成多行（最多 4 行、回车仍=发送），
+  文字换行后回调用 `Listener#onInputHeight(px)` 通知服务侧。
+- `FloatingBallService`：`capsuleRect()` 的高度不再是常量 `SQ_CAP_H`，改成
+  `searchCapsH`；`onSearchInputHeight()` 把它换算成 dp 并重设胶囊弹簧 `sqBy`。
+  多行时输入行左右留白 14dp → 22dp，字不会贴着胶囊的大圆角被啃掉。
+- 对话卡里那条输入行（`onConvoInputHeight`）同样按行数拉高（最多约 2 行，底边不动）。
+
+实机：47 个汉字 → 胶囊从 50dp 长到 120dp，三行完整显示（`glass-capsule-3lines.png`）。
+
+### 3. 审批 / 提问面板压测
+
+- 新增**文件版**调试回路：`files/approval.json` = 一条假请求（JSON 格式同 HTTP 那套）。
+  为什么加：HTTP 回路固定在 `DSH 端口+1`（3081），这个端口在本机被 DSH 自己的代理占着，
+  假审批根本喂不进去。
+- `show-glass` 调试口子现在**连审批面板一起留在抓屏里**（原来只有玻璃，截图里没字，
+  没法验排版）。
+- 布局改成**从玻璃内底边往上摆**：输入行贴内底、选项层贴它上面、文字块最上面；
+  选项超出时在自己的 ScrollView 里滚，并给上下边缘加淡出（不再硬切一半）。
+- 面板竖向位置改成「能放进屏幕就放进屏幕」：请求 y ∈ [状态栏下 8dp, 屏幕底−40dp]；
+  高度上限仍是屏高 66%，所以 8 个选项也不会顶出屏幕。
+- 圆角没变：面板还是那条 `cr = 0.28 × min(halfW, halfH)` 的 squircle。
+
+实机截图：`glass-approval-normal.png`（bash 审批，两个按钮）、
+`glass-approval-8options.png`（8 选项 + 输入框，选项区滚动）。
+⚠️ 这两张是开着 `show-glass` 拍的 —— 玻璃会把自己也抓进背景（半透明重影），
+那是**调试口子的副作用**，正常运行时玻璃被排除在抓屏外，没有重影。
+
+### 调试口子速查（这一轮新增/改动）
+
+```bash
+F=/sdcard/Android/data/com.glslplayground.app/files
+# 喂一条假审批（内容见 DshApprovalClient#handleDebugPayload 的 JSON 字段）
+su -c "echo '{\"event\":\"approval/request\",\"toolName\":\"bash\",\"reason\":\"...\"}' > $F/approval.json"
+# 截图时把玻璃 + 审批面板都留在抓屏里（拍完 touch hide-glass 撤掉）
+su -c "touch $F/show-glass"
+```
