@@ -6050,6 +6050,7 @@ public class FloatingBallService extends Service {
         holdDir = null;
         prefetchZonesData();
         forceHideAllText();                              // 球内文字先藏（和搜索层一致）
+        ensureZoneBaseWindow();                          // ★ 第一帧就把窗口定成原版球窗（793×579），此后整个状态 3 不再改窗口
         computeZones();
         // 六区的**玻璃圆仍由 GL 画**（用户：玻璃要通透），**图标由文字层画**。
         // 关键：窗口不放大（见 computeZones）→ GL 的 surface 不失配（k=1）→ 两者同心。
@@ -6133,6 +6134,61 @@ public class FloatingBallService extends Service {
     private int holdWinH0 = 0;
     /** 进状态 3 时的球窗宽度（六区环形排布要先把窗口撑大，退出时按这个还回去）。 */
     private int holdWinW0 = 0;
+    /** 进状态 3 前的窗口 y / x（退出状态 3 要一模一样还回去）。 */
+    private int holdWinX0 = Integer.MIN_VALUE, holdWinY0v = Integer.MIN_VALUE;
+
+    /**
+     * 进状态 3 的**第一帧**：把玻璃窗一次性定成"原版球窗"（793×579，以球心为中心），
+     * 然后整个状态 3 期间**一个像素都不再动窗口**。
+     *
+     * 为什么必须一次定死：六圆的玻璃由 GL 画（用 renderer.winX/winY）、图标由 zonesView 画
+     * （用它自己的窗口位置）、命中判定用触摸代理窗口的矩形 —— 三套坐标系。状态中途
+     * updateViewLayout 会让它们差一拍：图标离圆、标题行点不到、文字跑到玻璃外面。
+     * 原版（球没缩小那版）之所以一直正常，就是因为它的球窗本来就是 793×579，从头到尾没动过。
+     */
+    private void ensureZoneBaseWindow() {
+        if (wm == null || glView == null || params == null) return;
+        int inset = Math.round(winY0());
+        float base = winSize * 0.9f;
+        int W = Math.min(screenW, Math.max(2, Math.round(2f * base * minHalfX0 + 2f * dp(24))));
+        int H = Math.min(screenH, Math.max(2, Math.round(2f * base * minHalfY0 + 2f * dp(24))));
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        int cx = loc[0] + winW / 2;
+        int cy = loc[1] + winH / 2;
+        int x = Math.max(0, Math.min(Math.max(0, screenW - W), cx - W / 2));
+        int yScreen = Math.max(inset, Math.min(Math.max(inset, screenH - H), cy - H / 2));
+        // 记下"进状态 3 之前"的窗口，退出时原样还回去
+        holdWinW0 = winW;
+        holdWinH0 = winH;
+        holdWinX0 = params.x;
+        holdWinY0v = params.y;
+        params.x = x;
+        params.y = yScreen - inset;
+        params.width = W;
+        params.height = H;
+        winW = W;
+        winH = H;
+        if (renderer != null) {
+            renderer.winPixelW = W;
+            renderer.winPixelH = H;
+            renderer.winX = x;              // ★ 屏幕坐标：GL 画形状时按它换算
+            renderer.winY = yScreen;
+        }
+        markWinGeomChanged();
+        try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();             // surface 跟着钉成 W×H（k=1）
+        if (zonesView != null && zonesParams != null) {
+            zonesParams.x = x;
+            zonesParams.y = yScreen - inset;
+            zonesParams.width = W;
+            zonesParams.height = H;
+            try { wm.updateViewLayout(zonesView, zonesParams); } catch (Throwable ignored) { }
+        }
+        syncBallTouchWindow();
+        Log.i("FloatingBall", "zones: 基准窗口 " + W + "x" + H + " @(" + x + "," + yScreen
+                + ")（原 " + holdWinW0 + "x" + holdWinH0 + "）");
+    }
 
     /** 按住的那一刻就把"工作目录 + 最近目录下的会话"取回来，卡片一出现就是热的。 */
     private void prefetchZonesData() {
@@ -6903,6 +6959,7 @@ public class FloatingBallService extends Service {
         holdDwellProgress = 0f;
         titleHoverAt = 0;
         computeCardRects();
+        if (holdListRect != null) ensureHoldWindow(holdListRect[1], holdListRect[3]);
         if (zonesView != null) {
             zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
                     holdListLocal, -1);
@@ -7054,7 +7111,13 @@ public class FloatingBallService extends Service {
         params.y = newTop - inset;
         params.height = newH;
         winH = newH;
+        if (renderer != null) {
+            renderer.winPixelH = newH;
+            renderer.winY = newTop;
+        }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+        resetGlassBufferFull();
+        syncBallTouchWindow();          // 触摸代理必须盖住整张卡片（否则标题行点不到、回不去）
         // 文字/图标那层也跟着长，否则卡片文字会被覆盖层自己裁掉
         if (zonesView != null && zonesParams != null) {
             zonesParams.y = newTop - inset;
@@ -7349,6 +7412,27 @@ public class FloatingBallService extends Service {
 
     private void exitZones() {
         zonesActive = false;
+        // ★ 状态 3 把窗口定成了原版球窗：退出时按进状态 3 前记下的值**原样**还回去
+        if (holdWinW0 > 0 && holdWinH0 > 0 && wm != null && glView != null && params != null) {
+            params.width = holdWinW0;
+            params.height = holdWinH0;
+            if (holdWinX0 != Integer.MIN_VALUE) params.x = holdWinX0;
+            if (holdWinY0v != Integer.MIN_VALUE) params.y = holdWinY0v;
+            winW = holdWinW0;
+            winH = holdWinH0;
+            if (renderer != null) {
+                renderer.winPixelW = winW;
+                renderer.winPixelH = winH;
+                renderer.winX = params.x;
+                renderer.winY = params.y + Math.round(winY0());
+            }
+            try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+            resetGlassBufferFull();
+        }
+        holdWinW0 = 0;
+        holdWinH0 = 0;
+        holdWinX0 = Integer.MIN_VALUE;
+        holdWinY0v = Integer.MIN_VALUE;
         cardTapMode = false;
         holdWinH0 = 0;          // 下次进状态 3 重新记基准窗口（六区会把它撑大）
         holdWinW0 = 0;
