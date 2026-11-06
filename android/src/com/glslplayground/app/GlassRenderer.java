@@ -816,6 +816,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     @Override public void onSurfaceChanged(GL10 gl, int w, int h) {
         winW = w; winH = h;                    // 窗口尺寸随实际情况更新（Siri 模式窗口会贴合球）
+        // ★ 绘制缓冲尺寸只认 GLSurfaceView 自己报的这个 w/h（它才是真正的 buffer）。
+        //   以前 Service 那边会在切胶囊/开面板时手写 winPixelW=screenW 之类，
+        //   一旦某条收尾路径忘了改回来，k = winW/winPixelW 就一直是错的 ——
+        //   表现就是「球里动画变大、方形态/卡片变小」（k 偏小 → 屏幕像素的东西缩、球几何涨）。
+        winPixelW = w;
+        winPixelH = h;
         GLES20.glViewport(0, 0, w, h);
         // 只有「抓帧尺寸」变了才需要重建 FBO；窗口尺寸在动画里每帧都在变，
         // 那会儿要是每帧删了重建，显存分配会被打爆、动画还会卡在半路上（球被留在放大态）。
