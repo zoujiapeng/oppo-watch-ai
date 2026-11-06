@@ -213,6 +213,21 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     /** 切换背景模式并重置背景初始化（GL 线程调用）。 */
     public void setBgMode(int mode) { bgMode = mode; bgInit = false; gotFrames = 0; }
 
+    /**
+     * 把「背景」整块重灌一遍（GL 线程调用：服务侧用 glView.queueEvent 投递）。
+     *
+     * 为什么需要：抠图是 ping-pong 的 —— 球体那一块**永远保留 bg 里的旧内容**（那是"球后面
+     * 的桌面"，用来避免自采样），只有球外区域每帧刷新。所以只要有一帧 bg 是在
+     * 「抓屏里还含着球自己」的时候灌进去的，球里就会永久卡着那张含球的脏图：
+     * 屏幕上看着就是**折射消失 / 变成一块死玻璃**，等多久都不会自愈。
+     * 抓屏排除（SKIP_SCREENSHOT）重新打上、或者抓帧源重启之后，必须调这个把它冲掉。
+     */
+    public void resetBackground() {
+        bgInit = false;
+        gotFrames = 0;
+        lastSnapMs = 0;
+    }
+
     private final long t0 = System.currentTimeMillis();
 
     private final FloatBuffer quad;
@@ -782,6 +797,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisable(GLES20.GL_BLEND);
         GLES20.glClearColor(0f, 0f, 0f, 0f);
 
+        // 这个回调意味着**换了一套 EGL 上下文**（进程没死但 surface 重建过）：上一套上下文里的
+        // program / buffer / texture 名字全部作废。这里不能 glDelete（那些名字在新上下文里
+        // 可能已经是别人的），只能直接忘掉；FBO 尤其关键 —— 留着旧引用的话，抓屏/抠图会全部
+        // 画到"在新上下文里根本没附件"的 FBO 上，球里就是一片黑（折射消失的另一条路）。
+        capProg = blurProg = compProg = searchProg = zoneProg = maskProg = 0;
+        quadBuf = 0; oesTex = 0;
+        full = null; half = null; half2 = null; bg = null; bg2 = null;
+        bgInit = false; gotFrames = 0; lastSnapMs = 0; frameAvailable = false;
+
         capProg = build(VS, FS_CAP);
         blurProg = build(VS, FS_BLUR);
         compProg = build(VS, FS_COMP);
@@ -816,8 +840,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     @Override public void onSurfaceChanged(GL10 gl, int w, int h) {
         winW = w; winH = h;                    // 窗口尺寸随实际情况更新（Siri 模式窗口会贴合球）
         GLES20.glViewport(0, 0, w, h);
-        full = null; half = null; half2 = null;
-        bg = null; bg2 = null; bgInit = false; lastSnapMs = 0; gotFrames = 0;
+        // ⚠ 这套回调**每次 surface 重建**都会走一遍（音量加隐藏 → 电源键恢复就是这条路），
+        //   所以旧 FBO 必须真的 glDelete 掉、而不是只把引用置 null：以前那样每切一次尺寸
+        //   就漏 5 张全/半分辨率贴图（540×1206 那档 ≈ 9MB），藏几次显存就见底了。
+        releaseFbos();
+        bgInit = false; lastSnapMs = 0; gotFrames = 0;
     }
 
     @Override public void onDrawFrame(GL10 gl) {
@@ -1067,6 +1094,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     // ─────────────────────────── helpers ───────────────────────────
+    /** GL 线程内释放全部离屏缓冲（context 还在的时候调用；换上下文时只能置 null）。 */
+    private void releaseFbos() {
+        if (full != null) { full.release(); full = null; }
+        if (half != null) { half.release(); half = null; }
+        if (half2 != null) { half2.release(); half2 = null; }
+        if (bg != null) { bg.release(); bg = null; }
+        if (bg2 != null) { bg2.release(); bg2 = null; }
+    }
+
     private void ensureFbos() {
         if (full == null) {
             int cw = capW > 0 ? capW : screenW;
@@ -1182,6 +1218,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                     GLES20.GL_TEXTURE_2D, tex, 0);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        }
+
+        void release() {
+            if (fbo != 0) {
+                int[] f = { fbo };
+                GLES20.glDeleteFramebuffers(1, f, 0);
+                fbo = 0;
+            }
+            if (tex != 0) {
+                int[] t = { tex };
+                GLES20.glDeleteTextures(1, t, 0);
+                tex = 0;
+            }
+            w = 0; h = 0;
         }
     }
 }

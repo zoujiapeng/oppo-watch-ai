@@ -120,9 +120,37 @@ su -c 'sh android/assets/pkctl.sh uninstall'
 
 | 症状 | 根因 | 修法 |
 |---|---|---|
-| 球跑久了花屏 / 卡顿 | `GlassRenderer.onSurfaceChanged` 每次窗口尺寸变化都把 5 个 FBO 置空重建，旧 FBO **从不 glDelete** → 每切一次尺寸漏 ~50MB 显存 | 加 `Fbo.release()` / `releaseFbos()` / `releaseGl()`；`onSurfaceChanged` 只在**抓帧尺寸**变了才重建 |
-| 球被留在放大态、球里动画也变大 | 动画期间窗口尺寸每帧都变，上面那个「每帧删/建 FBO」把动画卡在半路 | 同上：尺寸没变就复用；`onSurfaceCreated` 重进时先 `releaseGl()` 再建 |
+| 球跑久了花屏 / 卡顿 | `GlassRenderer.onSurfaceChanged` 每次窗口尺寸变化都把 5 个 FBO 引用置空重建，旧 FBO **从不 glDelete** → 每切一次尺寸（以及每次 surface 重建）漏 ≈9MB 显存 | `Fbo.release()` + `releaseFbos()`，`onSurfaceChanged` 里真的删；`onSurfaceCreated`（= 换了一套 EGL 上下文）只把引用置 null、**不** glDelete（那些名字属于旧上下文，删了可能误删别人的） |
+| 球被留在放大态、球里动画也变大 | 动画期间窗口尺寸每帧都变，上面那个「每帧删/建 FBO」把动画卡在半路 | 尺寸变化不再每帧重建整条管线；surface 重建时 FBO 一律重建（`onSurfaceChanged`） |
+| **音量加隐藏 → 电源键恢复后，球的折射效果消失**（杀进程重开就恢复） | 隐藏走 `glView.setVisibility(INVISIBLE)`，SurfaceView 的 surface 被系统**销毁**（实测 SurfaceFlinger 里 `SurfaceView[]` 图层消失）；恢复时重建 → `getSurfaceControl()` 是**新对象**，打在它上面的 `SKIP_SCREENSHOT` 跟着旧对象一起没了。而 `renderer.selfExcluded` 还是 true（成功一次就没人复位），旧代码 `if (!selfExcluded) apply...` 永远进不去 → 抓屏把球自己拍进去 → 球折射自己的上一帧 | 判据从「打过没有(boolean)」改成「**当前这个 SurfaceControl** 打过没有」（`ensureGlassSkipScreenshot()`）；`SurfaceHolder.Callback` 在 `surfaceCreated` 立刻补打；补打成功后 `GlassRenderer.resetBackground()` 重灌背景（不然标记失效那几帧「含球」的画面会被 ping-pong 永久卡在球里） |
 | 审批面板异常巨大 | 面板在胶囊还开着（窗口=全屏）时被弹出来，几何按全屏窗口算 | 审批延后到胶囊收完（900→1600ms）；胶囊没开成功时绝不往输入法注入触摸 |
+
+### 5.1 「音量加隐藏 → 电源键恢复 → 折射消失」的复现与验证（2026-11-06 实机）
+
+判据（都不需要肉眼）：**球被 `SKIP_SCREENSHOT` 排除时，`screencap` 是拍不到球的**。
+所以「截屏里出现球」＝「抓屏把球自己拍进去了」＝折射在自采样。
+
+```
+# 修复前：音量加隐藏 → 电源键恢复
+FloatingBall: ui: 隐藏全部界面（音量加）
+FloatingBall: ui: 恢复界面（电源键）
+（没有任何一条 skip-screenshot applied）
+$ dumpsys SurfaceFlinger --list | grep 'SurfaceView\[\]'
+Background for SurfaceView[]#47567      ← 新图层（旧的是 #47482）
+SurfaceView[]#47565
+$ screencap -p probe.png                 ← 截屏里**能看见球**（不该看见）＝球在抓屏里
+
+# 修复后：同一套动作
+FloatingBall: glass surface destroyed → surface 级标记作废，等重建后补打
+FloatingBall: glass surface created → 补打 surface 级标记
+FloatingBall: skip-screenshot applied: glass
+FloatingBall: 背景重灌（抓屏排除补打）
+$ screencap -p probe.png                 ← 截屏里看不见球了
+$ touch files/ballshot → files/ball-capture.png  ← 球自己那一帧：桌面文字被折射、边缘有彩边
+```
+
+连续 3 轮「隐藏 → 恢复」：`glass surface created → 补打` ×3、`skip-screenshot applied: glass` ×3，
+无 `GL_INVALID` / `Framebuffer incomplete`，球每一轮都是正常透镜。
 
 ## 6. 实机验证（2026-11-06，MI 10 Ultra / HyperOS 1.0 / Android 13）
 

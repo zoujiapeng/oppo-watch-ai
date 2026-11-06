@@ -1941,3 +1941,58 @@ FloatingBall: ui: 隐藏全部界面（音量加）
    …打开 App…   FloatingBall: ui: 恢复界面（打开 App）
 ```
 截图对比：隐藏后屏幕上连球的玻璃都没有（`show-glass` 开着也拍不到）。
+
+## 2026-11-06（七）：音量加隐藏 → 电源键恢复后「折射消失」的根因与修法
+
+用户报：**音量加把界面藏掉，再长按电源键呼出来，球的折射效果就没了；杀掉 App 重开又正常。**
+
+### 根因：`SKIP_SCREENSHOT` 是打在 **SurfaceControl** 上的，而 surface 会重建
+
+1. 隐藏走的是 `glView.setVisibility(View.INVISIBLE)`（`applyUiHidden`）。
+   SurfaceView 在 `setVisibility` 里会 **销毁自己的子 surface** —— 实测：
+   `dumpsys SurfaceFlinger --list` 里 `SurfaceView[]#47482` 这层直接消失。
+2. 恢复可见时系统**重建** surface：新图层 `SurfaceView[]#47565`，`getSurfaceControl()`
+   返回的是**另一个对象**。`SKIP_SCREENSHOT`（抓屏排除本窗口）打在旧对象上 → 一起没了。
+3. 服务这边 `renderer.selfExcluded` 成功一次就置 true、之后再没人复位，
+   于是 `syncWinPos()` 里那句
+   `if (!renderer.selfExcluded && applySkipScreenshot()) ...` **永远进不去**
+   → 新 surface 再也没被打过标记。
+4. 结果：root 直采（CapLive 540×1170）开始**把球自己也拍进画面**
+   （判据很硬：正常情况下 `screencap` 是拍不到球的，那一刻能拍到 —— 见下图），
+   球把"含自己"的抓屏当折射源 → 折射自己的上一帧 → 屏幕上就是一块死玻璃、折射消失。
+   而且**不会自愈**：bg 是 ping-pong 的，球体那一块永远保留旧内容，脏图一旦灌进去就卡死；
+   只有杀进程重开、重走一遍 `surfaceCreated` → 重新打标记才好（正是用户看到的现象）。
+
+### 修法
+
+| 位置 | 改动 |
+|---|---|
+| `FloatingBallService.ensureGlassSkipScreenshot()` | 判据从「打过没有(boolean)」改成「**当前这个 SurfaceControl** 打过没有」；SurfaceControl 一换对象就补打，并复位 `surfaceTrusted` / `textSkipShotDone` |
+| `FloatingBallService.watchGlassSurface()` | `glView.getHolder().addCallback(...)`：`surfaceCreated` 立刻补打（500ms 的 `winSyncLoop` 只是兜底）；`surfaceDestroyed` 把 surface 级标记全部作废 |
+| `capWatchdog` | 每 2 秒兜底调一次 `ensureGlassSkipScreenshot()`（同时保留受信任 overlay 的补打） |
+| `GlassRenderer.resetBackground()` | 补打成功后重灌背景：标记失效那几帧「含球」的画面必须冲掉，否则被 ping-pong 永久卡在球里 |
+| `GlassRenderer.onSurfaceCreated/onSurfaceChanged` | 换 EGL 上下文时把 program/buffer/texture/FBO 引用全部置 null（**不** glDelete，那些名字属于旧上下文）；`onSurfaceChanged` 里补上真正的 `glDelete`（`Fbo.release()` + `releaseFbos()`），修掉每次 surface 重建漏 ≈9MB 显存 |
+| 调试钩子 `show-glass` / `hide-glass` | 同步维护 `glassMarkedSc`，别让补打逻辑和调试开关打架 |
+
+### 实机验证（MI 10 Ultra / Android 13，root 直采 src=1、低延迟 540×1170）
+
+```
+# 修复前
+FloatingBall: ui: 隐藏全部界面（音量加）
+FloatingBall: ui: 恢复界面（电源键）
+（没有任何 skip-screenshot applied）
+$ screencap -p probe.png          → 截屏里**能看见球** ＝ 球在抓屏里 ＝ 自采样
+
+# 修复后（同一套动作，连续 3 轮）
+FloatingBall: glass surface destroyed → surface 级标记作废，等重建后补打
+FloatingBall: glass surface created → 补打 surface 级标记
+FloatingBall: skip-screenshot applied: glass
+FloatingBall: 背景重灌（抓屏排除补打）
+$ screencap -p probe.png          → 截屏里看不见球了
+$ touch files/ballshot            → files/ball-capture.png：桌面文字被折射、边缘彩边，正常透镜
+```
+3 轮「隐藏→恢复」：补打 ×3、`skip-screenshot applied` ×3，无 `GL_INVALID` / `Framebuffer incomplete`。
+
+对比图（同一部机、同一个钩子拍球自己那一帧）：
+`shots/ball_idle_with_exclusion.png`（正常：透镜） vs `shots/ball_idle_selfsampled.png`（自采样：整颗发白过曝、
+桌面被自己的画面糊掉）—— 平均像素差 25/255，最大 255。

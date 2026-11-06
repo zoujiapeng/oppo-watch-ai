@@ -26,6 +26,7 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.SurfaceControl;
+import android.view.SurfaceHolder;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
@@ -145,6 +146,9 @@ public class FloatingBallService extends Service {
             }
             applyBallTouchability();   // 球看不见 / 看见了 → 代理窗口的触摸能力跟着变
             startPointerDaemon();      // 定向注入守护进程（死了自动拉起）
+            // 兜底：surface 重建过（隐藏→恢复）就把抓屏排除补回去。判据是 SurfaceControl 身份，
+            // 不是"打过一次就永远算打过" —— 见 ensureGlassSkipScreenshot() 里的说明。
+            ensureGlassSkipScreenshot();
             if (!surfaceTrusted) markSurfaceTrusted(glView);   // surface 建好后补打受信任标志
             main.postDelayed(this, CAP_WATCHDOG_MS);
         }
@@ -4994,6 +4998,100 @@ public class FloatingBallService extends Service {
     }
 
     /**
+     * 上一次成功打过 SKIP_SCREENSHOT 的**那个** SurfaceControl。
+     * 判据必须是"当前这个 SurfaceControl 打过没有"，而不是一个 boolean —— 见下面那段。
+     */
+    private SurfaceControl glassMarkedSc = null;
+
+    /**
+     * 玻璃层的抓屏排除：**按当前 SurfaceControl 的身份**判断要不要重打。
+     *
+     * 这修的是用户 2026-11-06 报的「音量加隐藏 → 长按电源键恢复后，球的折射效果消失，
+     * 一杀进程重开又好了」：
+     *   音量加隐藏走 `glView.setVisibility(INVISIBLE)` —— SurfaceView 的 surface 会被系统
+     *   **销毁**（实测 `dumpsys SurfaceFlinger --list` 里那个 `SurfaceView[]` 图层直接消失），
+     *   恢复可见时再**重建**，`getSurfaceControl()` 返回的是**另一个对象**；而
+     *   SKIP_SCREENSHOT 打在 SurfaceControl 上 → 跟着旧对象一起没了。
+     *   同期 `renderer.selfExcluded` 还是 true（成功过一次就没人复位），旧代码那句
+     *   `if (!selfExcluded) apply...` 就永远进不去 → 新 surface 再没被打过标记
+     *   → root 抓屏（CapLive）开始**把球自己也拍进去**（实测：那一刻 `screencap` 能拍到球了，
+     *   正常情况下是拍不到的）→ 球折射自己的上一帧 → 屏幕上就是「玻璃变死、折射消失」，
+     *   而且**不会自愈**：只有杀进程重开、重走一遍 surfaceCreated 才好（正好是用户的描述）。
+     *
+     * 现在：SurfaceControl 换了新对象就补打；补打成功后把背景重灌一次，
+     * 免得标记失效那几帧"含球"的画面被 ping-pong 永久卡在球里。
+     */
+    private void ensureGlassSkipScreenshot() {
+        if (glView == null || renderer == null) return;
+        if (Build.VERSION.SDK_INT < 29) return;
+        SurfaceControl sc = null;
+        try { sc = glView.getSurfaceControl(); } catch (Throwable ignored) { }
+        if (sc == null) return;                       // surface 还没真正建出来，下一拍再来
+        if (sc == glassMarkedSc && renderer.selfExcluded) return;
+        if (glassMarkedSc != null && glassMarkedSc != sc) {
+            // 换了新的 SurfaceControl：受信任 overlay / 文字层那几个标记也一起失效了，全部重打
+            surfaceTrusted = false;
+            textSkipShotDone = false;
+            Log.i("FloatingBall", "glass: surface 换了新 SurfaceControl → 重打抓屏排除");
+        }
+        if (applySkipScreenshot()) {
+            glassMarkedSc = sc;
+            if (!renderer.selfExcluded) {
+                renderer.selfExcluded = true;
+                resetGlassBackground("抓屏排除补打");
+            }
+        } else {
+            // show-glass 调试态（applySkipScreenshot 恒 false）→ 保持"球留在抓屏里"
+            glassMarkedSc = null;
+            renderer.selfExcluded = false;
+        }
+    }
+
+    /** 打上抓屏排除之后把球里的背景重灌一遍（GL 线程）。 */
+    private void resetGlassBackground(final String why) {
+        if (glView == null || renderer == null) return;
+        glView.queueEvent(new Runnable() {
+            @Override public void run() {
+                if (renderer == null) return;
+                renderer.resetBackground();
+                Log.i("FloatingBall", "背景重灌（" + why + "）");
+            }
+        });
+    }
+
+    /**
+     * 盯住玻璃层 surface 的销毁/重建。
+     *
+     * 隐藏（INVISIBLE）时 surface 会被销毁、恢复时重建 —— 这是 surface 级标记（抓屏排除 /
+     * 受信任 overlay）失效的唯一入口。500ms 的 winSyncLoop 是兜底，这里让补打**立刻**发生
+     * （否则恢复后的前几帧还是"含球"的抓屏，背景容易被灌脏）。
+     */
+    private void watchGlassSurface() {
+        if (glView == null) return;
+        try {
+            glView.getHolder().addCallback(new SurfaceHolder.Callback() {
+                @Override public void surfaceCreated(SurfaceHolder holder) {
+                    Log.i("FloatingBall", "glass surface created → 补打 surface 级标记");
+                    main.post(new Runnable() { @Override public void run() {
+                        ensureGlassSkipScreenshot();
+                        if (siriText != null) applyTextSkipScreenshot();
+                    }});
+                }
+                @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) { }
+                @Override public void surfaceDestroyed(SurfaceHolder holder) {
+                    Log.i("FloatingBall", "glass surface destroyed → surface 级标记作废，等重建后补打");
+                    surfaceTrusted = false;
+                    textSkipShotDone = false;
+                    glassMarkedSc = null;
+                    if (renderer != null) renderer.selfExcluded = false;
+                }
+            });
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "watchGlassSurface failed: " + t);
+        }
+    }
+
+    /**
      * 球里那层**文字**也要打 SKIP_SCREENSHOT。
      *
      * 为什么：`applySkipScreenshot()` 只处理了玻璃层（SurfaceView 的 SurfaceControl），
@@ -8747,6 +8845,7 @@ public class FloatingBallService extends Service {
                 try { skipScreenshotOf(glView.getSurfaceControl(), "glass", false); } catch (Throwable ignored) { }
             }
             renderer.selfExcluded = false;
+            glassMarkedSc = null;          // 标记身份也一并作废（否则 ensure 会以为已经打过）
             Log.i("FloatingBall", "debug: 玻璃留在抓屏里");
         }
         File fHideGlass = new File(dir, "hide-glass");
@@ -8754,8 +8853,12 @@ public class FloatingBallService extends Service {
             fHideGlass.delete();
             debugShowGlass = false;
             if (glView != null) {
-                try { skipScreenshotOf(glView.getSurfaceControl(), "glass", true); } catch (Throwable ignored) { }
+                SurfaceControl sc = null;
+                try { sc = glView.getSurfaceControl(); } catch (Throwable ignored) { }
+                try { skipScreenshotOf(sc, "glass", true); } catch (Throwable ignored) { }
                 renderer.selfExcluded = true;
+                glassMarkedSc = sc;
+                resetGlassBackground("hide-glass 钩子");
             }
             Log.i("FloatingBall", "debug: 玻璃重新排除出抓屏");
         }
@@ -9093,6 +9196,9 @@ public class FloatingBallService extends Service {
                 if (new File(gateDir(), "alpha099").exists()) glView.setAlpha(0.99f);
             } catch (Throwable ignored) { }
             makeTouchTransparent(glView);   // 只画不摸（但不用 FLAG_NOT_TOUCHABLE，见上）
+            // 隐藏 → 恢复会销毁/重建 surface，surface 级标记（抓屏排除 / 受信任 overlay）跟着失效。
+            // 这里是"重建后立刻补打"的入口；500ms 的 winSyncLoop 只是兜底。
+            watchGlassSurface();
             setupBallTouchLayer();          // 玻璃层之后立刻加 → 代理窗口处于触摸层最低位
             main.post(gateTick);            // agent 门控（文件通道，root 调试用）
             startGateServer();              // agent 门控主通道：127.0.0.1 socket
@@ -9151,9 +9257,7 @@ public class FloatingBallService extends Service {
 
     /** syncWinPos 里"后面那些与球几何相关"的部分：菜单面板态下也要跑。 */
     private void syncWinPosDone() {
-        if (!renderer.selfExcluded && applySkipScreenshot()) {
-            renderer.selfExcluded = true;
-        }
+        ensureGlassSkipScreenshot();
     }
 
     private void syncWinPos() {
@@ -9179,9 +9283,7 @@ public class FloatingBallService extends Service {
         // （球内显示的是启动那一刻的画面，或者干脆是球自己的上一帧）→ 观感就是「半透明贴纸」
         // 且不随桌面变化。历史上这里挂过一个 float_no_skipshot 调试开关，被留在 true 两次，
         // 两次都被误判成「玻璃被改坏了」。要看球体自带画面请用 files/ballshot 钩子（只截本窗口）。
-        if (!renderer.selfExcluded && applySkipScreenshot()) {
-            renderer.selfExcluded = true;
-        }
+        ensureGlassSkipScreenshot();
         if (siriText != null) applyTextSkipScreenshot();   // 文字层是独立窗口，得单独排除
     }
 
