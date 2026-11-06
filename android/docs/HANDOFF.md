@@ -2128,3 +2128,27 @@ $ touch files/ballshot            → files/ball-capture.png：桌面文字被�
 另外记一笔**设计上就有**的一条：搜索胶囊打开时，有一层全屏「点空白处关掉」
 （`searchOutside`）会吃掉胶囊外面的第一下点击（它只负责关胶囊，不会再传给下面的 App）。
 这不是 bug，但如果用户觉得"胶囊开着的时候点哪都没反应"，那是这一层。
+
+## 2026-11-06（十三）：点输入框弹键盘太慢
+
+用户：「长按电源键触发语音、字已经进输入框了，手点输入框要很久才弹键盘；要快一点，但**只能手动弹**，别自动弹。」
+
+慢在两处（都在我们自己这边，跟输入法无关）：
+
+1. `focusSearchInput()` 里 `postDelayed(..., 240)` —— 手指抬起 240ms 之后才去要焦点；
+2. 更要命的是：`EditText` 的 `setFocusableInTouchMode(true)` 也是在那一刻才设的。
+   在那之前点它**根本不会拿焦点**，所以经常是"点一下没反应、再点一下键盘才出来"。
+
+改法（只动"手点"这条线，**胶囊自己弹出来那条路原样不动**，所以不会变成自动弹键盘）：
+
+- `BallSearchBar`：`input` 的 `ACTION_DOWN` 里就把 `setFocusableInTouchMode(true)` + `requestFocus()`
+  —— 手指一落下就是可编辑状态。
+- 服务侧新增 `focusSearchInputNow()`（`onTapEdit` 用）：立刻 `requestFocus + showSoftInput`，
+  再在 120ms / 320ms 各补一刀 —— 悬浮窗没有 Activity，`showSoftInput` 偶尔被系统吞一次
+  （窗口焦点还没拿到）。补的时候先查 `imm.isActive(input)`，已经连上就什么都不做，不会重复弹。
+- 原 `focusSearchInput()`（`barAutoFocus` 那条：按住说话自动展开）保持 240ms 单次，
+  不主动顶键盘 —— 满足"只能手动弹出"。
+
+实测（Sogou 输入法，`dumpsys input_method` 轮询）：点一下 → 0.25s 内 `mInputShown=true`；
+日志顺序 `search: 单击 → 进入编辑` → IME 起来。之前这一步光是我们自己的延时就有 240ms，
+再叠加"第一次点击只拿到窗口焦点、键盘没弹"的重试，观感就是"点了好久"。

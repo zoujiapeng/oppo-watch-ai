@@ -182,6 +182,22 @@ public class BallSearchBar extends LinearLayout {
         });
         // 窗口宽度/高度变化也会改变换行位置，跟着重新算一次
         input.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> recomputeHeight());
+        // ★ 2026-11-06：手指**一落下**就把它变成"可聚焦 + 立刻要焦点"。
+        //   以前这一步只发生在服务侧 onTapEdit → focusSearchInput()（postDelayed 240ms）里，
+        //   于是"点一下没反应、要再点一下键盘才出来"（用户：「手点击输入框很久才弹出键盘」）。
+        //   这里只做"变成可聚焦 + 要焦点"，不主动弹键盘 —— 弹键盘仍由服务侧那一路负责，
+        //   这样不会变成"一打开胶囊就自动弹键盘"。
+        input.setOnTouchListener(new OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    try {
+                        input.setFocusableInTouchMode(true);
+                        input.requestFocus();
+                    } catch (Throwable ignored) { }
+                }
+                return false;          // 继续走正常分发（onClick / 光标 / 上传）
+            }
+        });
         input.setOnClickListener(new OnClickListener() {
             @Override public void onClick(View v) {
                 keepCaretSolid();

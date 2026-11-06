@@ -8721,7 +8721,7 @@ public class FloatingBallService extends Service {
 
                 @Override public void onTapEdit() {
                     // 状态 2 的单击：进入编辑（弹键盘），文字已在这儿，不用再取一次
-                    focusSearchInput();
+                    focusSearchInputNow();
                     if (searchBar != null) searchBar.focusInput();
                     Log.i("FloatingBall", "search: 单击 → 进入编辑");
                 }
@@ -8819,9 +8819,29 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 「胶囊自己弹出来」时那一路：保持原样（240ms 之后要一次焦点），别变成自动弹键盘。 */
     private void focusSearchInput() {
         main.removeCallbacks(searchFocusTask);
         main.postDelayed(searchFocusTask, 240);   // 抬手之后再要焦点（键盘一弹窗口会动）
+    }
+
+    /**
+     * **手点输入框**那一路：单击就要快。
+     *
+     * 以前单击走的也是 {@link #focusSearchInput()}：手指抬起 240ms 后才把 EditText 变成可聚焦、
+     * 才 `showSoftInput` —— 观感就是"点一下没反应、再点一下键盘才出来"（用户 2026-11-06 报的慢）。
+     * 现在立刻来一次，再在 120ms / 320ms 各补一刀：悬浮窗没有 Activity，`showSoftInput`
+     * 偶尔会被系统吞一次（窗口焦点还没拿到）。补的时候只在"输入法还没连上这个输入框"时才动作，
+     * 已经弹出来就什么都不做 —— 不会重复弹。
+     *
+     * ⚠ 只给"点输入框"用：胶囊自己弹出来（按住说话）那条路仍然只要一次焦点，
+     * 不主动把键盘顶出来（用户要求「只能手动弹出」）。
+     */
+    private void focusSearchInputNow() {
+        main.removeCallbacks(searchFocusTask);
+        main.post(searchFocusTask);
+        main.postDelayed(searchFocusTask, 120);
+        main.postDelayed(searchFocusTask, 320);
     }
 
     private final Runnable searchFocusTask = new Runnable() {
@@ -8831,10 +8851,18 @@ public class FloatingBallService extends Service {
     private void doFocusSearchInput() {
         if (searchBar == null || !searchActive) return;
         try {
+            boolean imeOn = false;
+            try {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                imeOn = imm != null && imm.isActive(searchBar.input());
+            } catch (Throwable ignored) { }
+            if (imeOn && searchBar.input().hasFocus()) return;    // 已经连上输入法了，别重复弹
             searchBar.requestFocus();             // 先让窗口拿焦点
             searchBar.focusInput();               // 再让 EditText 拿焦点
             showSearchIme();
-            Log.i("FloatingBall", "search: 请求输入焦点 winFocus=" + searchBar.hasWindowFocus());
+            Log.i("FloatingBall", "search: 请求输入焦点 winFocus=" + searchBar.hasWindowFocus()
+                    + " imeActive=" + imeOn);
         } catch (Throwable t) {
             Log.w("FloatingBall", "search focus failed: " + t);
         }
