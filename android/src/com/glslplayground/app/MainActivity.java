@@ -149,6 +149,7 @@ public class MainActivity extends Activity {
 
     private void maybeAutoFloat(Intent it) {
         if (it == null || !it.getBooleanExtra("auto_float", false)) return;
+        FloatingBallService.setUiHidden(false, "打开 App");   // 被音量加藏起来时，打开 App 就回来
         it.removeExtra("auto_float");
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
             @Override public void run() { requestFloat(); }

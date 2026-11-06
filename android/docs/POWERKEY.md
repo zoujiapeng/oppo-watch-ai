@@ -5,12 +5,16 @@
 > **第二次长按**：结束「按住说话」→ 输入法出字 → 发到**上一次回话**那个会话（不新建）；
 > 还没有「上一次回话」时才在 `日常使用` 下开一条新的。
 > **音量减键**：只做「结束识别 + 发送」，目标是**全新会话**；球没开就什么都不做 —— **绝不呼球**。
+> **音量加键**：把所有悬浮界面**藏起来**（球/胶囊/对话卡/菜单/四区）；之后**弹审批**、
+> **按电源键**、或者**重新打开 App** 都会让它回来。
 > **不回桌面、不按 HOME** —— 只把球呼出来。
 
 ## 1. 交互与时序
 
 ```
 短按电源键           → 系统自己锁屏（本方案完全不参与）
+按一下音量加键       → 所有悬浮界面隐藏（不呼球、不弹任何东西）
+                       恢复时机：弹审批 / 按电源键 / 打开 App
 按住 ≥0.65s 松手     → 球浮出来 + 打开胶囊(状态2) + 弹输入法 + 给输入法发「按住说话 down」
 松开                 → 无事发生（一直录）
 再按住 ≥0.65s 松手   → 给输入法发「up」→ 输入法把识别结果打进胶囊 → 读出来
@@ -70,6 +74,8 @@ PowerKeyDaemon (root)
   │     │            └─ Activity 里 startForegroundService → FloatingBallService
   │     └─ 正在按住说话 → Intent(pk_hold=stop, pk_send=last) → endPowerHold(false,false)
   │           └─ 发回「上一次回话」那个会话
+  ├─ 音量加按下 → am broadcast VOLUME_HIDE -p com.glslplayground.app（**隐式**）
+  │     └─ 服务里的动态接收器 → applyUiHidden(true)：拆掉胶囊/菜单/四区、隐藏球窗和文字层
   └─ 音量减按下 → am broadcast VOLUME_SEND -p com.glslplayground.app（**隐式**）
         └─ FloatingBallService 里动态注册的接收器（只有球开着时存在）
               ├─ 没在按住说话 → 忽略
@@ -100,6 +106,7 @@ su -c 'sh android/assets/pkctl.sh settings'     # 只改系统设置（关小爱
 su -c 'sh android/assets/pkctl.sh status'
 su -c 'sh android/assets/pkctl.sh test'         # sendevent 模拟一次长按
 su -c 'sh android/assets/pkctl.sh voltest'      # sendevent 模拟按一下音量减
+su -c 'sh android/assets/pkctl.sh volup'        # sendevent 模拟按一下音量加（= 隐藏全部界面）
 su -c 'sh android/assets/pkctl.sh fire-vol'     # 直接发 VOLUME_SEND（不经过 input）
 su -c 'sh android/assets/pkctl.sh uninstall'
 ```

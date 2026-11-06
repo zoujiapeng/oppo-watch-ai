@@ -1912,3 +1912,32 @@ tBlackK = mix(0.92, 0.02, pow(top01, 0.60));   // 原来 0.10 / 1.6 次幂
 | 很长 | 10+ | 一路长到上限（8 行 / 屏高 42%），再长在框里滚 |
 
 也就是说：**高度 = 文字实际高度 + 上下内边距**，一行时正好是原版胶囊，字多了按体积长。
+
+## 2026-11-06（六）：音量加 = 隐藏全部悬浮界面
+
+用户要的：**检测到音量加键就把所有界面藏起来**；之后**弹审批**、**按电源键**、
+或者**用别的方式打开 App** 会恢复。
+
+- `PowerKeyDaemon`：新增 `KEY_VOLUMEUP(115)`，按下即发**隐式**广播
+  `com.glslplayground.app.action.VOLUME_HIDE`（`-p` 限定包名；球没开时没人收，不冷启动 App）。
+- `FloatingBallService`：
+  - 动态接收器（和音量减同一个）多匹配一条 `VOLUME_HIDE` → `applyUiHidden(true, "音量加")`；
+  - `applyUiHidden(true)`：先把胶囊/四区/菜单拆干净（`dropSearchNow` / `exitZones` / `hideMenu`），
+    再 `glView.setVisibility(INVISIBLE)` + 藏文字层 + 藏对话卡输入行；`applyBallTouchability()` 让代理层让开；
+  - 恢复：`glView.VISIBLE`、按需恢复文字层/输入行、`centerBallOnScreen()` + `measureSiriTargets()`；
+  - 藏在状态里时：`armVoice()` / `enterSearchMode()` / `showSiriTextNow()` 都不许自己冒出来。
+- 恢复入口三个：`showApprovalPanel()`（审批来了先 `applyUiHidden(false,"审批弹出")`）、
+  `PowerBallReceiver.handle()`（电源键先 `setUiHidden(false,"电源键")`）、
+  `MainActivity.maybeAutoFloat()`（打开 App → `setUiHidden(false,"打开 App")`）。
+- `pkctl.sh` 新增 `volup`（sendevent 注入 KEY_VOLUMEUP 115）。
+
+实机验证（同一轮）：
+```
+PowerKeyDaemon: 音量加键 → 发 VOLUME_HIDE @/dev/input/event2
+FloatingBall: 收到 VOLUME_HIDE → 隐藏全部界面
+FloatingBall: ui: 隐藏全部界面（音量加）
+   …按电源键…   FloatingBall: ui: 恢复界面（电源键）
+   …弹审批…     FloatingBall: ui: 恢复界面（审批弹出） → approval panel up
+   …打开 App…   FloatingBall: ui: 恢复界面（打开 App）
+```
+截图对比：隐藏后屏幕上连球的玻璃都没有（`show-glass` 开着也拍不到）。

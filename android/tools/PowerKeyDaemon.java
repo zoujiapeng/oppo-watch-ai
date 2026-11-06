@@ -15,6 +15,8 @@
  *     · KEY_VOLUMEDOWN 按下 → 立刻发 VOLUME_SEND
  *       （App 那边：只有正在按住说话时才收麦 + 发到全新会话；球没开就什么都不做，
  *         所以平时按音量减仍然是正常的调音量）
+ *     · KEY_VOLUMEUP 按下   → 立刻发 VOLUME_HIDE
+ *       （App 那边：把所有悬浮界面藏起来；之后弹审批、按电源键、或重新打开 App 会恢复）
  *
  * 用法（root）：
  *   CLASSPATH=/data/local/tmp/powerkey/powerkey-daemon.jar \
@@ -40,6 +42,7 @@ public class PowerKeyDaemon {
     static final int EV_KEY = 0x01;
     static final int KEY_POWER = 116;
     static final int KEY_VOLUMEDOWN = 114;
+    static final int KEY_VOLUMEUP = 115;
     static final int EV_SYN = 0x00;
 
     static final String APP_SVC =
@@ -48,6 +51,7 @@ public class PowerKeyDaemon {
     static final String RECEIVER = APP_PKG + "/.PowerBallReceiver";
     static final String ACTION_POWER = APP_PKG + ".action.POWER_BALL";
     static final String ACTION_VOLUME = APP_PKG + ".action.VOLUME_SEND";
+    static final String ACTION_HIDE = APP_PKG + ".action.VOLUME_HIDE";
 
     // 阈值要比框架自己的长按判定（~500ms）**长**：
     // 短按是锁屏，框架在 500ms 就把这次按键标成 long-press，松手不再锁；
@@ -61,6 +65,8 @@ public class PowerKeyDaemon {
     static volatile boolean fired = false;
     /** 音量减：按下即触发，700ms 内只算一次（多个节点 / 注入节点同时上报时去重）。 */
     static volatile long lastVolFireMs = 0L;
+    /** 音量加：同样按下即触发，700ms 去重。 */
+    static volatile long lastHideFireMs = 0L;
 
     public static void main(String[] args) throws Exception {
         List<String> devs = new ArrayList<String>();
@@ -129,6 +135,12 @@ public class PowerKeyDaemon {
                         else if (value == 0) Log.i(TAG, "KEY_VOLUMEDOWN up @" + dev);
                         continue;
                     }
+                    if (code == KEY_VOLUMEUP) {
+                        // 音量加：按下就发 → App 那边把所有悬浮界面藏起来
+                        if (value == 1) fireHide(dev);
+                        else if (value == 0) Log.i(TAG, "KEY_VOLUMEUP up @" + dev);
+                        continue;
+                    }
                     if (code != KEY_POWER) continue;
                     long now = SystemClock.uptimeMillis();
                     if (value == 1) {                       // 按下
@@ -191,6 +203,28 @@ public class PowerKeyDaemon {
         }
     }
 
+    /**
+     * 音量加键：发 VOLUME_HIDE。
+     *
+     * 语义（App 那边实现）：**把所有悬浮界面藏起来**（球、胶囊、卡片、菜单、四区），
+     * 之后弹审批、按电源键、或重新打开 App 都会让它回来。
+     * 同样发隐式广播（-p 限定包名），球没开的时候没人收 —— 不会把 App 冷启动起来。
+     */
+    static void fireHide(String dev) {
+        long now = SystemClock.uptimeMillis();
+        synchronized (lock) {
+            if (now - lastHideFireMs < 700L) return;
+            lastHideFireMs = now;
+        }
+        Log.i(TAG, "音量加键 → 发 VOLUME_HIDE @" + dev + (dry ? "（dry）" : ""));
+        if (dry) return;
+        try {
+            sh("am broadcast -a " + ACTION_HIDE + " -p " + APP_PKG + " --user 0");
+        } catch (Throwable t) {
+            Log.e(TAG, "隐藏触发失败：" + t);
+        }
+    }
+
     static void sh(String cmd) {
         Process p = null;
         try {
@@ -235,6 +269,7 @@ public class PowerKeyDaemon {
                     String bitmap = line.substring(7).trim();
                     if (hasBit(bitmap, KEY_POWER)) power = true;
                     if (hasBit(bitmap, KEY_VOLUMEDOWN)) volume = true;
+                    if (hasBit(bitmap, KEY_VOLUMEUP)) volume = true;
                 } else if (line.trim().isEmpty()) {
                     addIfWanted(out, name, handlers, power, volume);
                 }

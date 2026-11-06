@@ -10,6 +10,7 @@
 #   su -c 'sh android/assets/pkctl.sh fire-vol'          # 手动发一次「音量减 = 收麦+发新会话」
 #   su -c 'sh android/assets/pkctl.sh test'              # 模拟长按电源键（sendevent 注入 uinput）
 #   su -c 'sh android/assets/pkctl.sh voltest'           # 模拟按一下音量减键（同上）
+#   su -c 'sh android/assets/pkctl.sh volup'             # 模拟按一下音量加键（= 隐藏全部悬浮界面）
 #   su -c 'sh android/assets/pkctl.sh uninstall'
 #
 # 结构（为什么这么分）：
@@ -206,6 +207,15 @@ sim_longpress() {
 }
 
 # 模拟「按一下音量减键」：daemon 只看按下，App 那边只有在按住说话时才动手
+# 音量加 = 隐藏全部悬浮界面（弹审批 / 按电源键 / 打开 App 会恢复）
+sim_volup() {
+  dev=$(uinput_power_dev)
+  [ -n "$dev" ] || { echo "ERR 没找到 uinput 节点（这台机器没法用 sendevent 模拟）"; return 1; }
+  echo "注入 $dev：KEY_VOLUMEUP down/up"
+  sendevent "$dev" 1 115 1; sendevent "$dev" 0 0 0
+  sendevent "$dev" 1 115 0; sendevent "$dev" 0 0 0
+}
+
 sim_volkey() {
   dev=$(uinput_power_dev)
   [ -n "$dev" ] || { echo "ERR 没找到 uinput 节点（这台机器没法用 sendevent 模拟）"; return 1; }
@@ -298,6 +308,7 @@ case "${1:-status}" in
   fire-vol) am broadcast -a "$ACT_VOL" -n "$RECV" --user 0 2>&1 | tail -1 ;;
   test) sim_longpress ;;
   voltest) sim_volkey ;;
+  volup) sim_volup ;;
   uninstall)
     daemon_stop
     rm -f "$DSVC"
@@ -306,7 +317,7 @@ case "${1:-status}" in
     echo "ok 完成；系统设置没有回滚（settings put 三条保持现状）"
     ;;
   *)
-    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | glass-reset | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | fire-vol | test | voltest | uninstall"
+    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | glass-reset | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | fire-vol | test | voltest | volup | uninstall"
     exit 1
     ;;
 esac

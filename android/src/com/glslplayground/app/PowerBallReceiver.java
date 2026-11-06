@@ -35,6 +35,8 @@ public class PowerBallReceiver extends BroadcastReceiver {
     public static final String ACTION = "com.glslplayground.app.action.POWER_BALL";
     /** 音量减键：收麦 + 发到全新会话（由 PowerKeyDaemon 发；不呼球）。 */
     public static final String ACTION_VOLUME_SEND = "com.glslplayground.app.action.VOLUME_SEND";
+    /** 音量加键：把所有悬浮界面藏起来（之后弹审批 / 按电源键 / 打开 App 会恢复）。 */
+    public static final String ACTION_VOLUME_HIDE = "com.glslplayground.app.action.VOLUME_HIDE";
     private static final String TAG = "PowerBall";
 
     @Override public void onReceive(final Context ctx, Intent intent) {
@@ -59,6 +61,8 @@ public class PowerBallReceiver extends BroadcastReceiver {
 
     private void handle(Context app, boolean volumeKey) {
         if (volumeKey) { handleVolumeKey(app); return; }
+        // 电源键 = 「把界面叫回来」：哪怕之前被音量加藏起来了（用户 2026-11-06 定的语义）
+        FloatingBallService.setUiHidden(false, "电源键");
         // ① 已经在「按住说话」→ 这一次是"收麦"，发回上一次回话
         if (FloatingBallService.running && FloatingBallService.powerHoldActive) {
             Log.i(TAG, "第二次长按 → 结束按住说话 → 发回上一次回话");

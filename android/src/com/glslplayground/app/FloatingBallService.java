@@ -1106,6 +1106,7 @@ public class FloatingBallService extends Service {
 
     private void showApprovalPanel(final DshApprovalClient.Request req) {
         if (wm == null || glView == null || renderer == null) return;
+        if (uiHidden) applyUiHidden(false, "审批弹出");   // 被音量加藏起来时，审批来了要自己回来
         if (approvalShown && approvalReq != null && req.eventId != null
                 && req.eventId.equals(approvalReq.eventId)) return;
         // 搜索胶囊开着时不能直接弹面板：两者都靠"同一颗球"的几何，同屏会互相改尺寸。
@@ -3229,7 +3230,7 @@ public class FloatingBallService extends Service {
         //   球的代理触摸层要是还活着，玻璃以外那一圈透明区域会把点击全吃掉
         //   （用户 2026-11-06：「玻璃以外的触碰似乎有受影响」）。
         return searchActive || searchClosing || menuShown || glassFullscreen
-                || approvalShown || approvalClosing;
+                || approvalShown || approvalClosing || uiHidden;
     }
 
     /**
@@ -4112,6 +4113,7 @@ public class FloatingBallService extends Service {
 
     private void showSiriTextNow() {
         if (siriText == null) return;
+        if (uiHidden) return;            // 被音量加藏起来了：文字层也不许自己冒出来（球玻璃是看不见的）
         if (!squareFormActive()) {
             // 圆球态本该不显示内容 —— 但如果**球里确实有字**（比如刚被清空又来了新字、
             // 或用户点了文字导致几何重置），那就把方形态撑起来，而不是把内容藏掉。
@@ -5148,6 +5150,7 @@ public class FloatingBallService extends Service {
 
     /** 弹球就开始听（用户要的初始状态）。已经在听就什么都不做。 */
     private void armVoice(String why) {
+        if (uiHidden) return;                     // 被藏起来了：不自作主张开麦
         if (!voiceAutoEnabled()) return;
         if (!siriEnabled) return;
         if (searchActive || zonesActive || approvalShown || menuShown) return;
@@ -5231,6 +5234,11 @@ public class FloatingBallService extends Service {
         if (volumeSendReceiver != null) return;
         volumeSendReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
+                if (i != null && PowerBallReceiver.ACTION_VOLUME_HIDE.equals(i.getAction())) {
+                    Log.i("FloatingBall", "收到 VOLUME_HIDE → 隐藏全部界面");
+                    applyUiHidden(true, "音量加");
+                    return;
+                }
                 Log.i("FloatingBall", "收到 VOLUME_SEND：holdActive=" + powerHoldActive);
                 if (!powerHoldActive) {
                     Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（不呼球）");
@@ -5242,8 +5250,9 @@ public class FloatingBallService extends Service {
             }
         };
         try {
-            registerReceiver(volumeSendReceiver,
-                    new IntentFilter(PowerBallReceiver.ACTION_VOLUME_SEND));
+            IntentFilter f = new IntentFilter(PowerBallReceiver.ACTION_VOLUME_SEND);
+            f.addAction(PowerBallReceiver.ACTION_VOLUME_HIDE);
+            registerReceiver(volumeSendReceiver, f);
             Log.i("FloatingBall", "音量减广播接收器已注册");
         } catch (Throwable t) {
             Log.w("FloatingBall", "音量减广播接收器注册失败：" + t);
@@ -5255,6 +5264,48 @@ public class FloatingBallService extends Service {
         if (volumeSendReceiver == null) return;
         try { unregisterReceiver(volumeSendReceiver); } catch (Throwable ignored) { }
         volumeSendReceiver = null;
+    }
+
+    // ───────── 音量加：隐藏 / 恢复全部悬浮界面（用户 2026-11-06 要的）─────────
+    /**
+     * true = 所有悬浮界面都被藏起来了（球、胶囊、对话卡、菜单、四区、玻璃）。
+     * 恢复时机（用户定的语义）：
+     *   · 弹审批 / 提问面板 → 自动恢复；
+     *   · 按电源键 → 恢复；
+     *   · 用别的方式打开 App（MainActivity）→ 恢复。
+     */
+    static volatile boolean uiHidden = false;
+
+    static void setUiHidden(final boolean hide, final String why) {
+        final FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() { s.applyUiHidden(hide, why); }
+        });
+    }
+
+    static boolean isUiHidden() { return uiHidden; }
+
+    private void applyUiHidden(boolean hide, String why) {
+        if (uiHidden == hide) return;
+        uiHidden = hide;
+        Log.i("FloatingBall", "ui: " + (hide ? "隐藏全部界面" : "恢复界面") + "（" + why + "）");
+        if (hide) {
+            // 各模式先拆干净（不走动画：藏起来就是立刻消失）
+            try { if (searchActive || searchClosing) dropSearchNow(); } catch (Throwable ignored) { }
+            try { if (zonesActive) exitZones(); } catch (Throwable ignored) { }
+            try { if (menuShown) hideMenu("音量加隐藏"); } catch (Throwable ignored) { }
+            if (glView != null) glView.setVisibility(View.INVISIBLE);
+            if (siriText != null) siriText.setVisibility(View.GONE);
+            if (convoBar != null) convoBar.setVisibility(View.GONE);
+        } else {
+            if (glView != null) glView.setVisibility(View.VISIBLE);
+            if (convoOpen && convoBar != null) convoBar.setVisibility(View.VISIBLE);
+            if (hasBallText()) showSiriTextNow();
+            centerBallOnScreen();
+            if (siriEnabled) measureSiriTargets(siriStr);
+        }
+        applyBallTouchability();          // 藏着的时候代理层也别吃触摸
     }
 
     /** 电源键第一次长按：弹胶囊 + 让输入法开始语音识别。 */
@@ -8145,6 +8196,7 @@ public class FloatingBallService extends Service {
      */
     void enterSearchMode(String why, String text, boolean autoFocus, int purpose) {
         if (searchActive || searchClosing) return;
+        if (uiHidden) { Log.i("FloatingBall", "search: 界面被音量加藏起来了 → 先不弹胶囊"); return; }
         if (approvalShown || approvalClosing) {
             Log.i("FloatingBall", "search: 审批球在屏上，先不开搜索框");
             return;
