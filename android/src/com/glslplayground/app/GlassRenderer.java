@@ -720,7 +720,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
                 (System.currentTimeMillis() - t0) / 1000f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), 0f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), 90f * k);
+        // 圆点环半径用设置里的值（原来写死 90f，设置页怎么调都不生效 → dots 永远那么大）
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"),
+                Math.max(8f, orbRadius) * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), 0f);
