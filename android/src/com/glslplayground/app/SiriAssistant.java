@@ -422,6 +422,8 @@ public final class SiriAssistant {
     // 用户要求「出现文字时停留时间长一点」：安静这么久才把球内文字清掉。
     // 注意球侧 IDLE_SETTLE_MS（几何/动画回初始）要比它略长，让「文字消失 → 球回圆球」有先后。
     private static final long IDLE_CLEAR_MS = 4000;
+    /** 等不到 turn/end 时，安静这么久就当本轮结束（否则球永远停在"思考中"）。 */
+    private static final long STUCK_TURN_MS = 45000;
     /**
      * 「最终回复」安静多久把方形态收回初始圆球。
      *
@@ -455,8 +457,18 @@ public final class SiriAssistant {
             //   所以本轮**还没结束**（没有 turn/end、也不是本 App 自己那条流收完）时：
             //   文字不清、形状不收，一律保持方形态，直到最终回复到来。
             if (!turnSettled) {
-                main.postDelayed(this, 200);
-                return;
+                // ★ 兜底：这条会话可能永远等不到 turn/end（新建会话、流挂到别处、
+                //   DSH 那边回合结束但事件没到我们这条流）。以前就是死等 ——
+                //   于是球永远停在"思考中"：文字不清、形状不收、dots 一直又大又亮。
+                //   只要"安静"（没有新字）超过 STUCK_TURN_MS，就按本轮结束处理。
+                if (quiet >= STUCK_TURN_MS) {
+                    turnSettled = true;
+                    shapeBackSent = false;
+                    Log.w(TAG, "等不到 turn/end（安静 " + quiet + "ms）→ 当本轮已结束处理");
+                } else {
+                    main.postDelayed(this, 200);
+                    return;
+                }
             }
 
             // ① 最终回复：安静 30s → 收形状，**并且同一时刻把文字清掉**
