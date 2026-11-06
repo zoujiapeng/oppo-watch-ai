@@ -2751,6 +2751,8 @@ public class FloatingBallService extends Service {
             float bs = ballIdleScale();
             minHalfX = minHalfX0 * bs;
             minHalfY = minHalfY0 * bs;
+            // 普通球那条渲染路也按同一个系数缩（见 GlassRenderer.idleScale 的说明）
+            if (renderer != null) renderer.idleScale = bs;
             Log.i("FloatingBall", "ball: 常态球 " + Math.round(2f * winSize * 0.9f * minHalfX)
                     + "x" + Math.round(2f * winSize * 0.9f * minHalfY) + "（屏宽 1/"
                     + Math.round(1f / Math.max(0.001f, BALL_W_RATIO)) + "，×" + round3(bs)
@@ -9113,6 +9115,18 @@ public class FloatingBallService extends Service {
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winW, winH);
         renderer.refSize = winSize;
+        // ★ 冷启动第一帧就得是「常态球」尺寸（屏宽 1/3）。
+        //   普通球那条渲染路（siriGeom=false）以前用原版 halfX/halfY → 窗口已经显示、
+        //   Siri 节拍还没接管的那几百毫秒里画的是一颗 661×447 的大球，等 enterSearchMode
+        //   把 Siri 形态打开才"啪"地缩到 360×243（用户报的「刚启动第一次弹出的球还是大的」）。
+        float bootScale = ballIdleScale();
+        renderer.idleScale = bootScale;
+        // 触摸代理/命中判定的 sv* 默认值也是原版大球，这里一并按小球起手，
+        // 免得 siriTick 第一次写值之前 glassHalfW() 把代理窗口撑成 661 那一档。
+        renderer.svHalfX = renderer.halfX * bootScale;
+        renderer.svHalfY = renderer.halfY * bootScale;
+        renderer.svMaster = 1f;
+        renderer.svCorner = renderer.corner;
         // 思考中的流体圆点：环半径(px)/亮度增益，跟着设置页走
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;

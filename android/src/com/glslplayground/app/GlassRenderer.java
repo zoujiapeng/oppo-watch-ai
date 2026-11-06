@@ -33,6 +33,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     // ── Siri 形变模式：由服务端驱动球体几何（弹出/随文字变宽变高/圆角变小）──
     public volatile boolean siriGeom = false;
     public volatile float svMaster = 1f, svHalfX = 0.37f, svHalfY = 0.25f, svCorner = 1f;
+    /**
+     * 常态球（非 Siri 形态）的相对缩放：球宽固定 = 屏宽 × 1/3。
+     * 由服务侧 {@code ballIdleScale()} 算好塞进来（和触摸代理窗口用的是同一个系数）。
+     * 默认 1 = 原版大小；不设的话冷启动头几百毫秒会画出一颗原版大球。
+     */
+    public volatile float idleScale = 1f;
     public volatile float svPosX = 0.5f, svPosY = 0.5f;
     public volatile float svBlackOffset = 0f;   // 黑区整体下移量（Siri 行数越多越负）
     /**
@@ -167,6 +173,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     private int capProg, blurProg, compProg, maskProg;
     private int quadBuf;
     private int oesTex = 0;
+    /** 每次 surface 重建后打一行"第一帧画了多大"，用来验冷启动那颗球是不是直接就是常态尺寸。 */
+    private boolean loggedGeom = false;
     private SurfaceTexture surfaceTexture;
     private final float[] stMatrix = new float[16];
     private volatile boolean frameAvailable = false;
@@ -844,6 +852,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         //   所以旧 FBO 必须真的 glDelete 掉、而不是只把引用置 null：以前那样每切一次尺寸
         //   就漏 5 张全/半分辨率贴图（540×1206 那档 ≈ 9MB），藏几次显存就见底了。
         releaseFbos();
+        loggedGeom = false;
         bgInit = false; lastSnapMs = 0; gotFrames = 0;
     }
 
@@ -884,6 +893,26 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             cx = winW * svPosX;
             cy = winH * (1.0f - svPosY);
             cr = base * svHalfY * svCorner * svMaster;
+        } else if (idleScale > 0.001f && idleScale < 0.999f) {
+            // ★ 常态球（非 Siri 形态）：同样要按「屏宽 1/3」缩 —— 系数由服务侧 ballIdleScale() 给。
+            //
+            // 为什么必须在这儿也乘一次：Siri 形态走的是 sv*（服务侧动画值，里面已经是 1/3 的
+            // minHalfX），而**普通球那条路**以前一直用原版 halfX/halfY（0.37/0.25）。
+            // 于是 App 冷启动的头几百毫秒（窗口已经加上、Siri 节拍还没接管）画出来的是一颗
+            // 661×447 的**大球**，等 enterSearchMode/助手把 Siri 形态打开才"啪"地缩到 360×243
+            // —— 用户看到的就是「刚启动第一次弹出的球还是大的」。
+            // 现在第一帧就已经是常态尺寸，和稳定态完全一致（shapeK 会跟着变成 0.544，
+            // 镜缘/带宽/圆点环半径也一起缩，见下面 shapeK 那段）。
+            hx *= idleScale;
+            hy *= idleScale;
+            cr *= idleScale;
+        }
+
+        if (!loggedGeom) {
+            loggedGeom = true;
+            Log.i(TAG, "first frame geom: 球 " + Math.round(2 * hx) + "x" + Math.round(2 * hy)
+                    + "（hx=" + Math.round(hx) + " hy=" + Math.round(hy) + " siriGeom=" + siriGeom
+                    + " idleScale=" + (Math.round(idleScale * 1000) / 1000f) + " win=" + winW + "x" + winH + "）");
         }
 
         // ★ 2026-11-06：形状相对**原版球**的尺寸比（球缩到屏宽 1/3 时 ≈ 0.544；方形态/卡片 → 1）。

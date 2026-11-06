@@ -2012,3 +2012,49 @@ $ touch files/ballshot            → files/ball-capture.png：桌面文字被�
 
 实测：3000 字长文跑到一半时插话「STOP… reply exactly: GOT IT」，
 两条 follow 流在同一秒收尾、最终正文 6 个字符 —— 长文当场被掐，不是写完再回。
+
+## 2026-11-06（九）：冷启动第一颗球为什么是大的
+
+用户问：**「为什么这个软件刚刚启动时第一次弹出的球还是大的？」**
+
+时间线（冷启动，`logcat` 原文）：
+
+```
+01:51:47.825 setupOverlay src=1 …
+01:51:47.899 window audit(idle): 窗口 993x993 → 793x579（球 661x447 + 2×24dp）   ← 画的是原版大球
+01:51:48.586 电源键：弹胶囊 + 交给输入法语音
+01:51:48.587 ball: 常态球 360x243（屏宽 1/3，×0.544；原版 661x447）              ← 这之后才变小
+```
+
+根因：**「缩到屏宽 1/3」只做在 Siri 那条几何路上**。
+
+- Siri 形态走 `sv*`（服务侧动画值，基准是 `minHalfX = minHalfX0 × ballIdleScale()` 已经缩好的 1/3）；
+- 而**普通球那条路**（`siriGeom=false`）在 `GlassRenderer.onDrawFrame` 里是
+  `hx = base*halfX*master` —— 原版 `halfX=0.37` → 661×447。
+- 冷启动时 `float_siri` 是 false，`applySiriEnabled(true)` 要等到第一次
+  `enterSearchMode`（长按电源键）/出现球内文字才被调用；在那之前窗口已经显示、
+  渲染已经在跑 → 头 0.6~0.7 秒屏幕上是原版大球，然后"啪"地缩成 360×243。
+
+修法：
+
+- `GlassRenderer` 新增 `idleScale`（服务侧 `ballIdleScale()` 算好塞进来），
+  非 Siri 形态下 `hx/hy/cr` 同乘它；`shapeK` 自然变成 0.544，
+  镜缘/带宽/圆点环半径跟着一起缩（和 Siri 那条路一致）。
+- `FloatingBallService.setupOverlay()`：建完 renderer 立刻
+  `renderer.idleScale = ballIdleScale()`，并把 `svHalfX/svHalfY/svMaster` 也按小球起手
+  （它们的默认值 0.37/0.25 是原版大球，会让 `glassHalfW()` 在 siriTick 第一次写值之前
+  把触摸代理撑成 661 那一档）。
+- `applySiriEnabled()` 里同步刷新 `renderer.idleScale`（`minHalfX0` 可能刚更新）。
+- 新增一条一眼能验的日志：`GlassRenderer: first frame geom: 球 360x243（… idleScale=0.544 …）`，
+  每次 surface 重建后打一次。
+
+实测（同一台机，改完冷启动）：
+
+```
+01:54:09.438 window audit(idle): 窗口 993x993 → 793x579（球 661x447 + 2×24dp）   ← 窗口还是原版窗（不变）
+01:54:09.675 first frame geom: 球 360x243（hx=180 hy=122 siriGeom=false idleScale=0.544 win=793x579）
+01:54:10.127 ball: 常态球 360x243 …                                              ← 和稳定态一模一样
+```
+
+窗口尺寸刻意**没动**（还是 793×579 = 原版球窗 + 24dp）：球缩了但窗口不缩，
+六区菜单/聊天卡片都画在这个窗里，缩窗会把它们切掉（见 `auditWindowAgainstBall` 那段注释）。
