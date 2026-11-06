@@ -3525,6 +3525,9 @@ public class FloatingBallService extends Service {
             lastProxySyncAt = now;
             syncBallTouchWindow();     // 数值没变就什么都不做
         }
+        // 输入框里有没有"等着发"的字：电源键/音量减键要据此决定是发字还是开麦。
+        // 必须在主线程算（读 EditText），广播线程只读 volatile。
+        refreshComposerHasText();
         boolean blind = signalBlind;
         if (blind && !nonce.isEmpty() && !nonce.equals(lastAckNonce) && now - lastAckAt >= 200
                 && now - blindStartMs >= GATE_SETTLE_MS) {
@@ -5261,6 +5264,14 @@ public class FloatingBallService extends Service {
             });
             return START_NOT_STICKY;
         }
+        // ★ 2026-11-07：「状态 2 里已经打好的字」也走这条键。
+        //   以前电源键只会开麦、音量减键只会收麦，输入框里的字根本没有出口 —— 按哪个键都不发。
+        if ("text".equals(pkHold)) {
+            main.post(new Runnable() {
+                @Override public void run() { sendComposerByKey(pkNewSession); }
+            });
+            return START_NOT_STICKY;
+        }
         if ("start".equals(pkHold)) {
             main.postDelayed(new Runnable() {
                 @Override public void run() { beginPowerHold(); }
@@ -5791,6 +5802,79 @@ public class FloatingBallService extends Service {
                 closeSearchMode("电源键说话完成");
             }
         }, attempt == 0 ? IME_FIRST_WAIT_MS : 150);
+    }
+
+    /**
+     * 状态 2 胶囊里**用户已经打好、等着发**的字（空串 = 没有）。
+     *
+     * 为什么需要它：以前电源键 / 音量减键只会「开麦 / 收麦」，压根不看输入框里有没有字。
+     * 用户打完字按电源键，走的是 `start`（又开了一次语音，框里的字被盖掉）；
+     * 按音量减键更直接 —— `没在按住说话 → 不做事`。两条都**发不出去**，
+     * 表现就是「字打好了，按哪个键都没反应，也一直没回复」。
+     */
+    String pendingComposerText() {
+        if (powerHoldActive) return "";
+        try {
+            if (searchActive) {
+                String t = searchBar == null ? "" : searchBar.text();
+                return t == null ? "" : t.trim();
+            }
+            // 对话卡下面那条输入框同样算「打好的字」。
+            if (convoOpen && convoBar != null && convoBar.isShown()) {
+                String t = convoBar.text();
+                return t == null ? "" : t.trim();
+            }
+        } catch (Throwable ignored) { }
+        return "";
+    }
+
+    /** 广播接收器（同进程）问一句：现在按键该不该走「发输入框里的字」。 */
+    static boolean hasComposerTextForKeys() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.composerHasText;
+    }
+
+    /**
+     * 主线程每拍刷新一次「输入框里有没有字」。
+     * 广播是后台线程进来的，不能碰 View —— 这里在 UI 线程算好，接收器只读 volatile。
+     */
+    private volatile boolean composerHasText = false;
+
+    private void refreshComposerHasText() {
+        boolean has = false;
+        try {
+            has = !powerHoldActive && !pendingComposerText().isEmpty();
+        } catch (Throwable ignored) { }
+        composerHasText = has;
+    }
+
+    /**
+     * 把胶囊里打好的字发出去（电源键 = 上一次回话 / 音量减键 = 全新会话）。
+     * 发完把胶囊收掉，回答照常流回球里。
+     */
+    private void sendComposerByKey(final boolean toNewSession) {
+        final String text = pendingComposerText();
+        if (text.isEmpty()) {
+            Log.i("FloatingBall", "输入框发送：框里没字 → 忽略");
+            return;
+        }
+        // ① 对话卡下面那条输入框：直接发到这张卡对应的会话（就是「上一次回话」）
+        if (!searchActive && convoOpen && convoSessionId != null && !convoSessionId.isEmpty()) {
+            Log.i("FloatingBall", "输入框发送（对话卡 " + convoSessionId + "）：「" + text + "」");
+            try { if (convoBar != null) convoBar.setText(""); } catch (Throwable ignored) { }
+            convoSend(convoSessionId, text);
+            return;
+        }
+        // ② 状态 2 胶囊：按 pk_send 决定「上一次回话 / 全新会话」
+        if (!searchActive) {
+            Log.i("FloatingBall", "输入框发送：没有可用的输入框 → 忽略");
+            return;
+        }
+        Log.i("FloatingBall", "输入框发送（" + (toNewSession ? "全新会话" : "上一次回话")
+                + "）：「" + text + "」");
+        try { if (searchBar != null) searchBar.setText(""); } catch (Throwable ignored) { }
+        closeSearchMode("按键发送输入框内容");
+        sendTextToHoldSession(text, toNewSession);
     }
 
     /**

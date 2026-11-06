@@ -69,7 +69,15 @@ public class PowerBallReceiver extends BroadcastReceiver {
             tellService(app, "stop", false, "last", "power_key");
             return;
         }
-        // ② 球没开 / 开着但没在按住说话 → 呼出球并开始按住说话
+        // ② 输入框里已经打好字（状态 2 胶囊开着）→ 这一次是「发送」，不是开麦。
+        //    以前这里直接走 ③，又开了一次语音，框里的字被盖掉，用户看到的就是「按了没反应」。
+        if (FloatingBallService.running && FloatingBallService.hasComposerTextForKeys()) {
+            Log.i(TAG, "输入框有字 → 长按电源键 = 发送到上一次回话");
+            FloatingBallService.setUiHidden(false, "电源键发送");
+            tellService(app, "text", false, "last", "power_key");
+            return;
+        }
+        // ③ 球没开 / 开着但没在按住说话 → 呼出球并开始按住说话
         if (FloatingBallService.running) {
             Log.i(TAG, "球已开着 → 直接开始按住说话");
             tellService(app, "start", true, "last", "power_key");
@@ -101,7 +109,14 @@ public class PowerBallReceiver extends BroadcastReceiver {
             return;
         }
         if (!FloatingBallService.powerHoldActive) {
-            Log.i(TAG, "音量减：没在按住说话 → 不做事");
+            // ★ 2026-11-07：没在语音、但输入框里有打好的字 → 发到**全新会话**。
+            //   以前这里直接 return（"没在按住说话 → 不做事"），所以打完字按音量减毫无反应。
+            if (FloatingBallService.hasComposerTextForKeys()) {
+                Log.i(TAG, "音量减：输入框有字 → 发送到全新会话");
+                tellService(app, "text", false, "new", "vol_key");
+                return;
+            }
+            Log.i(TAG, "音量减：没在按住说话、输入框也没字 → 不做事");
             return;
         }
         Log.i(TAG, "音量减 → 结束按住说话 → 发到全新会话");
