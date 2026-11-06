@@ -8027,7 +8027,15 @@ public class FloatingBallService extends Service {
      * 胶囊弹簧跟着长高 —— 这就是用户要的「输入框灵活一点变高让文字换行」。
      */
     private float searchCapsH = SQ_CAP_H;
-    private static final float SQ_CAP_H_MAX = SQ_CAP_H * 2.6f;
+    private static final float SQ_CAP_H_MAX = SQ_CAP_H * 2.6f;   // 旧值，保留兜底
+    /**
+     * 胶囊高度上限（dp）：**按文字体积长**，不再钉死在一个固定值上。
+     * 屏高 42% 或 8 行，哪个先到算哪个；再长的文字在输入框里自己滚。
+     */
+    private float searchCapsHMaxDp() {
+        float d = sqDensity();
+        return Math.min(SQ_CAP_H * 8f, (screenH * 0.42f) / Math.max(1f, d));
+    }
     /** 胶囊开的时候把对话卡的输入行临时藏起来了（关胶囊再放回来）。 */
     private boolean convoBarHiddenBySearch = false;
 
@@ -8072,7 +8080,7 @@ public class FloatingBallService extends Service {
     void onSearchInputHeight(int px) {
         float d = sqDensity();
         if (d <= 0f) return;
-        float h = (px <= 0) ? SQ_CAP_H : Math.max(SQ_CAP_H, Math.min(SQ_CAP_H_MAX, px / d));
+        float h = (px <= 0) ? SQ_CAP_H : Math.max(SQ_CAP_H, Math.min(searchCapsHMaxDp(), px / d));
         if (Math.abs(h - searchCapsH) < 0.5f) return;
         searchCapsH = h;
         // 只有**胶囊已经落定**时才改高度目标 —— 进场/出场动画中途改会让弹簧和窗口打架

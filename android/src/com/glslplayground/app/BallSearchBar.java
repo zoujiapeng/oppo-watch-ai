@@ -11,6 +11,7 @@ import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.text.InputType;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -230,7 +231,10 @@ public class BallSearchBar extends LinearLayout {
         if (lay == null) return 0;
         CharSequence lt = lay.getText();
         if (lt == null || !lt.toString().contentEquals(cs)) return 0;   // 布局没跟上，等下一次回调
-        return lay.getHeight() + input.getTotalPaddingTop() + input.getTotalPaddingBottom()
+        // ⚠️ 必须用 getPaddingTop/Bottom，**不能用 getTotalPadding***：
+        //   TextView.getTotalPaddingTop() 把「文字的竖直偏移」也算进去（CENTER_VERTICAL 时
+        //   视图越高它越大）→ 高度越算越大，形成正反馈（实测一路涨到 900px 还在涨）。
+        return lay.getHeight() + input.getPaddingTop() + input.getPaddingBottom()
                 + Math.round(dp(10));
     }
 
