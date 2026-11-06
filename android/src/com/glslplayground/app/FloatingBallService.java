@@ -5290,6 +5290,33 @@ public class FloatingBallService extends Service {
      * @param fromVolume   这一次是不是音量减键按的（它顺带把那格音量按下去了，要调回来）。
      */
     void endPowerHold(boolean toNewSession, boolean fromVolume) {
+        // ★ 2026-11-06：第二次按得太快（输入法语音还没开起来，powerHoldDown=false）时
+        //   不要再「直接收起」——那会在胶囊还在弹开的半路上把它收回去，屏幕上是半截怪形状
+        //   （用户：「连按两下，输入框显示有问题，再试一次又好了」）。
+        //   现在改成等 down 真正发出去（最多 1.2s）再按正常流程收尾。
+        if (!powerHoldDown && powerHoldActive) {
+            Log.i("FloatingBall", "电源键：第二次按得太快 → 等语音真正开起来再收尾");
+            final boolean toNew = toNewSession;
+            final boolean fromVol = fromVolume;
+            final int[] tries = {0};
+            final Runnable[] wait = new Runnable[1];
+            wait[0] = new Runnable() {
+                @Override public void run() {
+                    if (!powerHoldActive) return;                 // 中途被别的东西收掉了
+                    if (powerHoldDown) { endPowerHold(toNew, fromVol); return; }
+                    if (++tries[0] > 14) {                        // ~1.4s 还没开起来：认了，收起
+                        powerHoldActive = false;
+                        powerHoldDown = false;
+                        Log.i("FloatingBall", "电源键：等不到语音开起来 → 收起胶囊");
+                        closeSearchMode("按住说话取消");
+                        return;
+                    }
+                    main.postDelayed(wait[0], 100);
+                }
+            };
+            main.postDelayed(wait[0], 100);
+            return;
+        }
         final boolean wasDown = powerHoldDown;
         powerHoldActive = false;
         powerHoldDown = false;
@@ -7068,7 +7095,7 @@ public class FloatingBallService extends Service {
         if (!convoOpen || convoBar == null || convoBarParams == null || wm == null) return;
         int minH = Math.round(dp(40));
         int maxH = Math.round(dp(40) * 2.2f);
-        int want = Math.max(minH, Math.min(maxH, px));
+        int want = (px <= 0) ? minH : Math.max(minH, Math.min(maxH, px));
         if (want == convoBarParams.height) return;
         convoBarParams.height = want;
         convoBarParams.y = convoChromeY(want) - Math.round(winY0());
@@ -7190,6 +7217,7 @@ public class FloatingBallService extends Service {
     private void closeConversation(String why) {
         if (!convoOpen) return;
         convoOpen = false;
+        convoBarHiddenBySearch = false;
         Log.i("FloatingBall", "convo: 退出对话（" + why + "）");
         try {
             if (convoBar != null && wm != null) wm.removeView(convoBar);
@@ -8000,6 +8028,8 @@ public class FloatingBallService extends Service {
      */
     private float searchCapsH = SQ_CAP_H;
     private static final float SQ_CAP_H_MAX = SQ_CAP_H * 2.6f;
+    /** 胶囊开的时候把对话卡的输入行临时藏起来了（关胶囊再放回来）。 */
+    private boolean convoBarHiddenBySearch = false;
 
     /** 一维欠阻尼弹簧（半隐式欧拉）—— 与 metaball-search.html 的 class Spring 逐行一致。 */
     private static final class MorphSpring {
@@ -8042,14 +8072,14 @@ public class FloatingBallService extends Service {
     void onSearchInputHeight(int px) {
         float d = sqDensity();
         if (d <= 0f) return;
-        float h = Math.max(SQ_CAP_H, Math.min(SQ_CAP_H_MAX, px / d));
+        float h = (px <= 0) ? SQ_CAP_H : Math.max(SQ_CAP_H, Math.min(SQ_CAP_H_MAX, px / d));
         if (Math.abs(h - searchCapsH) < 0.5f) return;
         searchCapsH = h;
-        if (!searchActive) return;
-        if (sqPhase == 2) {
-            sqBy.to(searchCapsH * 0.5f);
-            Log.i("FloatingBall", "search: 输入框要 " + px + "px → 胶囊高 " + Math.round(searchCapsH) + "dp");
-        }
+        // 只有**胶囊已经落定**时才改高度目标 —— 进场/出场动画中途改会让弹簧和窗口打架
+        //（用户 2026-11-06：电源键连按两下时输入框形状一度变得很怪）。
+        if (!searchActive || !searchOpen) return;
+        sqBy.to(searchCapsH * 0.5f);
+        Log.i("FloatingBall", "search: 输入框要 " + px + "px → 胶囊高 " + Math.round(searchCapsH) + "dp");
     }
 
     /** 演示页的 setMorphSprings()：四个形状弹簧都换成 P.om/P.ze。 */
@@ -8123,6 +8153,13 @@ public class FloatingBallService extends Service {
         sqPhase = 1;
         final long gen = ++searchGen;
         forceHideAllText();                          // 球内文字先藏掉（siriStr 留着，出来还在）
+        // 对话卡开着的时候，卡片自己那条输入行是**另一个窗口**：不藏起来就会和胶囊
+        // 同时出现在屏幕上（用户 2026-11-06：「聊天界面里连按两下，输入框显示有问题」）。
+        if (convoOpen && convoBar != null && convoBar.getVisibility() == View.VISIBLE) {
+            convoBarHiddenBySearch = true;
+            convoBar.setVisibility(View.GONE);
+            Log.i("FloatingBall", "search: 先藏起对话卡的输入行（避免两条输入框叠着）");
+        }
         applyBallTouchability();                     // 搜索期间屏幕归搜索层
         // ── 记下球此刻的屏幕球心（小黑球从这儿出生）── 必须在窗口改尺寸之前算
         int[] loc = new int[2];
@@ -8174,6 +8211,7 @@ public class FloatingBallService extends Service {
     private void sqToCapsule(final long gen) {
         if (gen != searchGen || !searchActive || sqPhase != 1) return;
         sqPhase = 2;
+        searchCapsH = SQ_CAP_H;          // 落定先回到原版高度；有字要换行时再由输入框回调拉高
         sqSetMorphSprings();
         float[] c = capsuleRect();
         sqCx.to(c[0]);
@@ -8289,6 +8327,15 @@ public class FloatingBallService extends Service {
         if (gen != searchGen) return;
         Log.i("FloatingBall", "search: 收回到顶部黑边，交还给球");
         searchCapsH = SQ_CAP_H;                        // 下次进场从标准高度开始
+        if (convoBarHiddenBySearch) {                  // 对话卡的输入行放回来
+            convoBarHiddenBySearch = false;
+            if (convoOpen && convoBar != null) {
+                convoBar.setVisibility(View.VISIBLE);
+                convoBar.resetMaterial();
+                convoBar.materialize(true, 0);
+                Log.i("FloatingBall", "search: 收回 → 对话卡输入行回来");
+            }
+        }
         searchActive = false;                          // 先交还几何通道，下面立刻把窗口收回球窗
         glassFullscreen = false;                       // ★ 面板标志不清，updateSiriWindow 会一直早退 → 球窗停在全屏、样式全变
         if (renderer != null) { renderer.searchMode = false; renderer.sValid = 0f; }

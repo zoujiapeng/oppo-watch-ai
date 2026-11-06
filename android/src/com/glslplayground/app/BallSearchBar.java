@@ -220,13 +220,18 @@ public class BallSearchBar extends LinearLayout {
      * 下限 = 常态胶囊高（50dp）、上限 ≈ 4 行 —— 再多就在框里滚（EditText 自己会滚）。
      */
     private int desiredHeightPx() {
-        int min = Math.round(dp(50));
+        // 返回「这段文字要多高」；**0 = 没有额外要求**（空文本 / 布局还没跟上），
+        // 由调用方决定最小高度（搜索胶囊 50dp、对话卡输入行 40dp）。
+        // 之前这里返回固定下限，对话卡那条 40dp 的输入行一没字就被拉到 138px
+        //（用户 2026-11-06：「输入框一开始就这么高」）。
+        CharSequence cs = input.getText();
+        if (cs == null || cs.length() == 0) return 0;
         android.text.Layout lay = input.getLayout();
-        if (lay == null) return min;
-        int want = lay.getHeight() + input.getTotalPaddingTop() + input.getTotalPaddingBottom()
+        if (lay == null) return 0;
+        CharSequence lt = lay.getText();
+        if (lt == null || !lt.toString().contentEquals(cs)) return 0;   // 布局没跟上，等下一次回调
+        return lay.getHeight() + input.getTotalPaddingTop() + input.getTotalPaddingBottom()
                 + Math.round(dp(10));
-        int cap = Math.round(dp(50) * 2.4f);     // ≈ 4 行（16sp 字号）
-        return Math.min(cap, Math.max(min, want));
     }
 
     public void setListener(Listener l) { this.listener = l; }
