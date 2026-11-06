@@ -1815,3 +1815,24 @@ geom: siri=true sv=0.471x0.812 corner=0.280 -> hx/hy/cr=421/725/203
 
 实机：`k` 回到 1.00、形状 `hx/hy/cr=421/725/203`，四角是完整的 203px squircle
 （`glass-approval-big-fixed.png` 是球体自己那一帧，没有 show-glass 自采样重影）。
+
+### 3.2 补：按钮/选项跑到玻璃外面 + 玻璃以外的触摸被吃（2026-11-06 三修）
+
+现象：内容多的审批，选项/输入行落到大玻璃**下面**去了；而且玻璃外面那圈（仍在 973×1489 的
+球窗里）点不动。
+
+两个原因，都是这次改布局时带出来的：
+
+1. **坐标系少了 inset**：`updateApprovalLayout()` 里把「从玻璃内底边往上摆」改成了用屏幕坐标算，
+   但写进 `WindowManager.LayoutParams` 时要减掉系统 inset（`sysOffset = winYnow - params.y`，
+   本机 90px）。原来只有 `textY` 减了，倒着摆之后 `actY/inY/textY` 全都漏 → 整块内容下移 90px，
+   于是输入行/最后几个选项跑出玻璃。现在三个 y 统一 `- sysOffset`。
+2. **面板期间球层没让开**：`overlayTouchState()` 只算了 搜索/菜单/全屏玻璃，**没算审批面板** →
+   球的触摸代理（973×1489 大盒子）继续接手势，玻璃外那圈透明区域把点击全吃掉。
+   现在把 `approvalShown || approvalClosing` 也算进去，并在 `showApprovalPanel()` /
+   `hideApprovalPanel()` 里显式 `applyBallTouchability()`。
+
+实机（dumpsys window 实测，面板 973×1489 @[54,112]-[1027,1601]，玻璃 [120,178]-[961,1534]）：
+- 文字块 `[246,276]-[835,631]`、选项层 `[239,677]-[843,1329]`、输入行 `[305,1375]-[776,1508]` —— 全在玻璃内
+- 触摸代理已变成 `NOT_TOUCHABLE` + 2×2 空区域；玻璃窗本身一直是 `touchableRegion=empty`
+- 截图：`glass-approval-content-inside.png`（9 选项 + 长说明，全部落在玻璃里，最后一行淡出）

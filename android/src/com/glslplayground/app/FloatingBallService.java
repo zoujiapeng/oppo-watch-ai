@@ -1135,6 +1135,7 @@ public class FloatingBallService extends Service {
         apOptGap = Math.round(AP_OPT_GAP_DP * d);
 
         approvalShown = true;
+        applyBallTouchability();          // 面板期间球层让开：玻璃外面那一圈别再吃点击
         // 面板模式：黑区不是死黑 —— 底部透强调色并带光晕（审批=暖红，提问=蓝）
         if (renderer != null) {
             boolean appr = req.isApproval();
@@ -1168,6 +1169,7 @@ public class FloatingBallService extends Service {
         approvalShown = false;
         approvalClosing = true;
         approvalReq = null;
+        applyBallTouchability();          // 交还给球：代理层重新接管球上的手势
         if (renderer != null) renderer.panelMode = 0f;   // 交还给普通球（纯黑区）
         hideApprovalWindows();
         // 收球动画：这一次才允许动 Siri 那套目标（面板已不再需要它们）
@@ -2216,14 +2218,20 @@ public class FloatingBallService extends Service {
         //   三者永远在玻璃里；选项超出就在自己的 ScrollView 里滚（高度已在
         //   applyApprovalGeometry 里按玻璃内高夹过）。
         float pad = dp(10);
-        float glassBottom = ballTop + hypx * 2f - pad;
-        int inY = (apInputH > 0) ? Math.round(glassBottom - apInputH) : 0;
-        float actBottom = (apInputH > 0) ? (glassBottom - apInputH - apGap) : glassBottom;
-        int actY = Math.round(actBottom - apActH);
-        int textY = Math.round(actY - apGap - apTextH);
+        float glassBottom = ballTop + hypx * 2f - pad;          // 玻璃内底边（屏幕 y）
         float topLimit = ballTop + pad;
         if (apImeUp) topLimit = ballTop + dp(4);      // 键盘弹起：内容顶到球顶，尽量离键盘远一点
-        if (textY < topLimit) textY = Math.round(topLimit);
+        float inTop = (apInputH > 0) ? (glassBottom - apInputH) : 0f;
+        float actBottom = (apInputH > 0) ? (inTop - apGap) : glassBottom;
+        float actTop = actBottom - apActH;
+        float textTop = actTop - apGap - apTextH;
+        if (textTop < topLimit) textTop = topLimit;
+        // ★ 2026-11-06：上面算的全是**屏幕坐标**，写进 WindowManager.LayoutParams 必须减 inset
+        //   （原来 textY 有减 sysOffset，我改成倒着摆的时候漏了 → 文字/选项/输入行整体下移 90px，
+        //    看着就是「按钮超出大玻璃、最下面被切掉」）。
+        int textY = Math.round(textTop - sysOffset);
+        int actY = Math.round(actTop - sysOffset);
+        int inY = (apInputH > 0) ? Math.round(inTop - sysOffset) : 0;
         int textX = Math.round(winXnow + winW / 2f - apTextW / 2f);
         int actX = Math.round(winXnow + winW / 2f - apActW / 2f);
 
@@ -3217,7 +3225,11 @@ public class FloatingBallService extends Service {
 
     /** 搜索胶囊 / 卡片菜单 / 整屏玻璃：这几态本来就不该由代理窗口接手势。 */
     private boolean overlayTouchState() {
-        return searchActive || searchClosing || menuShown || glassFullscreen;
+        // ★ 审批/提问面板也必须算进来：面板期间球窗是 973×1489 的大盒子，
+        //   球的代理触摸层要是还活着，玻璃以外那一圈透明区域会把点击全吃掉
+        //   （用户 2026-11-06：「玻璃以外的触碰似乎有受影响」）。
+        return searchActive || searchClosing || menuShown || glassFullscreen
+                || approvalShown || approvalClosing;
     }
 
     /**
