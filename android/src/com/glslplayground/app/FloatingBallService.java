@@ -3093,14 +3093,38 @@ public class FloatingBallService extends Service {
         boolean ballLayer = (v == ballTouch || v == siriTouch);
         if (blindNow || (ballBlindNow && ballLayer)) { out.setEmpty(); return; }
         if (v == ballTouch && roundishOk(w, h)) {
+            // ★ 2026-11-06：可触摸区只给**球本身**，不给整个代理窗口。
+            //   代理窗口 = 球 + 2×12dp 的 pad（拖动时好抓），以前这里按**窗口**尺寸取胶囊，
+            //   于是球周围那一圈 12dp 落在"窗口的可触摸区里、但 inBallAtRaw() 又判定不在球上"
+            //   —— 手指按下去没人处理，事件也不会派发给下面的窗口 → 就是用户报的
+            //   「球附近那片屏幕点不动」（看他说的方位：球的左上角那一片，正是这圈边）。
+            //   现在区域按玻璃的真实半宽/半高（glassHalfW/H，和渲染同一套公式）算，
+            //   多出来的 pad 一律不吃触摸，直接穿到下面的 App。
+            float bhx = Math.max(1f, glassHalfW());
+            float bhy = Math.max(1f, glassHalfH());
+            bhx = Math.min(bhx, w * 0.5f);
+            bhy = Math.min(bhy, h * 0.5f);
+            if (bhx < 4f || bhy < 4f) { out.set(0, 0, w, h); return; }   // 量不到球：退回整块
+            float r = Math.min(bhx, bhy) * ballCornerRatio();
+            float l = w * 0.5f - bhx, t = h * 0.5f - bhy;
             android.graphics.Path p = new android.graphics.Path();
-            float r = Math.min(w, h) / 2f;
-            p.addRoundRect(new android.graphics.RectF(0, 0, w, h), r, r,
+            p.addRoundRect(new android.graphics.RectF(l, t, l + 2f * bhx, t + 2f * bhy), r, r,
                     android.graphics.Path.Direction.CW);
             if (!out.setPath(p, new android.graphics.Region(0, 0, w, h))) out.set(0, 0, w, h);
             return;
         }
         out.set(0, 0, w, h);
+    }
+
+    /**
+     * 球（液态玻璃）当前的圆角比例：1 = 胶囊（常态球就是它），0 = 直角。
+     * 触摸区域要和渲染出来的形状对得上 —— 用胶囊区域去兜一个方角卡片，
+     * 四个角就成了"看得见点不动"；反过来用矩形兜胶囊，四角又会变成死区。
+     */
+    private float ballCornerRatio() {
+        if (siriEnabled && aMaster > 0.02f) return Math.max(0f, Math.min(1f, aCorner));
+        if (renderer != null) return Math.max(0f, Math.min(1f, renderer.corner));
+        return 1f;
     }
 
     /** 只有"球就是圆的/胶囊"的形态才用圆角区域；大方框、卡片、菜单一律整矩形。 */

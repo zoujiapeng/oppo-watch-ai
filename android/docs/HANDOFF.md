@@ -2058,3 +2058,32 @@ $ touch files/ballshot            → files/ball-capture.png：桌面文字被�
 
 窗口尺寸刻意**没动**（还是 793×579 = 原版球窗 + 24dp）：球缩了但窗口不缩，
 六区菜单/聊天卡片都画在这个窗里，缩窗会把它们切掉（见 `auditWindowAgainstBall` 那段注释）。
+
+## 2026-11-06（十）：球「附近那片屏幕点不动」——代理窗口的可触摸区比球大一圈
+
+用户报：**球周围（尤其球左上角方向）那片屏幕点不动**。
+
+根因在触摸代理窗口（`ballTouch`）的**可触摸区**：
+
+- 代理窗口的大小 = 球 + 2×12dp 的 pad（`syncBallTouchWindow`，为了拖动好抓）；
+- 而 `buildTouchRegion()` 以前是拿**窗口尺寸**做胶囊区域（`r = min(w,h)/2`），
+  于是整个窗口（球 + 那一圈 pad）都算"可触摸"；
+- 手指落在这圈 pad 上时，事件**派给了代理窗口**，可 `onTouch` 里
+  `if (!inBallAtRaw(...)) return false;` —— 事件就被丢掉了。
+  Android 的手势一旦确定了目标窗口，**不会**再转发给下面的 App ——
+  所以这一圈是"看得见、点不动"的死区。
+
+实测（`dumpsys input`，球的玻璃 360×243）：
+
+```
+修前：FRAME [328,405][754,714]   REGION bbox x 328..754 (426) y 405..714 (309)   ← 球 + 一圈 pad
+修后：FRAME [328,405][754,714]   REGION bbox x 361..721 (360) y 438..681 (243)   ← 正好是球
+```
+
+修法（`FloatingBallService.buildTouchRegion`）：`v == ballTouch` 且形态是圆的/胶囊时，
+区域按 `glassHalfW()/glassHalfH()`（和渲染同一套公式）算内切圆角矩形，圆角用
+`ballCornerRatio()`（常态球 corner=1 → 胶囊；方角卡片 → 矩形），居中对齐；
+`pad` 那一圈直接**不吃触摸**、穿到下面的 App。
+`glassHalfW/H` 量不到（≤4px）时退回整块矩形，不会把球自己锁死。
+
+其余形态不受影响：搜索胶囊 / 卡片菜单 / 六区 / 审批面板（`roundishOk()` 为 false）仍是整矩形。
