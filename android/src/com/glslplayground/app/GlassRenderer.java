@@ -993,9 +993,24 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uHalf"), hx * k, hy * k);
         GLES20.glUniform2f(GLES20.glGetUniformLocation(compProg, "uCenter"), cx, cy);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uCorner"), cr * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"), refraction * master * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"), band * master * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), master * k);
+        // ★ 2026-11-06：折射是**几何**量，必须跟着形状大小走（liquid-glass 原版的逻辑就是
+        //   uBand/uRefraction = P.band/P.refraction × P.master —— master 一变，形状和镜缘一起变）。
+        //   球缩到屏宽 1/3 后 master 没变，镜缘却还是原来那 170/200 像素：
+        //   band(170) 比球半高(121)还大 → 整颗球都落在镜缘斜坡里，位移梯度在正中翻向，
+        //   屏幕上就是中间一道折痕（用户："缩小的中间都看到折痕了怪怪的"）。
+        //   这里按「当前形状 ÷ 原版球」再补一个系数，镜缘重新变成"边缘一圈、内部零位移平台"。
+        //   方形态/卡片比原版球大 → 系数夹到 1，聊天卡片一点没变。
+        float shapeK = 1f;
+        {
+            float refHx = Math.max(1e-3f, base * halfX * Math.max(1e-3f, master));
+            float refHy = Math.max(1e-3f, base * halfY * Math.max(1e-3f, master));
+            shapeK = Math.max(0.05f, Math.min(1f, Math.min(hx / refHx, hy / refHy)));
+        }
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"),
+                refraction * master * shapeK * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"),
+                band * master * shapeK * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uScale"), master * shapeK * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDome"), dome);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uAberration"), aberration);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uTopDarken"), topDarken);
