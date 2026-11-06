@@ -1792,3 +1792,26 @@ su -c "echo '{\"event\":\"approval/request\",\"toolName\":\"bash\",\"reason\":\"
 # 截图时把玻璃 + 审批面板都留在抓屏里（拍完 touch hide-glass 撤掉）
 su -c "touch $F/show-glass"
 ```
+
+### 3.1 补：内容一多，窗体过大 + 圆角被挤成方形（2026-11-06 二修）
+
+用户报：审批/提问内容多的时候窗体太大，边缘圆角像是被挤成了方形。
+
+根因（实测日志抓到的）不是圆角公式，是**渲染比例算错**：
+
+```
+geom: siri=true sv=0.471x0.812 corner=0.280 -> hx/hy/cr=421/725/203
+      win=974x1583 buf=793x579 k=1.23 ref=993
+```
+
+`k = 绘制缓冲 / 窗口像素`。`updateApprovalWindow()` 改了窗口尺寸，却**没把新的窗口尺寸
+写给渲染器**（`renderer.winPixelW/H` 还停在圆球那次的 `793x579`）→ `k` 被算成 `1.23`，
+整块形状被放大 23%，四角被窗口边界直接切平 → 看着就是"圆角变方了、窗体变大了"。
+
+修法（`FloatingBallService#updateApprovalWindow`）：
+- 每次算完 `W/H` 立刻 `renderer.winPixelW = W; renderer.winPixelH = H;`（窗口尺寸，不是缓冲尺寸）
+- 顺手 `setGlassBufferScale(W*H)`：面板大时按 0.6 左右降分辨率画
+- 面板高度上限 68% → **58% 屏高**（9 个选项那档不再顶满屏幕）
+
+实机：`k` 回到 1.00、形状 `hx/hy/cr=421/725/203`，四角是完整的 203px squircle
+（`glass-approval-big-fixed.png` 是球体自己那一帧，没有 show-glass 自采样重影）。

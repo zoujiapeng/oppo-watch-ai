@@ -1912,7 +1912,8 @@ public class FloatingBallService extends Service {
         float maxHalfW = Math.min(screenW * 0.92f / 2f, siriMaxBallW() / 2f);
         // ★ 2026-11-06：高度上限从「屏高 68%」收到「屏幕里真能放下」——
         //   8 个选项那种面板原来会长到快顶满屏幕，最后一个选项被顶出玻璃。
-        float maxHalfH = Math.min(screenH * 0.62f,
+        // 高度上限 58% 屏高（原来 68%，9 个选项时几乎顶满整屏 —— 用户说「窗体过大」）。
+        float maxHalfH = Math.min(screenH * 0.58f,
                 screenH - winY0() - dp(28)) / 2f;
         halfW = Math.min(halfW, maxHalfW);
         halfH = Math.min(halfH, maxHalfH);
@@ -2169,11 +2170,17 @@ public class FloatingBallService extends Service {
         float hh = aprHalfY > 0f ? aprHalfY : minHalfY;
         int W = Math.min(screenW, Math.max(2, Math.round(2 * (base * hw + m))));
         int H = Math.min(screenH, Math.max(2, Math.round(2 * (base * hh + m))));
+        // ★ 2026-11-06：**必须**把「窗口尺寸」写给渲染器。
+        //   k = 绘制缓冲 / 窗口像素；这个字段停在上一次小球窗口（793x579）时，
+        //   k 会算成 1.23 —— 整块形状被放大 23%、四角被窗口切平（用户报的
+        //   「内容一多、窗体一大，圆角就被挤成方形」就是这么来的）。
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
         if (W == winW && H == winH) return;
         float bcx = params.x + winW * 0.5f;
         float bcy = params.y + winH * 0.5f;
         winW = W; winH = H;
         params.width = W; params.height = H;
+        setGlassBufferScale((long) W * H);      // 面板很大时降分辨率画（球的 0.3 模糊度本来就几乎不糊）
         params.x = Math.round(bcx - W * 0.5f);
         params.y = Math.round(bcy - H * 0.5f);
         params.x = Math.max(-W / 2, Math.min(screenW - W / 2, params.x));
