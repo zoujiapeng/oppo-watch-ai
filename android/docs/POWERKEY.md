@@ -140,42 +140,49 @@ FloatingBall: send: 新会话 cwd=…/日常使用 preset=mobile-use model=deeps
 ball window -> 938x579 → … → 795x579（回到球，不留全屏窗口）
 ```
 
-### 6.1 本分支（「上一次回话」+ 音量减）的验收 —— **尚未实机跑**
+### 6.1 本分支（「上一次回话」+ 音量减）的实机验证（2026-11-06 20:48，同机 MI 10 Ultra / HyperOS 1.0）
 
-只做了编译验证：`bash android/build.sh` 通过、`bash android/tools/build-powerkey-daemon.sh` 通过、
-`aapt2 dump xmltree .build/glsl-playground.apk` 里能看到 `VOLUME_SEND` 过滤器和
-`MODIFY_AUDIO_SETTINGS`。真机上按下面跑一遍再做结论：
+做法：`pm install -r glsl-playground.apk` + `pkctl.sh setup android/assets/powerkey-daemon.jar`，
+再用 `am broadcast POWER_BALL`（等价第一次长按）+ `input text` 往胶囊里塞一句 +
+`pkctl.sh voltest`（sendevent 注入真实音量减键，走隐式广播→服务内动态接收器）驱动。
+**真实按键语音识别没测**（要人说话），但「收麦→取字→发哪儿」这条链是通的。
 
 ```
-# 装机
-su -c 'sh android/assets/pkctl.sh setup android/assets/powerkey-daemon.jar'
-adb install -r glsl-playground.apk      # 或 pkctl.sh setup <jar> <apk>
+# ① 音量减：按住说话中间按一下 → 发到全新会话
+FloatingBall: 电源键：输入法语音 down
+PowerKeyDaemon: 音量减键 → 发 VOLUME_SEND @/dev/input/event2
+FloatingBall: 收到 VOLUME_SEND：holdActive=true
+FloatingBall: 音量减 → 结束按住说话 → 发到全新会话
+FloatingBall: 音量减键：输入法语音 up → 等出字
+FloatingBall: 电源键：输入法结果 = 「testvol1」
+FloatingBall: 音量减键：发到全新会话（cwd=/data/data/com.termux/files/home/日常使用）
+FloatingBall: send: 新会话 cwd=…/日常使用 preset=mobile-use model=deepseek-flash/off perm=danger-full-access
+FloatingBall: search: 退出（电源键说话完成）          ← 胶囊收起，球回初始态
+#   → ~/.dsh/sessions/…日常使用/session-bfa3effe-…  ← 真的一条新会话，消息落库
 
-# 1) 第一次长按 + 第二次长按 → 应该「续上」同一条会话（不是新建）
-logcat -c; 长按电源键 ≥0.65s …；再长按一次
-#   预期：FloatingBall: 电源键：回到上一次回话 session-xxxx
-#        FloatingBall: send: 发到已有会话 session-xxxx（…）
-#   反例：出现 "send: 新会话 cwd=…" 就说明 last_session_id 没记上
+# ② 再走一次电源键收尾 → 发回「上一次回话」（不是新建）
+PowerBall: 第二次长按 → 结束按住说话 → 发回上一次回话
+FloatingBall: 电源键：输入法结果 = 「testlast1」
+FloatingBall: 电源键：回到上一次回话 session-bfa3effe-0ae2-481d-9fef-bd5d2a7278b6
+FloatingBall: send: 发到已有会话 session-bfa3effe-0ae2-481d-9fef-bd5d2a7278b6（null）
+#   → 同一条会话里 testvol1 / testlast1 都在；这一轮没有再出现 "send: 新会话"
 
-# 2) 音量减：按住说话中间按一下音量减 → 发到全新会话
-#    （真机按键走隐式广播 → 服务里的动态接收器；下面这行是等价的手动触发）
-su -c 'sh android/assets/pkctl.sh fire-vol'
-#   预期：FloatingBall: 收到 VOLUME_SEND：holdActive=true
-#        FloatingBall: 音量减 → 结束按住说话 → 发到全新会话
-#        FloatingBall: 音量减键：输入法语音 up → 等出字
-#        FloatingBall: 音量减键：发到全新会话（cwd=…/日常使用）
-#        FloatingBall: 音量减键：音量 7 → 8（收尾后调回）
-
-# 3) 球没开时按音量减 → 必须什么都不发生
-#   真机：daemon 打一行「音量减键 → 发 VOLUME_SEND」，App 里没有接收器 → 不冷启动、不冒球
-#   手动（显式广播打 manifest 接收器）：su -c 'sh android/assets/pkctl.sh fire-vol'
-#   预期：PowerBall: 音量减：球没开 → 不做事（绝不呼球）
-#        （屏幕不冒球，音量正常 -1）
+# ③ 球没开时按音量减 → 不冷启动、不冒球
+pid(before)=空 → voltest → pid(after)=空
+PowerKeyDaemon: 音量减键 → 发 VOLUME_SEND @/dev/input/event2
+PowerKeyDaemon: sh: am broadcast -a …VOLUME_SEND -p com.glslplayground.app … exit=0
+#   → App 进程没起来（动态接收器不存在，广播没人收）
 ```
 
 **编译验证**：`bash android/build.sh` ✅、`bash android/tools/build-powerkey-daemon.sh` ✅、
 `aapt2 dump xmltree .build/glsl-playground.apk --file AndroidManifest.xml` 里能看到
 `MODIFY_AUDIO_SETTINGS`。（`VOLUME_SEND` 不进 manifest —— 它是服务里动态注册的，见 §3.1。）
+测试写完已删掉 `日常使用/testvol1.txt`、`testlast1.txt` 和那条测试会话。
+
+**还没测的**：
+- 真的对着麦克风说话（`holdActive` 那段用的是胶囊里的现成文字）；
+- 「记住的会话被删 → 退回该目录最新一条」这条兜底（只做了代码路径检查）；
+- 音量调回那条日志（注入的按键没让系统真的降音量，`now >= baseline` 直接跳过）。
 
 ## 7. 已知边界
 
