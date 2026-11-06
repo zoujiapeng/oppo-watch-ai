@@ -478,10 +478,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // ★ 2026-10-23 二修（用户：「依然有一层锋利的黑色长方形」）：
         //   旧写法 mix(1.0, 0.12, pow(rise,2.6)) 在**整块上半段**都贴着 1.0（rise<0.45 时
         //   pow≈0.1，混出来还是 0.91 黑），于是黑块是一整片、下沿是直的、还盖住了圆角。
-        //   现在从顶到底**连续**掉：0.92 → 0.10（1.6 次幂），再乘 smoothstep(0,18dp,-sd)
+        //   现在从顶到底**连续**掉：0.92 → 0.02（0.6 次幂，掉得快 → 下半截就是普通玻璃，
+        //   和球/胶囊同一套观感；用户 2026-11-06：「审批界面的玻璃跟别的玻璃不一样、像没实时渲染」），再乘 smoothstep(0,18dp,-sd)
         //   让贴边那一圈变薄 —— 圆角自然跟着玻璃形状收，不再有"方框"。
         "    float top01 = clamp((1.0 + ny) * 0.5, 0.0, 1.0);\n" +   // 0=球顶 1=球底
-        "    tBlackK = mix(0.92, 0.10, pow(top01, 1.6));\n" +
+        "    tBlackK = mix(0.92, 0.02, pow(top01, 0.60));\n" +
         "    tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);\n" +
         "  }\n" +
         "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
