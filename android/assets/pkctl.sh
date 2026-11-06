@@ -201,6 +201,34 @@ sim_longpress() {
   sendevent "$dev" 1 116 0; sendevent "$dev" 0 0 0
 }
 
+
+# ───────────────────────── 玻璃参数还原 ─────────────────────────
+# 现象：球的折射/亮度跑偏（背景被放大得离谱、整体发亮），设置页却没动过。
+# 原因：demo 页（liquid-glass.html）早年一打开就把滑杆值 push 给球 —— 球的
+#       float_params 被悄悄改成 zoom=1.63 / blur=0.3 之类，跟 demo 默认不一样了。
+# 这条命令把 float_params 写回 demo 默认值（zoom 1.00 / blur 1.8 / refraction 200 …）。
+glass_reset() {
+  if [ -z "$PY" ]; then echo "ERR 没有 python3"; return 1; fi
+  am force-stop "$APP" >/dev/null 2>&1
+  sleep 1
+  LD_LIBRARY_PATH="$PYLIB" "$PY" - <<'PYEOF'
+import re, html, json
+p="/data/data/com.glslplayground.app/shared_prefs/watch.xml"
+d={"master":1,"posX":0.5,"posY":0.5,"halfX":0.37,"halfY":0.25,"corner":1,
+   "refraction":200,"band":170,"zoom":1,"dome":0.4,"aberration":10,"blur":1.8,
+   "topDarken":0.93,"black0":-1,"black1":-0.01,"edgeBleed":0.11,
+   "waveAmp":1.9,"waveScale":0.85,"waveOn":True,"waveMode":1}
+s=open(p,encoding="utf-8").read()
+esc=html.escape(json.dumps(d, ensure_ascii=False, separators=(",",":")), quote=True)
+s,n=re.subn(r'<string name="float_params">.*?</string>',
+            '<string name="float_params">%s</string>' % esc, s, flags=re.S)
+open(p,"w",encoding="utf-8").write(s)
+print("ok 写回 demo 默认参数（替换 %d 处）" % n)
+PYEOF
+  am start -n "$APP/.MainActivity" --ez auto_float true >/dev/null 2>&1
+  echo "ok 球已按 demo 默认参数重启"
+}
+
 case "${1:-status}" in
   status)
     echo "root=1"
@@ -232,6 +260,7 @@ case "${1:-status}" in
     echo "下一步：长按电源键试试；或者跑 pkctl.sh test"
     ;;
   settings) set_power_settings ;;
+  glass-reset) glass_reset ;;
   daemon-start) daemon_start ;;
   daemon-stop) daemon_stop ;;
   daemon-restart) daemon_stop; daemon_start ;;
@@ -259,7 +288,7 @@ case "${1:-status}" in
     echo "ok 完成；系统设置没有回滚（settings put 三条保持现状）"
     ;;
   *)
-    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | test | uninstall"
+    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | glass-reset | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | test | uninstall"
     exit 1
     ;;
 esac
