@@ -74,6 +74,16 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- 长按电源键 → 悬浮于桌面。SystemUI 的 LSPosed 钩子（com.pj.powerkey）吞掉
+             电源菜单后给这里发广播；也能用 am broadcast 手动触发（见 docs/POWERKEY.md）。 -->
+        <receiver
+            android:name=".PowerBallReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.glslplayground.app.action.POWER_BALL" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".AdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"

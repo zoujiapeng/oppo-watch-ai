@@ -41,6 +41,7 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
 | **全部操作说明**（手势 / 状态 / 每个开关 / 调试口子 / 日志速查） | [`android/docs/OPERATIONS.md`](android/docs/OPERATIONS.md) |
 | **语音按键（VoiceMap）怎么接进设置页** | [`docs/VOICEMAP-INTEGRATION.md`](docs/VOICEMAP-INTEGRATION.md) |
+| **长按电源键开球（小米 / 澎湃，含小爱同学冲突处理）** | [`android/docs/POWERKEY.md`](android/docs/POWERKEY.md) |
 
 一句话前提：**本机 root + 标准 Termux + 本机跑着 DSH**（没 root 有降级路径，见部署文档）。
 

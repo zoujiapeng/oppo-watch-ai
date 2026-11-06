@@ -48,6 +48,36 @@ public class FloatingBallService extends Service {
     public static volatile boolean running = false;
     private static volatile FloatingBallService INSTANCE;
 
+    /**
+     * 球现在是不是「展开」状态 —— 搜索胶囊 / 输入胶囊 / 六区 任一开着。
+     * 长按电源键第二次靠它判断：展开着就收球（{@link #hideFromOutside()}），
+     * 还是光秃秃一颗球就走「回桌面 + 居中」。
+     */
+    public static boolean isExpanded() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return false;
+        try {
+            if (s.searchActive || s.searchClosing || s.sqPhase != 0) return true;   // 搜索胶囊
+            if (s.searchBar != null && s.searchBar.isShown()) return true;
+            if (s.convoBar != null && s.convoBar.isShown()) return true;           // 输入胶囊
+            if (s.menuShown || s.glassFullscreen) return true;                     // 卡片菜单 / 整屏玻璃
+            return s.zonesActive;                                                  // 六区
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 从外面（电源键那条广播）把球收掉：主线程 stopSelf → onDestroy 里摘窗口、停采集。 */
+    public static void hideFromOutside() {
+        final FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                try { s.stopSelf(); } catch (Throwable ignored) { }
+            }
+        });
+    }
+
     public static void updateParams(String json) {
         FloatingBallService s = INSTANCE;
         if (s != null) s.applyParams(json);
@@ -8674,6 +8704,20 @@ public class FloatingBallService extends Service {
         if (glView != null && wm != null) {
             try { wm.removeView(glView); } catch (Exception ignored) { }
         }
+        // 收掉所有别的悬浮窗（胶囊 / 卡片菜单 / 蓝色触控代理 / 审批面板…）。
+        // 不摘干净的话：stopSelf 之后这些窗还挂在 WindowManager 上，
+        // 屏幕上什么都看不见、却在原位置吃触摸 —— 长按电源键"收球"就成了一次性把桌面点死。
+        if (wm != null) {
+            for (int i = 0; i < gateWindows.size(); i++) {
+                try { wm.removeView(gateWindows.get(i)); } catch (Throwable ignored) { }
+            }
+            if (ballTouch != null) {
+                try { wm.removeView(ballTouch); } catch (Throwable ignored) { }
+                ballTouch = null;
+            }
+        }
+        gateWindows.clear();
+        gateWindowSaved.clear();
         glView = null;
         super.onDestroy();
     }

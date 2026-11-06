@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="module_name">电源键 → 悬浮球</string>
+    <string-array name="xposedscope">
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

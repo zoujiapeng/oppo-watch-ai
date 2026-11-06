@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.pj.powerkey"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/module_name">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="长按电源键 → 桌面悬浮水晶球（吞掉 SystemUI 的电源菜单，改给 com.glslplayground.app 发 POWER_BALL）" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposedscope" />
+    </application>
+</manifest>

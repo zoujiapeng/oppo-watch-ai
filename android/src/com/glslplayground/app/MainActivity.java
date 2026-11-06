@@ -106,6 +106,7 @@ public class MainActivity extends Activity {
         } else {
             webView.restoreState(savedInstanceState);
         }
+        maybeAutoFloat(getIntent());
     }
 
     private void goImmersive() {
@@ -133,6 +134,25 @@ public class MainActivity extends Activity {
             autoKioskDone = true;
             enableKiosk();
         }
+    }
+
+    /**
+     * 长按电源键那条路（{@link PowerBallReceiver}）在没开 root 直采时只能把人拉到前台，
+     * 由这里补一次「悬浮于桌面」的请求（会走 MediaProjection 授权）。
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        maybeAutoFloat(intent);
+    }
+
+    private void maybeAutoFloat(Intent it) {
+        if (it == null || !it.getBooleanExtra("auto_float", false)) return;
+        it.removeExtra("auto_float");
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override public void run() { requestFloat(); }
+        }, 500);
     }
 
     // ---------- 偏好设置（供 JS 桥读写）----------

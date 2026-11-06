@@ -44,6 +44,19 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
 PY
 fi
 
+# 电源键常驻监听：tools/PowerKeyDaemon.java -> assets/powerkey-daemon.jar
+# （长按电源键 → 桌面悬浮球；由 pkctl.sh 装到 /data/adb/powerkey 并在开机时拉起）
+if [ -f "$HERE/tools/PowerKeyDaemon.java" ]; then
+  mkdir -p "$B/powerkey"
+  javac --release 8 -classpath "$AJAR" -d "$B/powerkey" "$HERE/tools/PowerKeyDaemon.java"
+  d8 --release --min-api 21 --lib "$AJAR" --output "$B/powerkey" $(find "$B/powerkey" -name '*.class')
+  python3 - "$HERE/assets/powerkey-daemon.jar" "$B/powerkey/classes.dex" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[2], 'classes.dex')
+PY
+fi
+
 aapt2 compile --dir res -o "$B/res.zip"
 aapt2 link -o "$B/app-unsigned.apk" -I "$AJAR" \
   --manifest AndroidManifest.xml -A assets \
