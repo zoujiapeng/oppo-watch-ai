@@ -1880,7 +1880,9 @@ public class FloatingBallService extends Service {
         float blockTotal = apTextH + apGap + apActH + (apInputH > 0 ? apGap + apInputH : 0);
         float halfH = Math.max(base * minHalfY,
                 blockTotal / 2f + apPadY / 2f + dp(6));
-        float maxHalfW = screenW * 0.92f / 2f;
+        // 面板宽度夹到「聊天界面」那条宽度（siriMaxBallW）：用户要的是审批/提问面板
+        // 跟聊天卡片一样宽，别比它还大、挡住操作。
+        float maxHalfW = Math.min(screenW * 0.92f / 2f, siriMaxBallW() / 2f);
         float maxHalfH = screenH * 0.68f / 2f;
         halfW = Math.min(halfW, maxHalfW);
         halfH = Math.min(halfH, maxHalfH);
