@@ -775,6 +775,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     @Override public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+        // surface 重建时这个方法会再进一次（切胶囊/球尺寸、系统回收 buffer 都会）。
+        // 不先把上一轮的纹理/FBO/program 删掉，GPU 显存就一路涨 —— 跑久了花屏、卡顿就是这个。
+        if (glInited) releaseGl();
+        glInited = true;
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
         GLES20.glClearColor(0f, 0f, 0f, 0f);
@@ -813,8 +817,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     @Override public void onSurfaceChanged(GL10 gl, int w, int h) {
         winW = w; winH = h;                    // 窗口尺寸随实际情况更新（Siri 模式窗口会贴合球）
         GLES20.glViewport(0, 0, w, h);
-        full = null; half = null; half2 = null;
-        bg = null; bg2 = null; bgInit = false; lastSnapMs = 0; gotFrames = 0;
+        // 只有「抓帧尺寸」变了才需要重建 FBO；窗口尺寸在动画里每帧都在变，
+        // 那会儿要是每帧删了重建，显存分配会被打爆、动画还会卡在半路上（球被留在放大态）。
+        int cw0 = capW > 0 ? capW : screenW;
+        int ch0 = capH > 0 ? capH : screenH;
+        if (full != null && (full.w != cw0 || full.h != ch0)) releaseFbos();
+        bgInit = false; lastSnapMs = 0; gotFrames = 0;
     }
 
     @Override public void onDrawFrame(GL10 gl) {
@@ -1038,6 +1046,34 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     // ─────────────────────────── helpers ───────────────────────────
+    /** 这一轮 GL 资源还在不在（onSurfaceCreated 再次进来时要先把旧的删掉）。 */
+    private boolean glInited = false;
+
+    /** 删掉 5 个离屏 FBO（尺寸变化 / 收尾时调用）。 */
+    private void releaseFbos() {
+        if (full != null) { full.release(); full = null; }
+        if (half != null) { half.release(); half = null; }
+        if (half2 != null) { half2.release(); half2 = null; }
+        if (bg != null) { bg.release(); bg = null; }
+        if (bg2 != null) { bg2.release(); bg2 = null; }
+    }
+
+    /** 删掉全部 GL 资源（surface 重建 / 服务收尾时调用）。 */
+    public void releaseGl() {
+        releaseFbos();
+        try {
+            if (surfaceTexture != null) { surfaceTexture.release(); surfaceTexture = null; }
+        } catch (Throwable ignored) { }
+        int[] t = new int[]{oesTex};
+        if (oesTex != 0) { GLES20.glDeleteTextures(1, t, 0); oesTex = 0; }
+        int[] b = new int[]{quadBuf};
+        if (quadBuf != 0) { GLES20.glDeleteBuffers(1, b, 0); quadBuf = 0; }
+        int[] progs = new int[]{capProg, blurProg, compProg, searchProg, zoneProg, maskProg};
+        for (int pr : progs) if (pr != 0) GLES20.glDeleteProgram(pr);
+        capProg = blurProg = compProg = searchProg = zoneProg = maskProg = 0;
+        glInited = false;
+    }
+
     private void ensureFbos() {
         if (full == null) {
             int cw = capW > 0 ? capW : screenW;
@@ -1153,6 +1189,18 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                     GLES20.GL_TEXTURE_2D, tex, 0);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        }
+
+        /** 把纹理和 framebuffer 还给 GPU（不调用就会一直占着显存）。 */
+        void release() {
+            try {
+                int[] f = new int[]{fbo};
+                if (fbo != 0) GLES20.glDeleteFramebuffers(1, f, 0);
+                int[] t = new int[]{tex};
+                if (tex != 0) GLES20.glDeleteTextures(1, t, 0);
+            } catch (Throwable ignored) { }
+            fbo = 0;
+            tex = 0;
         }
     }
 }

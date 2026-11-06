@@ -57,6 +57,10 @@ public final class VoiceCapture {
     /** 累计"在说话"的毫秒数（供 UI 判断值不值得发）。 */
     private volatile long voicedMs = 0;
     private volatile boolean endFired = false;
+    /** 端点检测开关：「按住说话」那条路关掉它 —— 一直录，等第二次长按才收尾。 */
+    private volatile boolean vadEnabled = true;
+
+    public void setVadEnabled(boolean on) { vadEnabled = on; }
 
     public boolean isRunning() { return running; }
 
@@ -146,7 +150,7 @@ public final class VoiceCapture {
                             if (listener != null) listener.onLevel(shaped);
                         }
                         // ── 端点检测：说过话 + 静音够久 + 采集够久（开头那 220ms 不算）──
-                        if (!endFired && now - startedAt > ARM_AFTER_MS
+                        if (vadEnabled && !endFired && now - startedAt > ARM_AFTER_MS
                                 && voicedMs >= MIN_VOICED_MS
                                 && silenceSince > 0 && now - silenceSince >= SILENCE_MS) {
                             endFired = true;

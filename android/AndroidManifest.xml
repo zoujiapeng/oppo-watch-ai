@@ -7,6 +7,13 @@
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="28" />
 
+    <!-- 电源键那条路要能用 root（su）直接起前台服务：服务必须 exported，
+         再用一个 signature 级权限把别的 App 挡在外面（root/系统不受限）。 -->
+    <permission
+        android:name="com.glslplayground.app.permission.BALL"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.glslplayground.app.permission.BALL" />
+
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -49,6 +56,16 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- 无界面跳板：root 起它 → 它在 Activity 上下文里起前台服务（绕开后台启动限制） -->
+        <activity
+            android:name=".PowerBallTrampolineActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleTop" />
+
         <!-- 「添附件」的系统文件选择器壳子：透明、不驻留、不进最近任务 -->
         <activity
             android:name=".BallAttachPickerActivity"
@@ -71,7 +88,8 @@
 
         <service
             android:name=".FloatingBallService"
-            android:exported="false"
+            android:exported="true"
+            android:permission="com.glslplayground.app.permission.BALL"
             android:foregroundServiceType="mediaProjection" />
 
         <!-- 长按电源键 → 悬浮于桌面。SystemUI 的 LSPosed 钩子（com.pj.powerkey）吞掉

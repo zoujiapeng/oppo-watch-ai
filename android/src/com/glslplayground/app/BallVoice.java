@@ -45,6 +45,8 @@ final class BallVoice {
     private Cb cb;
     private volatile boolean listening;
     private volatile boolean transcribing;
+    /** 按住说话（电源键那条路）：不做端点检测、松手不停，等 stopHold()。 */
+    private volatile boolean holdMode = false;
     private String partial = "";
 
     BallVoice(Context c) {
@@ -54,6 +56,25 @@ final class BallVoice {
 
     boolean listening() { return listening; }
     boolean busy() { return listening || transcribing; }
+
+    /** 按住说话：只录音、不自动收尾（忽略端点检测），直到 {@link #stopHold()}。 */
+    void startHold(final Cb callback) {
+        if (busy()) return;
+        holdMode = true;
+        cb = callback;
+        partial = "";
+        startRecorder();
+    }
+
+    /** 第二次长按：结束「按住说话」→ 转写 → onHeard(text, true) 由调用方发出去。 */
+    void stopHold() {
+        if (!listening) { holdMode = false; return; }
+        holdMode = false;
+        final Cb c = cb;
+        if (c != null) c.onTranscribing();
+        Log.i(TAG, "按住说话：第二次长按 → 停止录音并转写");
+        finishRecorderAndTranscribe(true);
+    }
 
     void start(final Cb callback) {
         if (busy()) return;
@@ -121,6 +142,7 @@ final class BallVoice {
     private void startRecorder() {
         if (cap != null) return;
         cap = new VoiceCapture();
+        cap.setVadEnabled(!holdMode);            // 按住说话：端点检测关掉
         final boolean ok = cap.start(new VoiceCapture.Listener() {
             @Override public void onLevel(float rms) {
                 final Cb c = cb;
@@ -138,6 +160,7 @@ final class BallVoice {
             }
 
             @Override public void onSpeechEnd(float voicedSeconds) {
+                if (holdMode) return;            // 按住说话：说完了也继续录
                 Log.i(TAG, "VAD: 话音刚落（有效语音 "
                         + String.format("%.2f", voicedSeconds) + "s）→ 自动停");
                 final Cb c = cb;
@@ -219,6 +242,7 @@ final class BallVoice {
     }
 
     void cancel() {
+        holdMode = false;
         if (asr != null) { asr.cancel(); asr = null; }
         VoiceCapture c = cap;
         cap = null;

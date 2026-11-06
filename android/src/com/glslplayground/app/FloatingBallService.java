@@ -1095,7 +1095,7 @@ public class FloatingBallService extends Service {
             closeSearchMode("审批来了");
             main.postDelayed(new Runnable() {
                 @Override public void run() { showApprovalPanel(req); }
-            }, 900);
+            }, 1600);   // 等胶囊收完（真机 ~1.5s）；早弹会把面板按全屏窗口算成巨大一张
             return;
         }
 
@@ -4920,10 +4920,26 @@ public class FloatingBallService extends Service {
         }
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         if (glView == null) setupOverlay();
-        // 初始状态会"听"：等窗口真的起来、且没在做别的事之后再开麦
-        main.postDelayed(new Runnable() {
-            @Override public void run() { armVoice("服务启动/球弹出"); }
-        }, 1200);
+
+        // 电源键那条路（PowerBallReceiver 带 pk_hold 进来）：
+        //   start = 球出来 + 直接进「按住说话」；stop = 收麦 → 转写 → 发「日常使用」
+        final String pkHold = intent == null ? null : intent.getStringExtra("pk_hold");
+        if ("stop".equals(pkHold)) {
+            main.post(new Runnable() {
+                @Override public void run() { endPowerHold(); }
+            });
+            return START_NOT_STICKY;
+        }
+        if ("start".equals(pkHold)) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() { beginPowerHold(); }
+            }, 700);
+        } else {
+            // 初始状态会"听"：等窗口真的起来、且没在做别的事之后再开麦
+            main.postDelayed(new Runnable() {
+                @Override public void run() { armVoice("服务启动/球弹出"); }
+            }, 1200);
+        }
         // 预热"工作目录 + 各目录会话"：第一次长按进状态 3 时列表已经是热的
         main.postDelayed(new Runnable() {
             @Override public void run() { prefetchZonesData(); }
@@ -5008,7 +5024,9 @@ public class FloatingBallService extends Service {
         return s != null && s.zonesActive;
     }
 
-    private boolean voiceAutoEnabled() { return prefs().getBoolean("voice_auto", true); }
+    // 语音识别完全交给输入法（电源键那条路走 VoiceMap → 输入法语音），
+    // 所以球自己不再开麦：默认关，要旧行为就在设置里把 voice_auto 打开。
+    private boolean voiceAutoEnabled() { return prefs().getBoolean("voice_auto", false); }
 
     /** 弹球就开始听（用户要的初始状态）。已经在听就什么都不做。 */
     private void armVoice(String why) {
@@ -5055,6 +5073,91 @@ public class FloatingBallService extends Service {
         });
     }
 
+    // ───────── 电源键「按住说话」（识别完全交给输入法）─────────
+    // 第一次长按：球出来 + 弹胶囊（聚焦、弹输入法）+ 给输入法发 down
+    //             （VoiceMap 模块往输入法空格键注入长按，输入法自己开语音）；
+    // 第二次长按：给输入法发 up → 输入法把识别结果打进胶囊 → 读出来发「日常使用」。
+    private static final String HOLD_CWD_DEFAULT =
+            "/data/data/com.termux/files/home/日常使用";
+
+    /** 「按住说话」此刻是不是开着（PowerBallReceiver 据此决定这次是"开录"还是"收尾"）。 */
+    static volatile boolean powerHoldActive = false;
+    /** down 真的发出去了没有（第二次按得太快时别发一个孤零零的 up）。 */
+    private volatile boolean powerHoldDown = false;
+
+    private VoiceMapControl voiceMap;
+
+    private VoiceMapControl vm() {
+        if (voiceMap == null) voiceMap = VoiceMapControl.get(this);
+        return voiceMap;
+    }
+
+    /** 电源键第一次长按：弹胶囊 + 让输入法开始语音识别。 */
+    void beginPowerHold() {
+        if (searchActive) { endPowerHold(); return; }        // 已经开着 → 当第二次按下
+        Log.i("FloatingBall", "电源键：弹胶囊 + 交给输入法语音");
+        enterSearchMode("电源键·按住说话", "", true, BAR_SEND);   // autoFocus=true → 弹输入法
+        if (!searchActive) {
+            // 审批球 / 菜单 / 玻璃全屏在屏上时 enterSearchMode 会直接返回；
+            // 这时候千万不能再往输入法里注入空格长按 —— 那会点到别人的界面上。
+            Log.w("FloatingBall", "电源键：胶囊没开（别的面板占着），本次不触发语音");
+            return;
+        }
+        powerHoldActive = true;
+        powerHoldDown = false;
+        vibrate(18);
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!powerHoldActive || !searchActive) return;
+                powerHoldDown = true;
+                vm().trigger("down");
+                Log.i("FloatingBall", "电源键：输入法语音 down");
+            }
+        }, 900);
+    }
+
+    /** 电源键第二次长按：让输入法收尾，出字后发出去。 */
+    void endPowerHold() {
+        final boolean wasDown = powerHoldDown;
+        powerHoldActive = false;
+        powerHoldDown = false;
+        if (wasDown) {
+            vm().trigger("up");
+            Log.i("FloatingBall", "电源键：输入法语音 up → 等出字");
+        } else {
+            Log.i("FloatingBall", "电源键：手太快，语音还没开 → 直接收起");
+            closeSearchMode("按住说话取消");
+            return;
+        }
+        waitImeTextAndSend(0);
+    }
+
+    /** 轮询胶囊里的字（输入法出字是异步的），拿到就发「日常使用」并收起胶囊。 */
+    private void waitImeTextAndSend(final int attempt) {
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                String t = searchBar == null ? "" : searchBar.text();
+                t = t == null ? "" : t.trim();
+                if (t.isEmpty()) {
+                    if (attempt < 30) { waitImeTextAndSend(attempt + 1); return; }
+                    toast("没听清");
+                    return;
+                }
+                Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」");
+                sendTextToHoldSession(t);
+                try { if (searchBar != null) searchBar.setText(""); } catch (Throwable ignored) { }
+                closeSearchMode("电源键说话完成");
+            }
+        }, 200);
+    }
+
+    private void sendTextToHoldSession(String text) {
+        String cwd = prefs().getString("hold_cwd", HOLD_CWD_DEFAULT);
+        if (cwd == null || cwd.trim().isEmpty()) cwd = HOLD_CWD_DEFAULT;
+        Log.i("FloatingBall", "电源键：发到 " + cwd);
+        sendTextNewSessionTo(cwd, text, null);
+    }
+
     private void toast(final String msg) {
         try {
             android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
@@ -5089,8 +5192,13 @@ public class FloatingBallService extends Service {
     }
 
     private void sendTextNewSession(final String text, final File attach) {
+        sendTextNewSessionTo(prefs().getString("send_cwd", ""), text, attach);
+    }
+
+    /** 同 {@link #sendTextNewSession}，但工作目录由调用方指定（按住说话固定发「日常使用」）。 */
+    private void sendTextNewSessionTo(final String cwdIn, final String text, final File attach) {
         final String attachName = pendingAttachName;
-        final String cwd = prefs().getString("send_cwd", "");
+        final String cwd = cwdIn == null ? "" : cwdIn;
         final String preset = prefs().getString("send_preset", "");
         final String provider = prefs().getString("send_provider", "");
         final String model = prefs().getString("send_model", "");

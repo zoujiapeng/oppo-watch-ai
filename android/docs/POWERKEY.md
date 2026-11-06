@@ -1,127 +1,117 @@
-# 长按电源键 → 桌面悬浮球（xiaomi-phone 分支）
+# 长按电源键 → 桌面悬浮球 + 按住说话（xiaomi-phone 分支）
 
-> 一句话：**短按电源键照旧锁屏；按住 0.65s 松手，水晶球浮到桌面上；球已经展开成胶囊/六区时，再长按一次就收球。**
-> 小爱同学原来占着「长按电源键」这条路，本方案把那条绑定关掉了（不动它别的功能）。
+> **短按电源键**照旧锁屏。
+> **第一次长按**：球浮出来并直接进「按住说话」（弹胶囊、弹输入法、开始录），松手什么都不发生。
+> **第二次长按**：结束「按住说话」→ 输入法出字 → 自动发到 DSH 的 **`日常使用`** 工作目录下的新会话。
+> **不回桌面、不按 HOME** —— 只把球呼出来。
 
-## 1. 交互
+## 1. 交互与时序
 
-| 手上的动作 | 系统 / 球的行为 |
+```
+短按电源键           → 系统自己锁屏（本方案完全不参与）
+按住 ≥0.65s 松手     → 球浮出来 + 打开胶囊(状态2) + 弹输入法 + 给输入法发「按住说话 down」
+松开                 → 无事发生（一直录）
+再按住 ≥0.65s 松手   → 给输入法发「up」→ 输入法把识别结果打进胶囊 → 读出来 → 发「日常使用」
+```
+
+阈值 **0.65s** 是故意大于框架自己的长按判定（~500ms）的：框架在 500ms 会把这次按键标成
+long-press，松手就不再锁屏。抢在 450ms 先动手的话，用户 460ms 松手会「球出来了、屏幕也锁了」。
+
+**识别完全交给输入法**：不调用系统 `SpeechRecognizer`、不调用 DSH 的 `speech/transcribe`
+（本机那个接口是 404，实验插件没开）。走路子是仓库里已有的 VoiceMap：
+
+```
+App → su/广播 com.pj.voicemap.TRIGGER (cmd=down/up)
+    → LSPosed 模块在输入法进程里往「空格键」注入一对真实触摸（长按 = 输入法的语音键）
+    → 输入法自己识别、自己出字 → 打进焦点输入框（= 球的胶囊）
+    → App 读胶囊里的文字 → DSH 新会话(cwd=日常使用)
+```
+
+胶囊开着时输入法被 VoiceMap 设成隐身（alpha 0），所以按住说话时键盘不会糊在屏幕上。
+
+## 2. 为什么这么绕（真机踩到的坑）
+
+| 想做的事 | 实际结果 |
 |---|---|
-| 短按电源键（松得快） | 系统自己锁屏 —— 本方案完全不插手 |
-| 按住 ≥0.65s 再松 | 亮屏 → 球立刻浮出来 → 退锁屏 → 回桌面 |
-| 球已开着，且是**胶囊 / 六区 / 菜单**状态 | 再长按一次 → 收球（窗口、通知、采集一起停） |
-| 球已开着，还是**一颗光球** | 再长按 → 回桌面 + 摆正（球不动） |
-
-阈值 0.65s 是**故意大于**框架自己的长按判定（~500ms）的：框架在 500ms 会把这次按键标成
-long-press，松手就不再锁屏。若我们抢在 450ms 先起球，用户 460ms 松手就会
-「球出来了、屏幕也锁了」——这就是上一版被骂的那件事。
-
-## 2. 为什么不能只靠 Xposed 钩子
-
-在澎湃（HyperOS 1.0 / Android 13，小米 10 Ultra，`M2009J1SC`）上实测：
-
-| 想拦的东西 | 实际在哪 | 结论 |
-|---|---|---|
-| 长按电源键弹出的电源菜单 `LegacyGlobalActions` | `Window{… LegacyGlobalActions} mSession=1502:1000` → **system_server** | SystemUI 钩子钩不到；钩 system_server 风险太大 |
-| 小爱同学被长按唤起 | `settings get system long_press_power_key` = `launch_voice_assistant` | 一条 settings 就能关 |
-| 框架自己的长按动作 | `settings get global power_button_long_press` | 设 0 = 长按什么都不做 |
-
-于是最终方案是**「让框架彻底不管长按，自己在旁边听键盘」**：
-
-```
-settings put system long_press_power_key none          # 小爱不再抢
-settings put global power_button_long_press 0          # 框架长按 = 什么都不做
-settings put secure power_menu_long_press_for_assist 0 # 长按呼助手那档也关
-```
-
-短按锁屏是 `interceptPowerKeyUp` 那条路，上面三条都不碰它（实测短按照样灭屏/亮屏）。
+| 用 LSPosed 钩 SystemUI 的电源菜单 | 钩到了，但澎湃的电源菜单是 **system_server** 画的（`LegacyGlobalActions`，session=1502），钩 SystemUI 挡不住 |
+| `settings put system long_press_power_key none` | 小爱不再抢长按 ✅ |
+| `settings put global power_button_long_press 0` | 框架对长按**什么都不做** ✅（短按锁屏不受影响） |
+| 常驻 root 监听 `/dev/input/event*` 判长按 | 可行 ✅ 只读、不 EVIOCGRAB，音量键/短按/指纹都不受影响 |
+| 广播里直接 `startForegroundService` | **被后台启动限制拦**：`Background start not allowed`（冷进程必现） |
+| root `am start-foreground-service` | **同样被拦**（这条策略对 shell/root 也生效） |
+| root `am start` 一个 Activity | **允许** ✅ → 于是有了「跳板 Activity」：它一起来 App 就在前台，此时起前台服务就过了 |
 
 ## 3. 组成
 
 | 文件 | 干什么 |
 |---|---|
-| `android/tools/PowerKeyDaemon.java` | 常驻（root / app_process）：读 `/dev/input/event*` 里所有带 `KEY_POWER` 的节点，按住 ≥holdMs 发一条广播。**只读，不 EVIOCGRAB**，所以音量键、短按、指纹都不受影响 |
-| `android/tools/build-powerkey-daemon.sh` | 上面那个 → `android/assets/powerkey-daemon.jar` |
-| `android/src/…/PowerBallReceiver.java` | 收广播：没球就 `startForegroundService` + 亮屏/退锁屏/回桌面；球在且展开就 `stopSelf` 收球 |
-| `android/src/…/FloatingBallService.java` | 新增 `isExpanded()`（胶囊/六区/菜单/搜索层任一在屏）与 `hideFromOutside()`；`onDestroy` 补上「把代理窗/胶囊/菜单全摘掉」——不收干净会留下一层看不见但吃触摸的窗口 |
+| `android/tools/PowerKeyDaemon.java` | 常驻 root 监听：读 `/dev/input/event*` 里所有带 `KEY_POWER` 的节点，按住 ≥650ms 发一条 `POWER_BALL` 广播 |
+| `android/tools/build-powerkey-daemon.sh` | → `android/assets/powerkey-daemon.jar` |
+| `android/src/…/PowerBallReceiver.java` | 收广播决定「开录 / 收尾」；直连服务失败时用 root 起跳板 |
+| `android/src/…/PowerBallTrampolineActivity.java` | `Theme.NoDisplay` 无界面跳板：在 Activity 上下文里起前台服务（绕开后台启动限制）然后立刻 finish |
+| `android/src/…/FloatingBallService.java` | `beginPowerHold()`：开胶囊 + 等 900ms 发 VoiceMap `down`；`endPowerHold()`：发 `up` + 轮询胶囊文字 + 发「日常使用」；`isExpanded()/hideFromOutside()` 留着以后做"收球"用 |
 | `android/assets/pkctl.sh` | 装机 / 开关 / 自检 / 模拟长按 |
-| `android/assets/pk_lspd.py` | 只改 LSPosed 库里本模块那两行（备胎用） |
-| `android/powerkey-hook/` | **备胎**：LSPosed 模块，钩 SystemUI 的 `GlobalActionsComponent#handleShowGlobalActionsMenu` 等三个入口，把电源菜单换成同一条广播。只在「框架仍然走 SystemUI 电源菜单」的 ROM 上有意义 |
+| `android/powerkey-hook/` | 备胎 LSPosed 模块（钩 SystemUI 电源菜单）；本机不需要，装着也无害 |
 
-### 3.1 起球那一下的时序
+### 3.1 拉球的链路
 
 ```
-daemon: am broadcast POWER_BALL           (root)
-   └─ PowerBallReceiver (App 进程，冷启动 ~0.4s)
-        ├─ startForegroundService(FloatingBallService)   ← 球先出来
-        └─ su -c "input keyevent 224; wm dismiss-keyguard;
-                  sleep 0.9; input keyevent 3; sleep 0.45; input keyevent 3"
+PowerKeyDaemon (root)
+  └─ am broadcast POWER_BALL  →  PowerBallReceiver (App 进程)
+        ├─ 服务没开 → Intent(pk_hold=start) 直连 startForegroundService
+        │     └─ 700ms 后没起来 → su: am start PowerBallTrampolineActivity --es pk_hold start
+        │            └─ Activity 里 startForegroundService → FloatingBallService
+        └─ 正在按住说话 → Intent(pk_hold=stop) → endPowerHold()
 ```
-
-`am start -a MAIN -c HOME` 在本机不可靠（焦点不跟过来），HOME 键要发两条：
-刚唤醒时第一条常被锁屏吃掉（真机验过）。
 
 ## 4. 装 / 开 / 关
 
 ```bash
-# 一次性装好（root）
 su -c 'sh android/assets/pkctl.sh setup android/assets/powerkey-daemon.jar'
-
-# 只改系统设置（关小爱那条长按路）
-su -c 'sh android/assets/pkctl.sh settings'
-
-# 状态 / 启停
+su -c 'sh android/assets/pkctl.sh settings'     # 只改系统设置（关小爱那条长按路）
 su -c 'sh android/assets/pkctl.sh status'
-su -c 'sh android/assets/pkctl.sh daemon-start|daemon-stop|daemon-restart'
-
-# 模拟一次长按（往 uinput 节点写 0.9s 的 KEY_POWER，不碰系统设置）
-su -c 'sh android/assets/pkctl.sh test'
-
-# 彻底停用
+su -c 'sh android/assets/pkctl.sh test'         # sendevent 模拟一次长按
 su -c 'sh android/assets/pkctl.sh uninstall'
 ```
 
-开机自启靠 Magisk：`pkctl.sh` 会写 `/data/adb/service.d/powerkey-ball.sh`，
-里面等 `sys.boot_completed` → 确认 App 还装着 → 起 `PowerKeyDaemon 650`，
-挂了就 5 秒后重来。
+开机自启：`/data/adb/service.d/powerkey-ball.sh`（等 `sys.boot_completed` → 起 `PowerKeyDaemon 650`，挂了 5 秒重试）。
 
-### 4.1 把小爱同学彻底拿掉（可选，默认没做）
+小爱同学：`long_press_power_key=none` 已经让它不抢长按；要连人一起停：
+`pkctl.sh xiaoai off` / `on` / `purge`。
 
-`long_press_power_key=none` 已经让它不抢电源键；要连人一起停：
+## 5. 这一轮顺手修的渲染问题
 
-```bash
-su -c 'sh android/assets/pkctl.sh xiaoai off'    # pm disable-user 四个包
-su -c 'sh android/assets/pkctl.sh xiaoai on'     # 恢复
-su -c 'sh android/assets/pkctl.sh xiaoai purge'  # 用户 0 卸载（install-existing 可回）
+| 症状 | 根因 | 修法 |
+|---|---|---|
+| 球跑久了花屏 / 卡顿 | `GlassRenderer.onSurfaceChanged` 每次窗口尺寸变化都把 5 个 FBO 置空重建，旧 FBO **从不 glDelete** → 每切一次尺寸漏 ~50MB 显存 | 加 `Fbo.release()` / `releaseFbos()` / `releaseGl()`；`onSurfaceChanged` 只在**抓帧尺寸**变了才重建 |
+| 球被留在放大态、球里动画也变大 | 动画期间窗口尺寸每帧都变，上面那个「每帧删/建 FBO」把动画卡在半路 | 同上：尺寸没变就复用；`onSurfaceCreated` 重进时先 `releaseGl()` 再建 |
+| 审批面板异常巨大 | 面板在胶囊还开着（窗口=全屏）时被弹出来，几何按全屏窗口算 | 审批延后到胶囊收完（900→1600ms）；胶囊没开成功时绝不往输入法注入触摸 |
+
+## 6. 实机验证（2026-11-06，MI 10 Ultra / HyperOS 1.0 / Android 13）
+
+```
+# 第一次长按（冷进程，走跳板）
+PowerBall: 呼出球 + 开始按住说话
+FloatingBall: 电源键：弹胶囊 + 交给输入法语音
+FloatingBall: search: 进入（电源键·按住说话）… 胶囊 cx=540 cy=264
+FloatingBall: 电源键：输入法语音 down
+LSPosed-Bridge: VoiceMap: DOWN at (540.0,1958.175) handled=true
+
+# 第二次长按
+FloatingBall: 电源键：输入法语音 up → 等出字
+FloatingBall: 电源键：输入法结果 = 「你好呀！」
+FloatingBall: 电源键：发到 /data/data/com.termux/files/home/日常使用
+FloatingBall: send: 新会话 cwd=…/日常使用 preset=mobile-use model=deepseek-flash/off
+~/.dsh/sessions/--data-data-com.termux-files-home-字面量--/session-f08ee49a…  ← 新会话落地
+
+# 收窗口
+ball window -> 938x579 → … → 795x579（回到球，不留全屏窗口）
 ```
 
-## 5. 实机验证记录（2026-11-06，MI 10 Ultra / HyperOS 1.0 / Android 13）
+## 7. 已知边界
 
-```
-# 起球
-sendevent /dev/input/event2 1 116 1 … 0.9s … 1 116 0
-PowerKeyDaemon: KEY_POWER down @/dev/input/event2
-PowerKeyDaemon: 长按到点 → 发 POWER_BALL
-PowerBall: power-ball 触发：… running=false
-PowerBall: FloatingBallService 已拉起
-dumpsys activity services → ServiceRecord ×1（isForeground=true）
-dumpsys window → mCurrentFocus=com.miui.home/.launcher.Launcher   ← 桌面
-dumpsys window windows → 2 个 com.glslplayground.app 的 APPLICATION_OVERLAY 窗
-
-# 收球（am stopservice 走同一条 onDestroy）
-Service stopped → ServiceRecord ×0，APPLICATION_OVERLAY ×0   ← 没有残留窗口
-
-# 短按锁屏（框架原样）
-power_button_long_press=0 下：短按 → mWakefulness=Asleep；再短按 → Awake
-```
-
-## 6. 已知边界
-
-- **锁屏状态下**长按：球会浮在锁屏上面，但桌面在锁屏后面 —— 有密码/指纹时必须自己解锁一次，
-  `wm dismiss-keyguard` 只对无密码锁有效。
-- `sendevent` 往 `uinput-goodix` 写 KEY_POWER 不会触发框架的锁屏/长按策略（实测），
-  所以它只能用来验「监听 → 广播 → 起球」这段，验不了「短按锁屏」。
-- 真机物理电源键走 `qpnp_pon`（`/dev/input/event1`，带 `KEY_POWER` + `KEY_VOLUMEDOWN`）；
-  守护进程同时监听 `event1`（物理）与 `event2`（注入），物理那条不用改任何代码。
-- 备胎 LSPosed 模块在「框架长按 = 电源菜单」的 ROM 上才需要；本机现在不需要，
-  装着也不影响（钩子方法压根不会被调用）。
+- **必须**：默认输入法装着且 VoiceMap 模块启用（`vmctl.sh status` 里 `mod_enabled=1`、`scope=<当前输入法>`）；
+  换输入法要在设置页重新「启用模块」。
+- 锁屏状态下长按：球浮在锁屏上，桌面在锁屏后面；有密码/指纹还是要自己解一次。
+- 胶囊没开成（审批球/菜单占着屏）时**不会**触发输入法语音 —— 免得把空格长按点到别人界面上。
+- `sendevent` 往 `uinput-goodix` 注入 KEY_POWER 不触发框架的锁屏策略，只能验「监听→广播→拉球」这段。
