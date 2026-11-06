@@ -27,6 +27,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 初始状态的"语音转文字"：16 kHz PCM16 采集，交给本机 DSH 的 speech/transcribe -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 音量减键 = 收麦发送：那一下按键会把媒体音量按下去一格，收尾后调回原值 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
         android:label="@string/app_name"

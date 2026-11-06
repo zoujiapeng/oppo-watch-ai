@@ -206,6 +206,13 @@ final class DshApi {
         return out;
     }
 
+    /** 这条会话还在不在（电源键「回到上一次回话」前先问一句：删掉了就退回新建）。 */
+    boolean sessionExists(String sessionId) throws Exception {
+        if (sessionId == null || sessionId.isEmpty()) return false;
+        for (SessionRow r : sessions()) if (sessionId.equals(r.id)) return true;
+        return false;
+    }
+
     /** 正在跑的会话（`running=true`），新到旧 —— 状态 3 左下角那张「运行中」卡片用它。 */
     List<SessionRow> runningSessions() throws Exception {
         List<SessionRow> out = new ArrayList<>();

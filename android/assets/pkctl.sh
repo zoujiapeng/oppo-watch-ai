@@ -7,14 +7,17 @@
 #   su -c 'sh android/assets/pkctl.sh settings'          # 只改系统设置（关小爱那条长按路）
 #   su -c 'sh android/assets/pkctl.sh xiaoai off|on|purge|status'
 #   su -c 'sh android/assets/pkctl.sh fire'              # 手动触发一次悬浮球
+#   su -c 'sh android/assets/pkctl.sh fire-vol'          # 手动发一次「音量减 = 收麦+发新会话」
 #   su -c 'sh android/assets/pkctl.sh test'              # 模拟长按电源键（sendevent 注入 uinput）
+#   su -c 'sh android/assets/pkctl.sh voltest'           # 模拟按一下音量减键（同上）
 #   su -c 'sh android/assets/pkctl.sh uninstall'
 #
 # 结构（为什么这么分）：
 #   · 触发：/data/adb/powerkey/powerkey-daemon.jar 以 root 常驻，读 /dev/input/event*（只读，不抢）
+#           电源键按住 ≥650ms → POWER_BALL；音量减按下 → VOLUME_SEND（是否动手由 App 判）
 #   · 消歧：settings put global power_button_long_press 0 + long_press_power_key none
 #           → 框架对长按什么都不做，小爱也不再抢；短按开关屏照旧
-#   · 起球：daemon 里 亮屏 → 解锁 → 回桌面 → am start-foreground-service FloatingBallService
+#   · 起球：daemon 只发广播，PowerBallReceiver 收到后起 FloatingBallService
 #   · 备胎：LSPosed 模块 com.pj.powerkey（只在系统仍走 SystemUI 电源菜单的 ROM 上有用）
 set -u
 
@@ -25,6 +28,7 @@ DB=/data/adb/lspd/config/modules_config.db
 UI=com.android.systemui
 RECV="$APP/.PowerBallReceiver"
 ACT="$APP.action.POWER_BALL"
+ACT_VOL="$APP.action.VOLUME_SEND"
 
 DDAEMON=/data/adb/powerkey
 DJAR="$DDAEMON/powerkey-daemon.jar"
@@ -201,6 +205,15 @@ sim_longpress() {
   sendevent "$dev" 1 116 0; sendevent "$dev" 0 0 0
 }
 
+# 模拟「按一下音量减键」：daemon 只看按下，App 那边只有在按住说话时才动手
+sim_volkey() {
+  dev=$(uinput_power_dev)
+  [ -n "$dev" ] || { echo "ERR 没找到 uinput 节点（这台机器没法用 sendevent 模拟）"; return 1; }
+  echo "注入 $dev：KEY_VOLUMEDOWN down/up"
+  sendevent "$dev" 1 114 1; sendevent "$dev" 0 0 0
+  sendevent "$dev" 1 114 0; sendevent "$dev" 0 0 0
+}
+
 
 # ───────────────────────── 玻璃参数还原 ─────────────────────────
 # 现象：球的折射/亮度跑偏（背景被放大得离谱、整体发亮），设置页却没动过。
@@ -282,7 +295,9 @@ case "${1:-status}" in
   restart-ui) restart_ui ;;
   xiaoai) xiaoai "${2:-status}" ;;
   fire) am broadcast -a "$ACT" -n "$RECV" --user 0 2>&1 | tail -1 ;;
+  fire-vol) am broadcast -a "$ACT_VOL" -n "$RECV" --user 0 2>&1 | tail -1 ;;
   test) sim_longpress ;;
+  voltest) sim_volkey ;;
   uninstall)
     daemon_stop
     rm -f "$DSVC"
@@ -291,7 +306,7 @@ case "${1:-status}" in
     echo "ok 完成；系统设置没有回滚（settings put 三条保持现状）"
     ;;
   *)
-    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | glass-reset | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | test | uninstall"
+    echo "子命令：status | setup <jar> [app.apk] [mod.apk] | settings | glass-reset | daemon-start|daemon-stop|daemon-restart|daemon-status|install-daemon <jar> | enable|disable|restart-ui | xiaoai off|on|purge|status | fire | fire-vol | test | voltest | uninstall"
     exit 1
     ;;
 esac

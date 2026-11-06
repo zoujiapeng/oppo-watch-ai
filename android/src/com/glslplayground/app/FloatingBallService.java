@@ -5,8 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
@@ -4764,6 +4766,7 @@ public class FloatingBallService extends Service {
         exemptHiddenApis();
         refreshTouchDevices();
         createChannel();
+        registerVolumeSendReceiver();     // 音量减 = 收麦 + 发新会话（球没开时没人收，见方法注释）
         // DSH 文本助手：同时起一条常驻镜像流，
         // DSH 里只要 AI 在回话（不管是谁问的），球就逐字出字。
         try {
@@ -4924,11 +4927,16 @@ public class FloatingBallService extends Service {
         if (glView == null) setupOverlay();
 
         // 电源键那条路（PowerBallReceiver 带 pk_hold 进来）：
-        //   start = 球出来 + 直接进「按住说话」；stop = 收麦 → 转写 → 发「日常使用」
+        //   start = 球出来 + 直接进「按住说话」；
+        //   stop  = 收麦 → 转写 → 发送：默认发回「上一次回话」（pk_send=new 时发全新会话）。
         final String pkHold = intent == null ? null : intent.getStringExtra("pk_hold");
+        final boolean pkNewSession =
+                intent != null && "new".equals(intent.getStringExtra("pk_send"));
+        final boolean pkFromVolume =
+                intent != null && "vol_key".equals(intent.getStringExtra("pk_from"));
         if ("stop".equals(pkHold)) {
             main.post(new Runnable() {
-                @Override public void run() { endPowerHold(); }
+                @Override public void run() { endPowerHold(pkNewSession, pkFromVolume); }
             });
             return START_NOT_STICKY;
         }
@@ -5078,14 +5086,20 @@ public class FloatingBallService extends Service {
     // ───────── 电源键「按住说话」（识别完全交给输入法）─────────
     // 第一次长按：球出来 + 弹胶囊（聚焦、弹输入法）+ 给输入法发 down
     //             （VoiceMap 模块往输入法空格键注入长按，输入法自己开语音）；
-    // 第二次长按：给输入法发 up → 输入法把识别结果打进胶囊 → 读出来发「日常使用」。
+    // 第二次长按：给输入法发 up → 输入法把识别结果打进胶囊 → 读出文字 →
+    //             发回「上一次回话」那个会话（没有就新建一条并记住）。
+    // 音量减：     只做「收麦 + 发送」，目标是**全新会话**；球没开就什么都不做（绝不呼球）。
     private static final String HOLD_CWD_DEFAULT =
             "/data/data/com.termux/files/home/日常使用";
+    /** 上一次用球说话的那个会话（每次 askIn 都记一笔）；第二次长按电源键就回这里。 */
+    private static final String PREF_LAST_SESSION = "last_session_id";
 
     /** 「按住说话」此刻是不是开着（PowerBallReceiver 据此决定这次是"开录"还是"收尾"）。 */
     static volatile boolean powerHoldActive = false;
     /** down 真的发出去了没有（第二次按得太快时别发一个孤零零的 up）。 */
     private volatile boolean powerHoldDown = false;
+    /** 按住说话开始时的媒体音量：音量减键收尾后调回去（那一下按键不该留下音量副作用）。 */
+    private int holdMusicVolume = -1;
 
     private VoiceMapControl voiceMap;
 
@@ -5094,9 +5108,50 @@ public class FloatingBallService extends Service {
         return voiceMap;
     }
 
+    /**
+     * 音量减键的接收器 —— **动态注册**，只在服务活着的时候存在（manifest 里没有这条 action）。
+     *
+     * 为什么不写进 manifest：daemon 每按一次音量减都会发一条广播；manifest 收的话，
+     * 球没开时这条广播会把整个 App 进程拉起来（冷启动 200~500ms）就为了判断一句
+     * 「没在按住说话、什么都不做」。动态注册的话球没开就没人收，音量键完完全全是音量键。
+     *
+     * 语义只有一个：**正在按住说话** → 收麦 + 发到全新会话；其它时候一律忽略。
+     */
+    private BroadcastReceiver volumeSendReceiver;
+
+    private void registerVolumeSendReceiver() {
+        if (volumeSendReceiver != null) return;
+        volumeSendReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                Log.i("FloatingBall", "收到 VOLUME_SEND：holdActive=" + powerHoldActive);
+                if (!powerHoldActive) {
+                    Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（不呼球）");
+                    return;
+                }
+                Log.i("FloatingBall", "音量减 → 结束按住说话 → 发到全新会话");
+                vibrate(12);
+                endPowerHold(true, true);
+            }
+        };
+        try {
+            registerReceiver(volumeSendReceiver,
+                    new IntentFilter(PowerBallReceiver.ACTION_VOLUME_SEND));
+            Log.i("FloatingBall", "音量减广播接收器已注册");
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "音量减广播接收器注册失败：" + t);
+            volumeSendReceiver = null;
+        }
+    }
+
+    private void unregisterVolumeSendReceiver() {
+        if (volumeSendReceiver == null) return;
+        try { unregisterReceiver(volumeSendReceiver); } catch (Throwable ignored) { }
+        volumeSendReceiver = null;
+    }
+
     /** 电源键第一次长按：弹胶囊 + 让输入法开始语音识别。 */
     void beginPowerHold() {
-        if (searchActive) { endPowerHold(); return; }        // 已经开着 → 当第二次按下
+        if (searchActive) { endPowerHold(false, false); return; }   // 已经开着 → 当第二次按下
         Log.i("FloatingBall", "电源键：弹胶囊 + 交给输入法语音");
         enterSearchMode("电源键·按住说话", "", true, BAR_SEND);   // autoFocus=true → 弹输入法
         if (!searchActive) {
@@ -5107,6 +5162,7 @@ public class FloatingBallService extends Service {
         }
         powerHoldActive = true;
         powerHoldDown = false;
+        holdMusicVolume = musicVolume();
         vibrate(18);
         main.postDelayed(new Runnable() {
             @Override public void run() {
@@ -5118,46 +5174,157 @@ public class FloatingBallService extends Service {
         }, 900);
     }
 
-    /** 电源键第二次长按：让输入法收尾，出字后发出去。 */
-    void endPowerHold() {
+    /**
+     * 收尾：让输入法把字吐出来，然后发出去。
+     *
+     * @param toNewSession true  = 发到**全新会话**（音量减键）；
+     *                     false = 发回**上一次回话**那个会话（第二次长按电源键）。
+     * @param fromVolume   这一次是不是音量减键按的（它顺带把那格音量按下去了，要调回来）。
+     */
+    void endPowerHold(boolean toNewSession, boolean fromVolume) {
         final boolean wasDown = powerHoldDown;
         powerHoldActive = false;
         powerHoldDown = false;
-        if (wasDown) {
-            vm().trigger("up");
-            Log.i("FloatingBall", "电源键：输入法语音 up → 等出字");
-        } else {
+        restoreMusicVolumeIfFromVolumeKey(fromVolume);
+        if (!wasDown) {
             Log.i("FloatingBall", "电源键：手太快，语音还没开 → 直接收起");
             closeSearchMode("按住说话取消");
             return;
         }
-        waitImeTextAndSend(0);
+        vm().trigger("up");
+        Log.i("FloatingBall", (toNewSession ? "音量减键" : "电源键") + "：输入法语音 up → 等出字");
+        waitImeTextAndSend(0, toNewSession);
     }
 
-    /** 轮询胶囊里的字（输入法出字是异步的），拿到就发「日常使用」并收起胶囊。 */
-    private void waitImeTextAndSend(final int attempt) {
+    /** 轮询胶囊里的字（输入法出字是异步的），拿到就发出去并收起胶囊。 */
+    private void waitImeTextAndSend(final int attempt, final boolean toNewSession) {
         main.postDelayed(new Runnable() {
             @Override public void run() {
                 String t = searchBar == null ? "" : searchBar.text();
                 t = t == null ? "" : t.trim();
                 if (t.isEmpty()) {
-                    if (attempt < 30) { waitImeTextAndSend(attempt + 1); return; }
+                    if (attempt < 30) { waitImeTextAndSend(attempt + 1, toNewSession); return; }
                     toast("没听清");
                     return;
                 }
                 Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」");
-                sendTextToHoldSession(t);
+                sendTextToHoldSession(t, toNewSession);
                 try { if (searchBar != null) searchBar.setText(""); } catch (Throwable ignored) { }
                 closeSearchMode("电源键说话完成");
             }
         }, 200);
     }
 
-    private void sendTextToHoldSession(String text) {
+    /**
+     * 「按住说话」的发送目标。
+     *
+     *  · toNewSession=false（第二次长按电源键）→ **上一次回话**那个会话：
+     *    记住的 id 还在就续上；会话被删了 / 从没记过就退回 hold_cwd 下最新的那条；
+     *    连一条都没有才新建。
+     *  · toNewSession=true（音量减键）→ 不管上次是谁，直接在 hold_cwd 里开一条新的。
+     *
+     * 新建出来的会话由 {@link #askIn} 记成「上一次回话」，所以音量减键开的那条，
+     * 下一次长按电源键就接着它。
+     */
+    private void sendTextToHoldSession(final String text, final boolean toNewSession) {
+        final String cwd = holdCwd();
+        final String remembered = toNewSession ? "" : lastTalkSession();
+        if (toNewSession) {
+            Log.i("FloatingBall", "音量减键：发到全新会话（cwd=" + cwd + "）");
+            sendTextNewSessionTo(cwd, text, null);
+            return;
+        }
+        if (remembered.isEmpty()) {
+            Log.i("FloatingBall", "电源键：还没有「上一次回话」→ 新建一条（cwd=" + cwd + "）");
+            sendTextNewSessionTo(cwd, text, null);
+            return;
+        }
+        Log.i("FloatingBall", "电源键：回到上一次回话 " + remembered);
+        final DshApi api = DshApi.get(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String target = remembered;
+                try {
+                    if (!api.sessionExists(target)) {
+                        target = newestSessionIn(cwd);
+                        Log.i("FloatingBall", "电源键：之前的会话不在了 → 退回 "
+                                + (target.isEmpty() ? "新建" : target));
+                    }
+                } catch (Throwable t) {
+                    // 查不了（DSH 刚起 / 网络抖）就当作还在，直接发过去 —— 别为了一次查询失败
+                    // 就把用户的上下文拆成新会话。
+                    Log.w("FloatingBall", "电源键：查上一次回话失败（" + message(t) + "）→ 直接发");
+                }
+                final String sid = target;
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (sid == null || sid.isEmpty()) sendTextNewSessionTo(cwd, text, null);
+                        else sendTextToSession(sid, text, null, null);
+                    }
+                });
+            }
+        }, "dsh-hold-target").start();
+    }
+
+    /** hold_cwd 下最新的会话 id（没有就空串）。 */
+    private String newestSessionIn(String cwd) {
+        try {
+            List<DshApi.SessionRow> rows = DshApi.get(this).sessionsIn(cwd);
+            return rows.isEmpty() ? "" : rows.get(0).id;
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "电源键：列 " + cwd + " 的会话失败 " + message(t));
+            return "";
+        }
+    }
+
+    private String holdCwd() {
         String cwd = prefs().getString("hold_cwd", HOLD_CWD_DEFAULT);
         if (cwd == null || cwd.trim().isEmpty()) cwd = HOLD_CWD_DEFAULT;
-        Log.i("FloatingBall", "电源键：发到 " + cwd);
-        sendTextNewSessionTo(cwd, text, null);
+        return cwd.trim();
+    }
+
+    /** 「上一次回话」的会话 id（空串 = 还没说过话）。 */
+    private String lastTalkSession() {
+        String sid = prefs().getString(PREF_LAST_SESSION, "");
+        return sid == null ? "" : sid.trim();
+    }
+
+    /** 每发一次话就记一笔：电源键第二次长按要回到这里，而不是另起一条。 */
+    private void rememberTalkSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) return;
+        prefs().edit().putString(PREF_LAST_SESSION, sessionId.trim()).apply();
+    }
+
+    private int musicVolume() {
+        try {
+            android.media.AudioManager am =
+                    (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            return am == null ? -1 : am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 音量减键会先把媒体音量按下去一格；收尾后调回按住说话时的值。 */
+    private void restoreMusicVolumeIfFromVolumeKey(boolean fromVolume) {
+        if (!fromVolume) return;
+        final int baseline = holdMusicVolume;
+        if (baseline < 0) return;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    android.media.AudioManager am =
+                            (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+                    if (am == null) return;
+                    int now = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
+                    if (now >= baseline) return;
+                    am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, baseline, 0);
+                    Log.i("FloatingBall", "音量减键：音量 " + now + " → " + baseline + "（收尾后调回）");
+                } catch (Throwable t) {
+                    Log.w("FloatingBall", "音量减键：调回音量失败 " + message(t));
+                }
+            }
+        }, 250);
     }
 
     private void toast(final String msg) {
@@ -5273,6 +5440,8 @@ public class FloatingBallService extends Service {
             toast("DSH 助手没开");
             return;
         }
+        // 发到哪儿，哪儿就是「上一次回话」：电源键第二次长按下次还回这里。
+        rememberTalkSession(sessionId);
         ensureSiriForAssistant();
         a.askIn(sessionId, text, receipts);
     }
@@ -8790,6 +8959,7 @@ public class FloatingBallService extends Service {
     }
 
     @Override public void onDestroy() {
+        unregisterVolumeSendReceiver();   // 音量减接收器跟着服务一起收（球没开时不该有人收）
         stopRenderDriver();          // 独立渲染节拍线程跟着服务一起收
         running = false;
         INSTANCE = null;

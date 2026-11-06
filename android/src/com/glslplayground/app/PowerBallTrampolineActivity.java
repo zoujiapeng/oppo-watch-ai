@@ -25,11 +25,18 @@ public class PowerBallTrampolineActivity extends Activity {
         Intent it = getIntent();
         String what = it == null ? "start" : it.getStringExtra("pk_hold");
         if (what == null || what.isEmpty()) what = "start";
-        Log.i(TAG, "跳板起来 → pk_hold=" + what);
+        // 发送位置 / 触发来源（stop 时用；音量减键要发全新会话、并把音量调回去）
+        String send = it == null ? null : it.getStringExtra("pk_send");
+        String from = it == null ? null : it.getStringExtra("pk_from");
+        if (send == null || send.isEmpty()) send = "last";
+        if (from == null || from.isEmpty()) from = "power_key";
+        Log.i(TAG, "跳板起来 → pk_hold=" + what + " pk_send=" + send + " pk_from=" + from);
         try {
             Intent i = new Intent(this, FloatingBallService.class);
             i.putExtra("pk_hold", what);
-            i.putExtra("from", "power_key");
+            i.putExtra("pk_send", send);
+            i.putExtra("pk_from", from);
+            i.putExtra("from", from);
             if ("stop".equals(what)) {
                 startService(i);
             } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
