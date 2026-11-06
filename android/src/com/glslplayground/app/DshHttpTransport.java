@@ -93,9 +93,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                     String sessionId = pickSession();
                     // 优先走 WebSocket：只有它给得了逐 token 的 text-delta，
                     // 「一个字一个字弹出来」靠的就是这条流；失败再退回轮询。
-                    if (askStreaming(sessionId, textContent(text), cb)) return;
+                    if (askStreaming(sessionId, textContent(text), cb, SiriAssistant.Transport.MODE_QUEUE)) return;
                     if (cancelled) return;
-                    askPolling(sessionId, text, cb);
+                    askPolling(sessionId, text, cb, SiriAssistant.Transport.MODE_QUEUE);
                 } catch (Throwable t) {
                     if (!cancelled) cb.onError(message(t));
                 }
@@ -110,7 +110,16 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     @Override public void askContent(final String sessionId, final String text,
                                      final java.util.List<String> receipts,
                                      final SiriAssistant.Stream cb) {
+        askContent(sessionId, text, receipts, SiriAssistant.Transport.MODE_QUEUE, cb);
+    }
+
+    @Override public void askContent(final String sessionId, final String text,
+                                     final java.util.List<String> receipts,
+                                     final String mode,
+                                     final SiriAssistant.Stream cb) {
         cancelled = false;
+        final String delivery = SiriAssistant.Transport.MODE_STEER.equals(mode)
+                ? SiriAssistant.Transport.MODE_STEER : SiriAssistant.Transport.MODE_QUEUE;
         runAsync(new Runnable() {
             @Override public void run() {
                 try {
@@ -125,9 +134,10 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                             }
                         }
                     }
-                    if (askStreaming(sessionId, content, cb)) return;
+                    Log.i(TAG, "prompt mode=" + delivery + " session=" + sessionId);
+                    if (askStreaming(sessionId, content, cb, delivery)) return;
                     if (cancelled) return;
-                    askPolling(sessionId, text, cb);
+                    askPolling(sessionId, text, cb, delivery);
                 } catch (Throwable t) {
                     if (!cancelled) cb.onError(message(t));
                 }
@@ -150,7 +160,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
      * 边把累积文本回调出去；durable 的 assistant/message 到达时用它的
      * 正文覆盖累积值（权威文本），turn/end 收尾。
      */
-    private boolean askStreaming(String sessionId, JSONArray content, final SiriAssistant.Stream cb) {
+    private boolean askStreaming(String sessionId, JSONArray content, final SiriAssistant.Stream cb,
+                                 String mode) {
         java.net.URI uri;
         try {
             uri = java.net.URI.create(base);
@@ -240,7 +251,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             open.put("payload", payload);
             ws.sendText(open.toString());
 
-            prompt(sessionId, content);
+            prompt(sessionId, content, mode);
         } catch (Throwable t) {
             ws.close();
             Log.i(TAG, "ws setup/prompt failed: " + t);
@@ -270,9 +281,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     }
 
     /** 兜底路径：轮询 session/page。流式不可用时才走这里。 */
-    private void askPolling(String sessionId, String text, SiriAssistant.Stream cb) throws Exception {
+    private void askPolling(String sessionId, String text, SiriAssistant.Stream cb, String mode) throws Exception {
         long baseline = cursorOf(sessionId);
-        prompt(sessionId, textContent(text));
+        prompt(sessionId, textContent(text), mode);
         long deadline = System.currentTimeMillis() + 180000L;
         String best = "";
         while (!cancelled && System.currentTimeMillis() < deadline) {
@@ -291,12 +302,13 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
     }
 
     /** 发一条用户消息（content 已经是 prompt content parts）。 */
-    private void prompt(String sessionId, JSONArray content) throws Exception {
+    private void prompt(String sessionId, JSONArray content, String mode) throws Exception {
         JSONObject args = new JSONObject();
         JSONObject req = new JSONObject();
         req.put("requestId", "android-" + System.currentTimeMillis() + "-" + (++rpcSeq));
         req.put("sessionId", sessionId);
-        req.put("mode", "queue");
+        req.put("mode", SiriAssistant.Transport.MODE_STEER.equals(mode)
+                ? SiriAssistant.Transport.MODE_STEER : SiriAssistant.Transport.MODE_QUEUE);
         req.put("content", content);
         args.put("request", req);
         rpc("session/prompt", args);

@@ -41,9 +41,22 @@ public final class SiriAssistant {
 
     /** DSH 侧能力：问答（会话的挑选由实现负责）。 */
     public interface Transport {
+        /**
+         * 投递方式（DSH `session/prompt` 的 `mode`）：
+         *   · {@code "queue"} = 排队：等当前这一轮跑完再作为下一条消息发（默认）；
+         *   · {@code "steer"} = **插话**：在当前这一轮的**下一个 step 边界**插进去，
+         *     也就是打断/改向正在跑的活儿（语音按键用的就是这个）。
+         * 会话空闲时两者等价（DSH 侧直接开一轮新 turn）。
+         */
+        String MODE_QUEUE = "queue";
+        String MODE_STEER = "steer";
+
         void ask(String text, Stream cb);
         /** 发到指定会话（可带附件回执）。三态手势机：语音/状态 2 的发送目标由界面决定。 */
         void askContent(String sessionId, String text, java.util.List<String> receipts, Stream cb);
+        /** 同上，但显式指定投递方式（{@link #MODE_QUEUE} / {@link #MODE_STEER}）。 */
+        void askContent(String sessionId, String text, java.util.List<String> receipts,
+                        String mode, Stream cb);
         void cancel();
         void shutdown();
         /** 供设置页展示：当前指向的 DSH 地址。 */
@@ -342,12 +355,25 @@ public final class SiriAssistant {
      */
     public void askIn(final String sessionId, final String text,
                       final java.util.List<String> receipts) {
+        askIn(sessionId, text, receipts, Transport.MODE_QUEUE);
+    }
+
+    /**
+     * 同 {@link #askIn(String, String, java.util.List)}，但可以指定投递方式。
+     *
+     * `steer` = **插话**：DSH 收到后不是排在下一条 turn，而是在当前这一轮的下一个 step
+     * 边界把这句话插进去（`agent.steer()` → inbox 的 `next-step` 位），
+     * 也就是"边干活边改主意"；会话空闲时它就是一次正常的提问。
+     * 长按电源键 / 音量减键那两条语音通路走的就是它（用户 2026-11-06 要的「插话发送」）。
+     */
+    public void askIn(final String sessionId, final String text,
+                      final java.util.List<String> receipts, final String mode) {
         if (transport == null) { toast("DSH 未连接"); return; }
         if (sessionId == null || sessionId.isEmpty()) { toast("没有目标会话"); return; }
         FloatingBallService.setAssistantPinned(false);
         setState(State.THINKING);
         askInFlight = true;
-        transport.askContent(sessionId, text, receipts, new Stream() {
+        transport.askContent(sessionId, text, receipts, mode, new Stream() {
             @Override public void onDelta(final String soFar) {
                 main.post(new Runnable() {
                     @Override public void run() {

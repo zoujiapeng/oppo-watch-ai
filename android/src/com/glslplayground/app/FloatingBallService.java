@@ -5583,13 +5583,13 @@ public class FloatingBallService extends Service {
         final String cwd = holdCwd();
         final String remembered = toNewSession ? "" : lastTalkSession();
         if (toNewSession) {
-            Log.i("FloatingBall", "音量减键：发到全新会话（cwd=" + cwd + "）");
-            sendTextNewSessionTo(cwd, text, null);
+            Log.i("FloatingBall", "音量减键：发到全新会话（cwd=" + cwd + "，插话模式）");
+            sendTextNewSessionTo(cwd, text, null, SiriAssistant.Transport.MODE_STEER);
             return;
         }
         if (remembered.isEmpty()) {
             Log.i("FloatingBall", "电源键：还没有「上一次回话」→ 新建一条（cwd=" + cwd + "）");
-            sendTextNewSessionTo(cwd, text, null);
+            sendTextNewSessionTo(cwd, text, null, SiriAssistant.Transport.MODE_STEER);
             return;
         }
         Log.i("FloatingBall", "电源键：回到上一次回话 " + remembered);
@@ -5611,8 +5611,9 @@ public class FloatingBallService extends Service {
                 final String sid = target;
                 main.post(new Runnable() {
                     @Override public void run() {
-                        if (sid == null || sid.isEmpty()) sendTextNewSessionTo(cwd, text, null);
-                        else sendTextToSession(sid, text, null, null);
+                        if (sid == null || sid.isEmpty())
+                            sendTextNewSessionTo(cwd, text, null, SiriAssistant.Transport.MODE_STEER);
+                        else sendTextToSession(sid, text, null, null, SiriAssistant.Transport.MODE_STEER);
                     }
                 });
             }
@@ -5719,6 +5720,19 @@ public class FloatingBallService extends Service {
 
     /** 同 {@link #sendTextNewSession}，但工作目录由调用方指定（按住说话固定发「日常使用」）。 */
     private void sendTextNewSessionTo(final String cwdIn, final String text, final File attach) {
+        sendTextNewSessionTo(cwdIn, text, attach, SiriAssistant.Transport.MODE_QUEUE);
+    }
+
+    /**
+     * 同 {@link #sendTextNewSessionTo(String, String, File)}，但可以指定投递方式。
+     *
+     * `steer` = 插话：DSH 那边不是排到下一条 turn，而是在**当前这一轮的下一个 step**
+     * 把这句话塞进去（`agent.steer()`）。新会话本来就是空闲的，两种方式等价；
+     * 这个参数是为了让「按住说话 → 上一次回话」那条路也能插话 —— 那正是它最常见的场景
+     * （球里正在出字，人又想补一句）。
+     */
+    private void sendTextNewSessionTo(final String cwdIn, final String text, final File attach,
+                                      final String mode) {
         final String attachName = pendingAttachName;
         final String cwd = cwdIn == null ? "" : cwdIn;
         final String preset = prefs().getString("send_preset", "");
@@ -5747,7 +5761,7 @@ public class FloatingBallService extends Service {
                     final String fid = sid;
                     main.post(new Runnable() {
                         @Override public void run() {
-                            askIn(fid, text, receipts);
+                            askIn(fid, text, receipts, mode);
                         }
                     });
                 } catch (Throwable t) {
@@ -5763,6 +5777,13 @@ public class FloatingBallService extends Service {
 
     private void sendTextToSession(final String sid, final String text,
                                    final File attach, final String attachName) {
+        sendTextToSession(sid, text, attach, attachName, SiriAssistant.Transport.MODE_QUEUE);
+    }
+
+    /** 同 {@link #sendTextToSession(String, String, File, String)}，但可以指定投递方式（queue / steer）。 */
+    private void sendTextToSession(final String sid, final String text,
+                                   final File attach, final String attachName,
+                                   final String mode) {
         final DshApi api = DshApi.get(this);
         Log.i("FloatingBall", "send: 发到已有会话 " + sid + "（" + targetSessionTitle + "）");
         new Thread(new Runnable() {
@@ -5774,7 +5795,7 @@ public class FloatingBallService extends Service {
                                 readAll(attach)));
                     }
                     main.post(new Runnable() {
-                        @Override public void run() { askIn(sid, text, receipts); }
+                        @Override public void run() { askIn(sid, text, receipts, mode); }
                     });
                 } catch (Throwable t) {
                     final String m = message(t);
@@ -5788,6 +5809,16 @@ public class FloatingBallService extends Service {
 
     /** 把这一句交给助手：流式回答照旧逐字写进球里。 */
     private void askIn(final String sessionId, final String text, final List<String> receipts) {
+        askIn(sessionId, text, receipts, SiriAssistant.Transport.MODE_QUEUE);
+    }
+
+    /**
+     * 同 {@link #askIn(String, String, List)}，但显式指定投递方式。
+     * 长按电源键 / 音量减键的语音发送走 {@link SiriAssistant.Transport#MODE_STEER}（插话），
+     * 打字发送仍是 {@link SiriAssistant.Transport#MODE_QUEUE}（排队）。
+     */
+    private void askIn(final String sessionId, final String text, final List<String> receipts,
+                       final String mode) {
         SiriAssistant a = SiriAssistant.get(this);
         if (!a.enabled()) {
             toast("DSH 助手没开");
@@ -5796,7 +5827,7 @@ public class FloatingBallService extends Service {
         // 发到哪儿，哪儿就是「上一次回话」：电源键第二次长按下次还回这里。
         rememberTalkSession(sessionId);
         ensureSiriForAssistant();
-        a.askIn(sessionId, text, receipts);
+        a.askIn(sessionId, text, receipts, mode);
     }
 
     // ── 状态 3：四个液玻璃圆区 ───────────────────────────────────────────────

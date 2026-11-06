@@ -233,3 +233,40 @@ PowerKeyDaemon: sh: am broadcast -a …VOLUME_SEND -p com.glslplayground.app …
   不会呼球、不会弹胶囊、不会改 `last_session_id`。
 - 「上一次回话」记的是**球发过话的会话**（`askIn` 时写 `last_session_id`）；在 DSH 桌面端新开的会话
   不算，除非你也用球往那条会话里发过一句。
+
+## 7. 语音发送 = 插话（steer），不是排队（2026-11-06）
+
+用户要的：**长按电源键 / 音量减键发出去的那句话，是「插话」—— 直接打断/改向正在跑的这一轮**，
+而不是排到当前这一轮结束之后再处理。
+
+DSH 的 `session/prompt` 本来就分这两种投递方式（`mode`）：
+
+| mode | DSH 侧动作 | 效果 |
+|---|---|---|
+| `queue` | `agent.followup()` → inbox 的 `next-turn` | 排到**下一条 turn**，当前这轮跑完才轮到它 |
+| `steer` | `agent.steer()` → inbox 的 `next-step` | 在当前这一轮的**下一个 step 边界**插进去 = 插话；会话空闲时就是一次普通提问 |
+
+改动（只动语音这两条路，打字的发送仍是 `queue`）：
+
+- `SiriAssistant.Transport`：新增 `MODE_QUEUE` / `MODE_STEER` 常量 + `askContent(…, String mode, Stream)`；
+  `SiriAssistant.askIn(…, String mode)`。
+- `DshHttpTransport`：`askContent/askStreaming/askPolling/prompt` 全部带 `mode`，`session/prompt` 里
+  `req.put("mode", …)`；日志打一行 `prompt mode=steer session=…`。
+- `FloatingBallService`：`sendTextToHoldSession` → `sendTextNewSessionTo(…, MODE_STEER)` /
+  `sendTextToSession(…, MODE_STEER)` → `askIn(…, MODE_STEER)`。
+  其它入口（胶囊打字、菜单、`sendFromBar`）保持 `MODE_QUEUE`。
+
+实机验证（root 直采那台，`input text` 往胶囊里灌字模拟语音出字）：
+
+```
+# 长任务：3000 字长文（正在跑）
+DshTransport: prompt mode=steer session=session-b2d68056…   ← 01:32:21
+# 12 秒后插话：「STOP NOW. discard the essay. reply exactly: GOT IT」
+DshTransport: prompt mode=steer session=session-b2d68056…   ← 01:32:36
+DshTransport: ws stream done: 6232 text-deltas, 6 chars     ← 01:33:19
+DshTransport: ws stream done: 4774 text-deltas, 6 chars     ← 01:33:19
+```
+
+两条流在同一秒收尾、最终正文都是 6 个字符（`GOT IT`）—— 长文被**当场掐掉**，
+而不是"先写完 3000 字再回答 GOT IT"（排队的话会是两条流相隔很久、第一条是整篇文章）。
+会话空闲时发 steer 也正常：等价于开一轮新 turn（日志里同样是 `mode=steer`）。

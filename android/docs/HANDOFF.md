@@ -1996,3 +1996,19 @@ $ touch files/ballshot            → files/ball-capture.png：桌面文字被�
 对比图（同一部机、同一个钩子拍球自己那一帧）：
 `shots/ball_idle_with_exclusion.png`（正常：透镜） vs `shots/ball_idle_selfsampled.png`（自采样：整颗发白过曝、
 桌面被自己的画面糊掉）—— 平均像素差 25/255，最大 255。
+
+## 2026-11-06（八）：长按电源键 / 音量减键的语音发送改成「插话」
+
+以前这两条语音通路发出去的话都是 `mode=queue`（DSH 侧 `agent.followup()` → `next-turn`），
+球里正在跑的时候补一句，只能等这一轮跑完才被看到。用户要的是**插话**：
+
+- DSH 的 `session/prompt` 有 `mode: "queue" | "steer"`；`steer` 走 `agent.steer()`，
+  消息落在 inbox 的 **`next-step`** 位 —— 当前这一轮的下一个 step 边界就吃到，等于边跑边改主意。
+  会话空闲时两者等价（`agent.steer()` 也会 `wakeDriver` 开新一轮）。
+- 客户端把 `mode` 从 `SiriAssistant.Transport` → `DshHttpTransport.prompt()` 一路透传；
+  `FloatingBallService` 里只有 `sendTextToHoldSession()` 这条路传 `MODE_STEER`，
+  打字的发送（胶囊 / 菜单 / `sendFromBar`）仍是 `MODE_QUEUE`。
+- 传输层日志新增 `prompt mode=… session=…`，一眼能看出这句话是插话还是排队。
+
+实测：3000 字长文跑到一半时插话「STOP… reply exactly: GOT IT」，
+两条 follow 流在同一秒收尾、最终正文 6 个字符 —— 长文当场被掐，不是写完再回。
