@@ -4421,6 +4421,7 @@ public class FloatingBallService extends Service {
                 params.y += (winH - th) / 2;
                 winW = tw; winH = th;
                 params.width = tw; params.height = th;
+                renderer.winPixelW = tw; renderer.winPixelH = th;
                 try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
                 glView.post(winSync);
             }
@@ -4615,6 +4616,7 @@ public class FloatingBallService extends Service {
         if (Math.abs(W - winW) > 60 || Math.abs(H - winH) > 60) {
             Log.i("FloatingBall", "ball window -> " + W + "x" + H + " (halfX=" + hxpx + " halfY=" + hypx + ")");
         }
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
         if (W == winW && H == winH) return;
         final float hx0 = homeCxSafe(), hy0 = homeCySafe();
         winW = W; winH = H;
@@ -6620,6 +6622,7 @@ public class FloatingBallService extends Service {
         params.x = wx;
         params.y = wy - Math.round(winY0());
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+        if (renderer != null) { renderer.winPixelW = W; renderer.winPixelH = H; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         glView.post(winSync);
         applyBallTouchability();
@@ -7804,6 +7807,7 @@ public class FloatingBallService extends Service {
         params.x = 0;
         params.y = -Math.round(winY0());
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+        if (renderer != null) { renderer.winPixelW = screenW; renderer.winPixelH = screenH; }
         try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
         glView.post(winSync);
         // ── 液滴初值：演示页 pointerdown 那一段（cx/cy 跟手 18/0.95，bx/by 用 P 的值）──
@@ -7958,12 +7962,6 @@ public class FloatingBallService extends Service {
         aMaster = 1f; aHalfX = minHalfX; aHalfY = minHalfY; aCorner = minCorner; aBlack = 0f;
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED;
         updateSiriWindow(base * minHalfX, base * minHalfY);   // 窗口从整屏收回球窗
-        if (renderer != null) {
-            Log.i("FloatingBall", "search-exit 几何核对: win=" + winW + "x" + winH
-                    + " winPixel=" + renderer.winPixelW + "x" + renderer.winPixelH
-                    + " glassBuf=" + glassBufW + "x" + glassBufH
-                    + " k=" + ((float) winW / Math.max(1, renderer.winPixelW)));
-        }
         measureSiriTargets(siriStr);                         // 有字就按字重排（方形态），没字就是圆球
         clampBallOnScreen();
         centerBallOnScreen();
@@ -8615,10 +8613,6 @@ public class FloatingBallService extends Service {
         if (glassBufW > 0 && Math.abs(bw - glassBufW) < glassBufW * 0.08f
                 && Math.abs(bh - glassBufH) < glassBufH * 0.08f) return;   // 变化不大就别重建缓冲
         glassBufW = bw; glassBufH = bh;
-        // ★ 渲染器的 k = winW/winPixelW 必须用**这里要的缓冲尺寸**。
-        //   以前这里只 setFixedSize、不告诉 renderer，任何一条"窗口缩小"的收尾路径忘了改
-        //   winPixelW 就会一直停在切胶囊时的 1080x2340 → k=0.73 → 球里动画变大、方形态变小。
-        if (renderer != null) { renderer.winPixelW = bw; renderer.winPixelH = bh; }
         try {
             if (scale >= 0.999f) glView.getHolder().setFixedSize(0, 0);   // 回到跟随视图
             else glView.getHolder().setFixedSize(bw, bh);
