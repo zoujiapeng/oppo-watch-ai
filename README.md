@@ -38,6 +38,7 @@ Each demo is a single self-contained HTML file — no build, no dependencies, ju
 | **换一台手机装（给 AI 的操作清单 + 体检命令 + 踩坑表）** | [`android/docs/DEPLOY_OTHER_PHONE.md`](android/docs/DEPLOY_OTHER_PHONE.md) |
 | 它怎么接上 DSH 的（协议 / 状态表 / 黑区公式） | [`android/docs/DSH_ASSISTANT.md`](android/docs/DSH_ASSISTANT.md) |
 | 接手改代码（现状 / 关键决定 / 未做完） | [`android/docs/HANDOFF.md`](android/docs/HANDOFF.md) |
+| **用户报 UI bug 时的取证文件在哪 / 怎么读**（给 AI 的速查） | [`android/docs/WITNESS.md`](android/docs/WITNESS.md) |
 | DSH 接口完整逆向记录（916 行） | [`android/docs/dsh-external-client-spec.md`](android/docs/dsh-external-client-spec.md) |
 | **全部操作说明**（手势 / 状态 / 每个开关 / 调试口子 / 日志速查） | [`android/docs/OPERATIONS.md`](android/docs/OPERATIONS.md) |
 | **语音按键（VoiceMap）怎么接进设置页** | [`docs/VOICEMAP-INTEGRATION.md`](docs/VOICEMAP-INTEGRATION.md) |
