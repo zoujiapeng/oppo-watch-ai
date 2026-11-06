@@ -10,6 +10,7 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.text.Editable;
 import android.text.InputType;
 import android.util.Log;
 import android.util.TypedValue;
@@ -264,6 +265,27 @@ public class BallSearchBar extends LinearLayout {
     public void setText(String s) {
         input.setText(s == null ? "" : s);
         if (s != null && !s.isEmpty()) input.setSelection(input.getText().length());
+    }
+
+    /**
+     * 多轮听写换行：在光标处（默认末尾）插一个 {@code \n}，**不清掉已有的字**。
+     *
+     * 为什么必须是真换行而不是空格：输入法在同一个输入框里"先换行再长按空格开语音"
+     * 就不会把上一轮的字清掉（语音引擎认为这是一段新的输入），而连着的语音会话
+     * 会互相覆盖。这也是用户手打时的等价动作。
+     *
+     * 只动 Editable、不走 setText()：setText 会重建整个文字并触发一次输入法
+     * onStartInput，正在跑的语音会话会被掐掉。
+     */
+    public void editNewline() {
+        try {
+            Editable e = input.getText();
+            if (e == null) return;
+            int sel = input.getSelectionStart();
+            if (sel < 0 || sel > e.length()) sel = e.length();
+            e.insert(sel, "\n");
+            input.setSelection(Math.min(sel + 1, e.length()));
+        } catch (Throwable ignored) { }
     }
 
     /**

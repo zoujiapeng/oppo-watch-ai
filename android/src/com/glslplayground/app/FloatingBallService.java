@@ -4112,13 +4112,28 @@ public class FloatingBallService extends Service {
                             return true;
                         }
                         // 单击**永远**先弹出输入框（用户：球点击不是应该弹出输入框吗）。
-                        // 若此刻正在听：顺手停麦，转写结果回来再填进这个框（不改变"先弹框"这件事）。
+                        //
+                        // ★ 2026-11-07：单击之后**直接开输入法语音**（和电源键同一条引擎）。
+                        //   以前这里绑的是 {@link BallVoice}（AndroidAsr → 小米 mibrain 系统
+                        //   识别）。实测那条路的识别率和"能说的长度"都明显不如搜狗自己的语音，
+                        //   用户的原话是「没有手机输入法准确，识别长度也没那么长」——
+                        //   根因就是**引擎不是同一个**。现在单击 = 弹框 + 按住说话，
+                        //   引擎统一成输入法，长语音的表现和长按空格完全一致。
                         boolean listeningNow = voice != null && voice.listening();
-                        Log.i("FloatingBall", "单击 → 弹出状态 2 输入框（listening=" + listeningNow + "）");
+                        gateOldAsrOnTap();
+                        Log.i("FloatingBall", "单击 → 弹出状态 2 输入框 + 输入法语音（listening="
+                                + listeningNow + "）");
                         targetSessionId = null;     // 单击弹框 = 发到新会话（选中会话有专门的入口）
                         targetSessionTitle = null;
-                        enterSearchMode("单击", "", false, BAR_SEND);
+                        enterSearchMode("单击", "", true, BAR_SEND);
                         if (listeningNow) voice.tapStop();
+                        if (searchActive && !powerHoldActive) {
+                            main.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    if (searchActive && !powerHoldActive) beginPowerHold();
+                                }
+                            }, 260);
+                        }
                         return true;
                     }
                     case MotionEvent.ACTION_CANCEL:
@@ -5758,9 +5773,9 @@ public class FloatingBallService extends Service {
                     Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（0.8s 内再按一次 = 取证截图）");
                     return;
                 }
-                Log.i("FloatingBall", "音量减 → 结束按住说话 → 发到全新会话");
+                Log.i("FloatingBall", "音量减 → 换行继续听（多轮）");
                 vibrate(12);
-                endPowerHold(true, true);
+                multiTurnDictation();
             }
         };
         try {
@@ -5862,9 +5877,9 @@ public class FloatingBallService extends Service {
                 @Override public void run() {
                     if (!powerHoldActive || !searchActive) return;
                     powerHoldDown = true;
+                    startVoiceAliveWatch();     // ★ 时序：先挂环视器再发 down，别漏掉开头那段
                     vm().trigger("down");
                     Log.i("FloatingBall", "电源键：输入法语音 down（胶囊已开）");
-                    startVoiceAliveWatch();
                 }
             }, 500);
             return;
@@ -5896,9 +5911,9 @@ public class FloatingBallService extends Service {
             @Override public void run() {
                 if (!powerHoldActive || !searchActive) return;
                 powerHoldDown = true;
+                startVoiceAliveWatch();     // ★ 同上：环视器先挂上
                 vm().trigger("down");
                 Log.i("FloatingBall", "电源键：输入法语音 down");
-                startVoiceAliveWatch();
             }
         }, 900);
     }
@@ -5910,22 +5925,122 @@ public class FloatingBallService extends Service {
     // 所以按住期间盯一下系统里"还有没有正在录音的客户端"：连续两次（≈2.4s）都没有，
     // 就再发一次 `down` 让输入法接着听，直到用户真的按结束为止。
     private int voiceDeadTicks = 0;
+    /** 上一次判定「录音没了」的时候，输入框里已经是多少字（用来区分"这一轮说完了"和"被抢麦"）。 */
+    private int voiceDeadBoxLen = -1;
     private long voiceReholdAt = 0;
     private long voiceHoldStartedAt = 0;
-    /** 自动续按的总时长上限：到点就不再续（和模块那边 180s 的看门狗对齐）。 */
+    /**
+     * 自动续按的总时长上限：到点就不再续（和模块那边 180s 的看门狗对齐）。
+     *
+     * ⚠ 这是**连续按住**的上限，不是会话时长。多轮模式下 {@link #multiTurnMark()}
+     * 每上屏一轮就清零重算，所以「换行继续」可以一直说下去，不会被它截断。
+     */
     private static final long VOICE_REHOLD_MAX_MS = 175000;
+    /**
+     * 播放器抢麦造成的闪断（媒体音 / 来电 / 别的 App 短暂占麦）：只消抖 2.4s，不加 4s 冷却，
+     * 否则 TTS 播报读完那一下要白丢 4 秒的字。
+     */
+    private static final long VOICE_REHOLD_MEDIA_MS = 1500;
+    /** 这一轮「按住说话」到现在一共上屏了多少字（多轮模式下逐轮累加，用来判定是不是新的一轮）。 */
+    private volatile int powerHoldTyped = 0;
 
     private void startVoiceAliveWatch() {
         voiceDeadTicks = 0;
+        voiceDeadBoxLen = -1;
+        powerHoldTyped = 0;
         voiceHoldStartedAt = android.os.SystemClock.uptimeMillis();
         voiceReholdAt = voiceHoldStartedAt + 3500;   // 开头 3.5s 不判（输入法还在起录音）
         main.removeCallbacks(voiceAliveWatch);
         main.postDelayed(voiceAliveWatch, 1200);
     }
 
+    /**
+     * 多轮模式（电源键第二轮起：输入法把上一轮的字上屏了、但用户还没按结束）：
+     * 把续按时长重置成"又从头开始计"，这样一直说下去不会被 {@link #VOICE_REHOLD_MAX_MS} 截断。
+     *
+     * 为什么不直接把这个上限调大：上限存在的意义是"UP 丢了也终究要停"，所以它必须有限；
+     * 但它的计时单位应该是**连续这一轮**，而不是整个会话 —— 用户每换一行就是新的一轮。
+     */
+    private void multiTurnMark() {
+        long now = android.os.SystemClock.uptimeMillis();
+        voiceHoldStartedAt = now;
+        voiceDeadTicks = 0;
+        voiceReholdAt = now + 1200;      // 换行之后模块那边已经重新按下了，2s 内就恢复监测
+        Log.i("FloatingBall", "语音：多轮模式，换成新的一轮继续听（已累计 " + powerHoldTyped + " 字）");
+    }
+
     private void stopVoiceAliveWatch() {
         main.removeCallbacks(voiceAliveWatch);
         voiceDeadTicks = 0;
+        voiceDeadBoxLen = -1;
+    }
+
+    /**
+     * 单击球时，**兼容期**把老的系统识别（`BallVoice` → `AndroidAsr`）收干净。
+     *
+     * 2026-11-07 之前弹球会自动开麦，引擎是系统 SpeechRecognizer（本机实际落到
+     * 小米 mibrain 那套 ASR `com.xiaomi.mibrain.speech`）。它和应用内长按空格走的
+     * 输入法语音不是同一个引擎，识别率 / "能说多长"都差一截 —— 用户报的
+     * 「没有手机输入法准确、识别长度也没那么长」就是这个。
+     * 现在单击统一走输入法；设置里 voice_auto 打开（老行为）时仍会先开麦，
+     * 这里负责在单击那一刻把它停掉，免得两条引擎同时抢麦克风。
+     */
+    private void gateOldAsrOnTap() {
+        if (voice == null) return;
+        if (!voice.busy()) return;
+        Log.i("FloatingBall", "voice: 单击 → 收起旧的系统识别，改用输入法语音");
+        try { voice.cancel(); } catch (Throwable ignored) { }
+        voice = null;
+    }
+
+    /** 「新一轮第一句」的判定：输入框里此刻的内容就是这一轮上屏的字数。 */
+    private int boxLen() {
+        try {
+            String t = searchBar == null ? "" : searchBar.text();
+            return t == null ? 0 : t.trim().length();
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * 音量减：**换行，接着说**（多轮）。
+     *
+     * 用户要的语义（原话）：输入法长按空格能「输入好久」，一轮一轮说下去。
+     * 所以：
+     *   · 输入法这一轮的终稿上屏（up → 字停稳）之后，**不发送、不关胶囊**；
+     *   · 框里已有的字（含全部分行）原样保留，交给 DSH 用；
+     *   · 给输入法补一个回车换行，再补一条 down —— 输入法在同一个输入框里开**新的一轮**，
+     *     上一轮的字不会被清掉（这也正是手打「换行 → 长按空格再说」的等价动作）；
+     *   · 环视器（voiceAliveWatch）在这之后继续盯着，播放器抢麦 / 输入法自己收尾都会立刻补按。
+     * 结束由**电源键第二次长按**负责（那一轮才把全文一次性发出去）。
+     */
+    private void multiTurnDictation() {
+        if (!powerHoldActive || !searchActive) {
+            Log.i("FloatingBall", "音量减：不在按住说话里 → 不换行");
+            return;
+        }
+        final int before = boxLen();
+        powerHoldTyped = before;
+        voiceDeadBoxLen = before;
+        multiTurnMark();
+        // ① up：让输入法把这一轮的终稿真正写进框里（流式中间结果才算落定）
+        try { vm().trigger("up"); } catch (Throwable ignored) { }
+        // ② 等字停稳，再换行 + 重新按下
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!powerHoldActive || !searchActive) return;
+                powerHoldTyped = Math.max(powerHoldTyped, boxLen());
+                try {
+                    if (searchBar != null) searchBar.editNewline();
+                } catch (Throwable ignored) { }
+                powerHoldDown = true;
+                try { vm().trigger("down"); } catch (Throwable ignored) { }
+                multiTurnMark();
+                Log.i("FloatingBall", "语音：换行完成（框里 " + boxLen() + " 字）→ 新一轮已经按下，继续听");
+                toast("继续，说完按电源键");
+            }
+        }, IME_SETTLE_MS);
     }
 
     private final Runnable voiceAliveWatch = new Runnable() {
@@ -5952,22 +6067,38 @@ public class FloatingBallService extends Service {
                     //   搜狗自己收尾时是"stop + 把识别结果上屏"；这时候再补一条 down 会开一次
                     //   **新的**语音会话，输入法通常会把刚上屏的那句清掉重来 —— 用户看到的是
                     //   「字识别出来了，但按结束时框是空的 → 没听清 → 发送不成功」。
-                    //   所以只有在**一个字都还没上屏**的时候才续按。
+                    //
+                    // ★ 2026-11-07（二次修正）：但"有字"要分成两种情况，混在一起处理正是
+                    //   「说一会儿就断、只识别到前半句」的另一半成因：
+                    //     · 框里的字数跟上次判定时**一样** → 输入法把这一轮说完了，上屏了，
+                    //       等用户继续（或者等用户按结束）。这时不能按，按了会清掉。
+                    //     · 框里的字数**变了**（说明这一轮已经上屏完了、我在接着听下一轮）
+                    //       或者框里**根本没变长**却被停麦 → 这多半是**播放器抢麦**
+                    //       （DSH 的 TTS 朗读回复 / 来电 / 别的 App 录音），属于闪断，
+                    //       必须马上补按，否则朗读那几秒说的话全丢。
                     String box = "";
                     try { box = searchBar == null ? "" : searchBar.text(); } catch (Throwable ignored) { }
-                    if (box != null && !box.trim().isEmpty()) {
-                        Log.i("FloatingBall", "语音：输入法收尾了但已经上屏 " + box.trim().length()
+                    int len = box == null ? 0 : box.trim().length();
+                    if (len > 0 && len == voiceDeadBoxLen) {
+                        Log.i("FloatingBall", "语音：输入法收尾了但已经上屏 " + len
                                 + " 字 → 不续按（保住已识别的文字）");
                         main.postDelayed(this, 1200);
                         return;
                     }
-                    if (now - voiceHoldStartedAt > VOICE_REHOLD_MAX_MS) {
+                    boolean mediaCut = voiceDeadBoxLen > 0 && len > 0 && len != voiceDeadBoxLen;
+                    long sinceStart = now - voiceHoldStartedAt;
+                    if (!mediaCut && sinceStart > VOICE_REHOLD_MAX_MS) {
                         Log.w("FloatingBall", "语音：已经续按到 " + (VOICE_REHOLD_MAX_MS / 1000)
                                 + "s 上限 → 不再续，等用户按结束");
                         return;
                     }
-                    voiceReholdAt = now + 4000;      // 续按之后给输入法 4s 重新起录音，别连环按
-                    Log.i("FloatingBall", "语音：输入法自己把录音停了（还没出字）→ 自动续按，继续听");
+                    voiceDeadBoxLen = len;
+                    // 闪断给 1.5s 消抖；真·收尾给 4s（别连环按，把输入法刚起的录音打断）
+                    voiceReholdAt = now + (mediaCut ? VOICE_REHOLD_MEDIA_MS : 4000);
+                    Log.i("FloatingBall", "语音：" + (mediaCut
+                                    ? "录音被抢走（播放器/来电，框里 " + len + " 字）→ 马上补按，接着听"
+                                    : "输入法自己把录音停了（还没出字）→ 自动续按，继续听")
+                            + "；本轮已 " + (sinceStart / 1000) + "s");
                     try { vm().trigger("down"); } catch (Throwable ignored) { }
                 }
             }
@@ -6114,7 +6245,12 @@ public class FloatingBallService extends Service {
                 }
                 Log.i("FloatingBall", "电源键：输入法结果 = 「" + t + "」（静默 " + quiet
                         + "ms / 共 " + total + "ms）");
+                powerHoldTyped = t.length();
+                voiceDeadBoxLen = t.length();
                 sendTextToHoldSession(t, toNewSession);
+                powerHoldActive = false;          // 这一轮真的结束了：别再补按
+                stopVoiceAliveWatch();
+                powerHoldTyped = 0;
                 try { if (searchBar != null) searchBar.setText(""); } catch (Throwable ignored) { }
                 closeSearchMode("电源键说话完成");
             }

@@ -436,15 +436,22 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
         pressDown(ctx, in);
         // 看门狗：万一 UP 没送到（触摸被系统手势抢走、进程假死…）才强制松手。
         // ⚠️ 时间必须给足：用户要「说很长的话」，20 秒一到就把按住状态强行松掉，
-        //    输入法那边等于"说到一半突然结束"，后半句全丢。3 分钟足够长，真丢了 UP
-        //    也还有这条兜底（避免键盘永久隐身/按键永久按着）。
+        //    输入法那边等于"说到一半突然结束"，后半句全丢。
+        // ★ 2026-11-07：改成**续期式**看门狗 —— 每次 down（含多轮换行后的 re-down）
+        //    都把这一轮重新计时，所以一直说下去不会被 3 分钟截断；而真的丢了 UP 时
+        //    它仍然会在最后一个 down 之后 3 分钟内兜住（避免键盘永久隐身 / 按键永久按着）。
         final int seq = ++sDownSeq;
+        armWatchdog(seq);
+    }
+
+    /** 3 分钟没收到新的 down/up → 认为 UP 丢了，强制松手。 */
+    static void armWatchdog(final int seq) {
         main().postDelayed(new Runnable() {
             @Override public void run() {
                 if (seq != sDownSeq || !sPressed) {
                     return;
                 }
-                log("watchdog: 按住超过 180s，强制松手");
+                log("watchdog: 按住超过 180s 没有新的 down/up，强制松手");
                 pressUp(sService);
                 sStealthEnabled = false;
                 applyWindow(sService, "watchdog");
@@ -490,9 +497,11 @@ public class VoiceMapHook implements IXposedHookLoadPackage {
             // 直接复用旧状态会让这一串手势被当成"还按着"，所以先把按下状态清掉再按。
             log("re-down: 上一次按住已结束但没有 UP，重新按");
             sPressed = false;
+            sDownSeq++;          // 让上一轮的看门狗作废，下面重新计时
         }
         boolean handled = kv.dispatchTouchEvent(motion(sDownTime, sDownTime, MotionEvent.ACTION_DOWN, x, y, 1f));
         sPressed = true;
+        armWatchdog(++sDownSeq);     // 每一次按下都重新给 3 分钟（多轮续说不被截断）
         log("DOWN at (" + x + "," + y + ") handled=" + handled + " kv=" + kv.getClass().getName()
                 + " " + kv.getWidth() + "x" + kv.getHeight());
         ack(ctx, "down/touch (" + (int) x + "," + (int) y + ")");
