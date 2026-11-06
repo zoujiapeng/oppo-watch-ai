@@ -208,14 +208,17 @@ sim_longpress() {
 #       float_params 被悄悄改成 zoom=1.63 / blur=0.3 之类，跟 demo 默认不一样了。
 # 这条命令把 float_params 写回 demo 默认值（zoom 1.00 / blur 1.8 / refraction 200 …）。
 glass_reset() {
+  # 用法：glass-reset [blur]   默认 blur=0.3（用户喜欢的：demo 默认 + 只把模糊调到 0.3）
+  BLUR="${2:-0.3}"
   if [ -z "$PY" ]; then echo "ERR 没有 python3"; return 1; fi
   am force-stop "$APP" >/dev/null 2>&1
   sleep 1
-  LD_LIBRARY_PATH="$PYLIB" "$PY" - <<'PYEOF'
-import re, html, json
+  BLUR="$BLUR" LD_LIBRARY_PATH="$PYLIB" "$PY" - <<'PYEOF'
+import re, html, json, os
 p="/data/data/com.glslplayground.app/shared_prefs/watch.xml"
 d={"master":1,"posX":0.5,"posY":0.5,"halfX":0.37,"halfY":0.25,"corner":1,
-   "refraction":200,"band":170,"zoom":1,"dome":0.4,"aberration":10,"blur":1.8,
+   "refraction":200,"band":170,"zoom":1,"dome":0.4,"aberration":10,
+   "blur":float(os.environ.get("BLUR","0.3")),
    "topDarken":0.93,"black0":-1,"black1":-0.01,"edgeBleed":0.11,
    "waveAmp":1.9,"waveScale":0.85,"waveOn":True,"waveMode":1}
 s=open(p,encoding="utf-8").read()
