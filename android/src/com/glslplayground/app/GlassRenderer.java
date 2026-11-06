@@ -859,6 +859,21 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             cr = base * svHalfY * svCorner * svMaster;
         }
 
+        // ★ 2026-11-06：形状相对**原版球**的尺寸比（球缩到屏宽 1/3 时 ≈ 0.544；方形态/卡片 → 1）。
+        //
+        // 玻璃里凡是"用像素长度描述、但描述的是形状比例"的量，都必须乘它 ——
+        // 原版（liquid-glass.html / 原版球）里这些量是跟着形状一起变的（P.band/P.master 那一套）：
+        //   · 折射镜缘 uBand / uRefraction / uScale（球缩了不缩 → 中间那道折痕）
+        //   · 思考中的流体圆点 uOrbRadius（环半径 = uOrbRadius 像素、点半径 = 0.038×它）
+        //     —— 不缩的话小球里圆点会顶满整颗球，跟原版"一小圈点在球心附近"完全两样。
+        // 方形态/聊天卡片比原版球大 → 夹到 1，卡片一个像素都不变。
+        float shapeK = 1f;
+        {
+            float refHx = Math.max(1e-3f, base * halfX * Math.max(1e-3f, master));
+            float refHy = Math.max(1e-3f, base * halfY * Math.max(1e-3f, master));
+            shapeK = Math.max(0.05f, Math.min(1f, Math.min(hx / refHx, hy / refHy)));
+        }
+
         // 防"球被窗口裁成方形"：
         // hx = base*halfX*master，而窗口大小是按 winSize 定的、不跟 master 变。
         // master 拉到 1.7 之类的值时球比窗口还宽 —— 两侧被裁平（看着像方形），
@@ -1000,12 +1015,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         //   屏幕上就是中间一道折痕（用户："缩小的中间都看到折痕了怪怪的"）。
         //   这里按「当前形状 ÷ 原版球」再补一个系数，镜缘重新变成"边缘一圈、内部零位移平台"。
         //   方形态/卡片比原版球大 → 系数夹到 1，聊天卡片一点没变。
-        float shapeK = 1f;
-        {
-            float refHx = Math.max(1e-3f, base * halfX * Math.max(1e-3f, master));
-            float refHy = Math.max(1e-3f, base * halfY * Math.max(1e-3f, master));
-            shapeK = Math.max(0.05f, Math.min(1f, Math.min(hx / refHx, hy / refHy)));
-        }
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uRefraction"),
                 refraction * master * shapeK * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBand"),
@@ -1026,7 +1035,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbMix"), orbMix);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"), orbRadius * k);
+        // 圆点环半径按形状等比缩（原版：环半径恒为球的一半高左右，球缩了它也跟着缩）
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRadius"),
+                Math.max(4f, orbRadius * shapeK) * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
