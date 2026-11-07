@@ -79,6 +79,7 @@ javac --release 8 -classpath .build/android.jar -d .build/javac-check $(find .bu
 | Demo | 说明 | 交互 |
 |---|---|---|
 | **[Siri Wave](https://aaaa-zhen.github.io/glsl-playground/siri-wave.html)**<br><sub>[`siri-wave.html`](siri-wave.html)</sub> | 声波与流体圆点两种形态：光谱色散、Lorentzian 发光线、metaball + smin 平滑融合、欠阻尼弹簧动画 | 点击切换形态 |
+| **[Fluid Glow](https://aaaa-zhen.github.io/glsl-playground/fluid-glow.html)**<br><sub>[`fluid-glow.html`](fluid-glow.html)</sub> | 连续发光的流体：和流体圆点**同一套发光核**（细锐芯 + 长拖尾），丝线在球壳上被域扭曲和呼吸推着走，像水里收缩扩散的一团光 | 改参数实时生效；手机上是底部抽屉，桌面是右侧玻璃面板 |
 | **[Liquid Glass](https://aaaa-zhen.github.io/glsl-playground/liquid-glass.html)**<br><sub>[`liquid-glass.html`](liquid-glass.html)</sub> | 液态玻璃材质：透镜折射、色差、backdrop 模糊、黑顶镜面、赤道亮线 | 上传自己的截图 → 玻璃实时折射它；全部参数可调 |
 | **[Metaball → Search](https://aaaa-zhen.github.io/glsl-playground/metaball-search.html)**<br><sub>[`metaball-search.html`](metaball-search.html)</sub> | 从屏幕边缘拖出液滴唤起搜索框：梯度感知 smooth-min（液滴渗出时起液颈）、SDF 驱动玻璃折射、CPU 弹簧驱动「圆 → 胶囊」连续形变 | 从顶部黑边**往下拖**，松手凝聚成黑玻璃搜索框 |
 

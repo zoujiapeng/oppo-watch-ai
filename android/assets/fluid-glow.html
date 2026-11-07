@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<!--
+  Fluid Glow —— 连续发光的流体动画（单文件、零依赖、WebGL1）
+
+  ┌ 这是什么 ────────────────────────────────────────────────────────────
+  │ 和安卓悬浮球的「流体圆点（dots）」同一套发光核：
+  │     core = clamp(0.0032 / pow(sd, 1.35), 0, 1)
+  │     edge = 1 - smoothstep(0.02, 0.56, sd)
+  │ 只不过 sd 这次来自**丝线距离场**，于是细锐芯 + 长拖尾的光晕从"一圈点"
+  │ 变成"一团在动的水母"：球壳上的纬线/经线被域扭曲和呼吸推着走。
+  │
+  │ 连续：整条时间轴只有 sin / 连续噪声（没有分段、没有关键帧、
+  │ 没有 gather→burst 那种状态机），所以永远接得上，切速度也不跳帧。
+  │ 呼吸：球半径本身在收缩/扩散；域扭曲让轮廓和丝线一起被水拖着走。
+  │
+  │ 页面：一整块「悬浮玻璃」承托画面（圆角、玻璃边、内阴影），
+  │ 控制面板是第二块玻璃 —— 和 liquid-glass.html 的视觉语言一致。
+  │
+  │ 打开方式：浏览器直接开；App 里从 index.html 的「🪼 Fluid Glow」卡片进。
+  └────────────────────────────────────────────────────────────────────
+-->
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#04070a">
+<title>Fluid Glow · 连续流体发光</title>
+<style>
+  /* ────────────────────────────────────────────────────────────────
+     视觉语言照 liquid-glass.html：纯黑舞台 + 一块「悬浮玻璃」承托内容。
+     区别：那边玻璃是球体本身；这里是**一整块悬浮玻璃页面**，动画跑在
+     玻璃页里面（圆角、玻璃边、内阴影），控制面板再浮在它上面。
+     ──────────────────────────────────────────────────────────────── */
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:#04070a;overflow:hidden;
+    font:13px/1.5 -apple-system,system-ui,"PingFang SC","Noto Sans SC",sans-serif;
+    color:#eef6fb}
+
+  /* 桌面底色：一层极淡的冷色光晕，让玻璃卡片"浮"得起来 */
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;
+    background:
+      radial-gradient(60% 50% at 50% 38%, rgba(38,120,150,.16), transparent 70%),
+      radial-gradient(80% 60% at 80% 90%, rgba(30,80,120,.10), transparent 70%),
+      #04070a;}
+
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:max(10px,env(safe-area-inset-top)) 10px max(10px,env(safe-area-inset-bottom));}
+
+  /* 悬浮玻璃页：动画就装在这块玻璃里 */
+  #card{position:relative;width:100%;height:100%;max-width:1180px;border-radius:28px;
+    overflow:hidden;background:#020405;isolation:isolate;
+    border:1px solid rgba(255,255,255,.13);
+    box-shadow:
+      0 30px 80px -20px rgba(0,0,0,.9),
+      0 0 0 1px rgba(255,255,255,.04) inset,
+      0 1px 0 rgba(255,255,255,.22) inset,
+      0 -1px 0 rgba(140,255,240,.10) inset;
+    will-change:transform}
+  /* 玻璃厚度：顶沿高光 + 一圈极淡的青色渗光，别盖住画面 */
+  #card::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,0) 14%),
+      radial-gradient(120% 90% at 50% -10%, rgba(120,255,235,.06), transparent 55%);
+    mix-blend-mode:screen}
+
+  #gl{display:block;width:100%;height:100%;background:#020405;touch-action:none}
+
+  /* ── 标题条：一小片磨砂玻璃浮在页内左上角 ── */
+  #hud{position:absolute;top:14px;left:14px;right:14px;display:flex;align-items:center;
+    gap:10px;pointer-events:none;z-index:5}
+  .chip{display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:14px;
+    background:rgba(10,18,22,.42);border:1px solid rgba(255,255,255,.13);
+    -webkit-backdrop-filter:blur(18px) saturate(150%);backdrop-filter:blur(18px) saturate(150%);
+    box-shadow:0 8px 26px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.18) inset;
+    pointer-events:auto}
+  .chip .led{width:7px;height:7px;border-radius:50%;background:#5ff5d8;
+    box-shadow:0 0 10px #34e8c8,0 0 22px rgba(52,232,200,.55)}
+  .chip .tt{font-size:12.5px;font-weight:600;letter-spacing:.02em;white-space:nowrap}
+  .chip .tt small{display:block;font-weight:400;font-size:10px;letter-spacing:.06em;
+    color:#8fb6bd;text-transform:uppercase}
+  #hud .spacer{flex:1}
+  #panelToggle{pointer-events:auto;display:flex;align-items:center;gap:6px;
+    font:600 12px/1 inherit;padding:10px 13px;border-radius:13px;cursor:pointer;
+    color:#eaf7fb;background:rgba(10,18,22,.42);
+    border:1px solid rgba(255,255,255,.15);
+    -webkit-backdrop-filter:blur(18px) saturate(150%);backdrop-filter:blur(18px) saturate(150%);
+    box-shadow:0 8px 26px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.18) inset;
+    transition:background .18s ease, transform .12s ease}
+  #panelToggle:active{transform:scale(.97)}
+  #panelToggle.on{background:rgba(48,220,190,.28);border-color:rgba(110,255,225,.45)}
+
+  /* ── 控制面板：第二块悬浮玻璃，手机上是底部抽屉 ── */
+  #panel{position:absolute;z-index:6;right:14px;top:66px;bottom:14px;width:252px;
+    padding:14px 12px 16px;border-radius:20px;overflow-y:auto;overscroll-behavior:contain;
+    background:rgba(9,16,20,.52);border:1px solid rgba(255,255,255,.13);
+    -webkit-backdrop-filter:blur(26px) saturate(160%);backdrop-filter:blur(26px) saturate(160%);
+    box-shadow:0 18px 50px rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.16) inset;
+    transform:translateX(calc(100% + 22px));opacity:0;pointer-events:none;
+    transition:transform .32s cubic-bezier(.22,.9,.24,1), opacity .22s ease;
+    scrollbar-width:none}
+  #panel::-webkit-scrollbar{display:none}
+  body.panel #panel{transform:none;opacity:1;pointer-events:auto}
+  #panel h2{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+    color:#9fd8d4;margin:2px 2px 10px}
+  .grp{margin-bottom:13px}
+  .gh{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#6f939b;
+    margin:0 2px 7px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .row{margin-bottom:9px}
+  .row label{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+    font-size:11px;color:#b9cdd2;margin-bottom:3px}
+  .row label .v{color:#5ff5d8;font-variant-numeric:tabular-nums;font-size:10.5px}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:2px;
+    background:linear-gradient(90deg,rgba(95,245,216,.85),rgba(95,245,216,.18));
+    outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
+    border-radius:50%;background:#eafffb;border:1px solid rgba(0,90,80,.5);
+    box-shadow:0 0 10px rgba(95,245,216,.75),0 1px 2px rgba(0,0,0,.5)}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#eafffb;
+    border:1px solid rgba(0,90,80,.5);box-shadow:0 0 10px rgba(95,245,216,.75)}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+  .btns button{flex:1;min-width:64px;font:600 11px/1 inherit;padding:8px 6px;border-radius:9px;
+    color:#dff2f4;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);
+    cursor:pointer;transition:background .15s ease}
+  .btns button:active{background:rgba(95,245,216,.22)}
+  .btns button.on{background:rgba(95,245,216,.24);border-color:rgba(120,255,230,.5);color:#eafffb}
+  .hint{font-size:10px;color:#66868d;line-height:1.55;margin-top:8px}
+
+  /* 手机（竖屏或窄视口）：面板改成底部抽屉，别挡住画面 */
+  @media (max-width:900px), (orientation:portrait){
+    #stage{padding:max(8px,env(safe-area-inset-top)) 8px max(8px,env(safe-area-inset-bottom))}
+    #card{border-radius:24px}
+    #hud{top:11px;left:11px;right:11px}
+    .chip{padding:7px 10px;border-radius:12px}
+    .chip .tt{font-size:11.5px}
+    #panelToggle{padding:8px 11px;font-size:11px;border-radius:11px}
+    #panel{left:11px;right:11px;top:auto;bottom:11px;width:auto;max-height:58%;border-radius:18px;
+      transform:translateY(calc(100% + 22px));padding:12px 14px 16px}
+    body.panel #panel{transform:none}
+    .grp{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+    .gh{grid-column:1/-1}
+    .row{margin-bottom:7px}
+  }
+  @media (max-width:420px){
+    .row label{font-size:10.5px}
+    .grp{grid-template-columns:1fr}
+  }
+
+  #err{position:absolute;left:14px;right:14px;bottom:14px;z-index:9;display:none;
+    background:rgba(160,26,32,.94);color:#fff;padding:12px 14px;border-radius:12px;
+    font:11.5px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:46%;overflow:auto}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="card">
+    <canvas id="gl"></canvas>
+
+    <div id="hud">
+      <div class="chip">
+        <span class="led"></span>
+        <span class="tt">Fluid Glow<small>continuous · in water</small></span>
+      </div>
+      <div class="spacer"></div>
+      <button id="panelToggle" aria-label="调参">调参 ⚙</button>
+    </div>
+
+    <div id="panel">
+      <h2>Fluid Glow</h2>
+
+      <div class="grp">
+        <div class="gh">形态</div>
+        <div class="row"><label>体量 size <span class="v" id="vSZ">0.38</span></label>
+          <input id="SZ" type="range" min="16" max="70" value="38"></div>
+        <div class="row"><label>呼吸 breath <span class="v" id="vBR">1.00</span></label>
+          <input id="BR" type="range" min="0" max="200" value="100"></div>
+        <div class="row"><label>自转 spin <span class="v" id="vSP">1.00</span></label>
+          <input id="SP" type="range" min="0" max="250" value="100"></div>
+        <div class="row"><label>丝线密度 ribs <span class="v" id="vRB">20</span></label>
+          <input id="RB" type="range" min="6" max="34" value="20"></div>
+      </div>
+
+      <div class="grp">
+        <div class="gh">发光</div>
+        <div class="row"><label>强度 glow <span class="v" id="vGL">1.00</span></label>
+          <input id="GL" type="range" min="20" max="260" value="100"></div>
+        <div class="row"><label>色相 hue <span class="v" id="vHU">0.00</span></label>
+          <input id="HU" type="range" min="-40" max="40" value="0"></div>
+        <div class="row"><label>浮尘 dust <span class="v" id="vDU">1.00</span></label>
+          <input id="DU" type="range" min="0" max="220" value="100"></div>
+        <div class="row"><label>水雾 haze <span class="v" id="vHZ">1.00</span></label>
+          <input id="HZ" type="range" min="0" max="220" value="100"></div>
+      </div>
+
+      <div class="grp">
+        <div class="gh">时间</div>
+        <div class="row"><label>速度 speed <span class="v" id="vSD">1.00</span></label>
+          <input id="SD" type="range" min="0" max="260" value="100"></div>
+        <div class="btns">
+          <button id="playBtn" class="on">暂停</button>
+          <button id="resetBtn">重置</button>
+        </div>
+        <div class="hint" id="hint">连续动画：没有分段、没有跳帧，呼吸与自转都是无缝的正弦/噪声叠加。</div>
+      </div>
+    </div>
+
+    <div id="err"></div>
+  </div>
+</div>
+
+<!-- ───────────────────────── 顶点：一个全屏大三角 ───────────────────────── -->
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<!-- ───────────────────────── 片元：流体发光 ───────────────────────── -->
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  iRes;
+uniform float iTime;
+uniform float uSize;     // 这团光的半径（短边归一化）
+uniform float uBreath;   // 呼吸幅度
+uniform float uSpin;     // 自转/漂移
+uniform float uRibs;     // 纬线数量
+uniform float uGlow;     // 发光强度
+uniform float uHue;      // 色相偏移
+uniform float uDust;     // 浮尘
+uniform float uHaze;     // 水体雾
+
+const float TAU = 6.28318530718;
+const float PI  = 3.14159265359;
+
+/* ── 噪声 ───────────────────────────────────────────────────────────── */
+float hash12(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+vec2 hash22(vec2 p){
+  vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.xx + p3.yz) * p3.zy);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0 - 2.0*f);
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm3(vec2 p){
+  float s = 0.0, a = 0.5;
+  for(int i = 0; i < 3; i++){ s += a * vnoise(p); p = p * 2.03 + 19.7; a *= 0.5; }
+  return s;
+}
+float fbm2(vec2 p){
+  float s = 0.0, a = 0.55;
+  for(int i = 0; i < 2; i++){ s += a * vnoise(p); p = p * 2.11 + 7.3; a *= 0.45; }
+  return s;
+}
+vec3 hue2rgb(float h){
+  h = fract(h);
+  float r = clamp(abs(h*6.0 - 3.0) - 1.0, 0.0, 1.0);
+  float g = clamp(2.0 - abs(h*6.0 - 2.0), 0.0, 1.0);
+  float b = clamp(2.0 - abs(h*6.0 - 4.0), 0.0, 1.0);
+  return vec3(r, g, b);
+}
+
+/* ── dots 同款发光核 ──────────────────────────────────────────────────
+   siriFluidDotsCore 里那两行：
+     core3 = clamp(INTENSITY / pow(sd3, 1.35), 0, 1)
+     edge3 = 1 - smoothstep(0.02, 0.56, sd3)
+     bright = core3 * edge3
+   这次 sd 来自丝线距离场（单位 = 球半径），所以给出来的依旧是
+   「细锐芯 + 长拖尾光晕」那一族光，只是形状从圆点变成连续流体。       */
+float glowCore(float sd){
+  float c = clamp(0.0032 / pow(max(sd, 1e-4), 1.35), 0.0, 1.0);
+  return c * (1.0 - smoothstep(0.02, 0.56, sd));
+}
+/* 浮尘用的小号同族光核：光晕限制在一格里，不会糊成方块 */
+float glowSpeck(float d){
+  return exp(-d*d*520.0) + 0.14*exp(-d*20.0);
+}
+
+/* ── 旋转 ───────────────────────────────────────────────────────────── */
+vec3 rotY(vec3 v, float a){ float c = cos(a), s = sin(a); return vec3(c*v.x + s*v.z, v.y, -s*v.x + c*v.z); }
+vec3 rotX(vec3 v, float a){ float c = cos(a), s = sin(a); return vec3(v.x, c*v.y - s*v.z, s*v.y + c*v.z); }
+vec3 rotZ(vec3 v, float a){ float c = cos(a), s = sin(a); return vec3(c*v.x - s*v.y, s*v.x + c*v.y, v.z); }
+
+/* ── 半颗球壳：纬线（主丝线）+ 经线（次丝线），全是连续相位，无分段 ──
+   side = +1 正面 / -1 背面；背面只留 30% 亮度 → 看起来有厚度。        */
+vec3 shell(vec2 q, float side, float t, float dens, float rim){
+  vec3 col = vec3(0.0);
+
+  float r2 = dot(q, q);
+  float z  = sqrt(max(0.0, 1.0 - r2));
+  vec3 v = vec3(q, z * side);
+
+  /* 球面受光：丝线不再是均匀发光的一张网，而是有一盏左上的光在"扫"过整颗球
+     —— 下半边暗、轮廓带一圈掠射光，这是"球"而不是"饼"的关键 */
+  vec3  nrm = vec3(q, z * side);
+  vec3  ldir = normalize(vec3(-0.55, 0.42, 0.72));
+  float lit = 0.12 + 0.88 * max(dot(nrm, ldir), 0.0);
+  float rimLight = pow(1.0 - z, 2.5) * 0.55;
+
+  /* 姿态 —— 对着截图调的：
+     ① 先绕自身极轴自转（经线在跑，纬线不动）；
+     ② 再把极轴摆到**屏幕平面内**的右上方向（rotZ）——緯线于是变成一串
+        在右上角汇聚的圆弧，而不是同心圆／水平条纹；
+     ③ 最后让极轴朝观众这边歪一点点（rotX 小角），汇聚点落在轮廓内側，
+        屏幕边缘不会出现一个"正对着你"的极点（那是上一版最丑的一帧）。 */
+  v = rotY(v, t * 0.30 * uSpin + 0.85);
+  v = rotZ(v, -0.80 + 0.06 * sin(t * 0.11));
+  v = rotX(v, 0.10 + 0.05 * sin(t * 0.17));
+
+  float lat = asin(clamp(v.y, -1.0, 1.0));
+  float lon = atan(v.x, v.z);
+
+  /* 绕球面流动的扭曲：经度嵌成圆再采样噪声 → 接缝天然闭合 */
+  float wn  = fbm3(vec2(cos(lon), sin(lon)) * 1.15 + vec2(lat * 0.85, t * 0.16));
+  float wn2 = fbm2(vec2(cos(lon), sin(lon)) * 2.4  - vec2(lat * 0.7,  t * 0.11));
+
+  /* ── 纬线（主丝线）── */
+  // 球面透视：越靠轮廓线越密（3D 感的关键）
+  float foreshorten = 0.42 + 0.58 * sqrt(max(0.0, 1.0 - dot(q, q)));
+
+  float spacing = PI / dens;
+  // 屏幕空间剪切：纬线整体斜过来，极点那圈"靶心"被掰成斜纹，
+  // 不再是正对着你的同心圆（截图里就是这种斜着绕的纱线）
+  float shear = 0.30 * q.x * (1.0 + 0.15 * sin(t * 0.27));
+  float f    = (lat + (wn - 0.5) * 0.38 + shear) / spacing;
+  float sdLat = abs(fract(f + 0.5) - 0.5) * spacing * foreshorten * 0.95;
+  float band  = floor(f + 0.5);
+  float hb    = hash12(vec2(band, side * 7.0));
+
+  // 每根丝线自己的粗细/明暗脉动：连续正弦，永远不会"突然出现"
+  float thick = 0.55 + 0.65 * pow(0.5 + 0.5 * sin(lat * 2.2 + t * 0.9 + hb * TAU), 3.0);
+  float gLat  = glowCore(sdLat / max(thick, 0.30));
+
+  float hue = 0.478 + uHue
+            + 0.065 * sin(band * 1.7 + t * 0.21)
+            + 0.05  * (wn2 - 0.5);
+  vec3 cLine = hue2rgb(hue);
+  // 暖色点缀（截图里那些橙金色高光）
+  float warm = smoothstep(0.64, 0.92, wn2 * 0.7 + 0.42 * fbm2(vec2(lat * 2.7 + band * 0.6, t * 0.08)));
+  cLine = mix(cLine, hue2rgb(0.075 + uHue * 0.5), warm * 0.85);
+  // 极区偏紫
+  float pole = smoothstep(0.62, 0.98, v.y);
+  cLine = mix(cLine, hue2rgb(0.775), pole * 0.6);
+
+  // 前亮后暗：体积感
+  float depth = side > 0.0 ? 1.0 : 0.24;
+
+  col += cLine * gLat * depth * (0.45 + 0.95 * hb) * (lit + rimLight);
+
+  /* ── 经线（次丝线）：和纬线交叉，给出"纱线团"的细密质感 ── */
+  float nLon  = dens * 0.35;
+  float f2    = (lon + (wn2 - 0.5) * 1.5) * nLon / TAU;
+  float sdLon = abs(fract(f2 + 0.5) - 0.5) * (TAU / nLon) * max(cos(lat), 0.25) * foreshorten;
+  float gLon  = glowCore(sdLon * 1.15) * 0.09;
+  col += mix(cLine, hue2rgb(0.50 + uHue), 0.35) * gLon * depth * (lit + rimLight * 1.2);
+
+  /* ── 边缘：掠射处丝线自然挤密 + 一层极淡的轮廓光 ── */
+  col += cLine * rim * 0.18 * depth;
+
+  return col;
+}
+
+/* ── 浮尘：抖动网格粒子，光晕收在一格里；亮的少数、其余留空 ───────── */
+float dustLayer(vec2 p, float t, float cells, float seed, float rad, float gain){
+  vec2 g  = p * cells;
+  vec2 id = floor(g);
+  vec2 f  = fract(g) - 0.5;
+
+  float gate = hash12(id + seed);
+  if(gate < 0.42) return 0.0;
+
+  vec2 h  = hash22(id + seed + 11.3);
+  // 水里会缓慢地漂，不是死点
+  vec2 pos = (h - 0.5) * 0.66
+           + 0.055 * vec2(sin(t * 0.55 + h.x * TAU), cos(t * 0.47 + h.y * TAU));
+  float r  = rad * (0.14 + 1.35 * pow(h.y, 3.0));
+  float tw = 0.35 + 0.65 * (0.5 + 0.5 * sin(t * (0.7 + gate * 1.8) + h.x * TAU));
+
+  return glowSpeck(length(f - pos) - r) * tw * gain;
+}
+
+void main(){
+  vec2 res = iRes;
+  vec2 fc  = gl_FragCoord.xy;
+  vec2 p   = (2.0 * fc - res) / min(res.x, res.y);   // 短边归一化，y 向上
+
+  float t = iTime;
+
+  // 整体在水里轻轻漂（极慢），像悬浮在液体里而不是贴在画面上
+  p -= vec2(0.018 * sin(t * 0.19), 0.026 * sin(t * 0.23 + 1.0)) * uSpin;
+
+  /* ── 呼吸：半径本身在收缩/扩散 ── */
+  float pulse = 0.100 * sin(t * 0.55) + 0.045 * sin(t * 1.27 + 2.1);
+  float R = uSize * (1.0 + uBreath * pulse);
+
+  vec2 q = p / max(R, 0.05);
+
+  /* ── 域扭曲：丝线和轮廓一起被水流拖着走，永远不会停 ── */
+  vec2 flow = vec2(
+    fbm2(q * 2.1 + vec2(0.0,  t * 0.33)) - 0.5,
+    fbm2(q * 2.1 + vec2(5.2,  t * 0.30) + 3.1) - 0.5
+  );
+  vec2 wq = q + flow * (0.16 + 0.07 * sin(t * 0.4));
+
+  // 低频"鼓包"：轮廓不是正圆，而是像水里的活物一样缓慢变形
+  float ang   = atan(wq.y, wq.x);
+  float bulge = 0.075 * sin(2.0 * ang + t * 0.31)
+              + 0.045 * sin(3.0 * ang - t * 0.23)
+              + 0.030 * sin(5.0 * ang + t * 0.17 + 1.7);
+  wq /= (1.0 + bulge);
+
+  // 缓慢翻滚的拉长：同一团东西，这个方向被拉、另一个方向收
+  float tumble = t * 0.055;
+  float ct = cos(tumble), st = sin(tumble);
+  vec2 local = mat2(ct, -st, st, ct) * wq;
+  local *= vec2(0.98, 1.04);
+  wq = mat2(ct, st, -st, ct) * local;
+
+  float r   = length(wq);
+  float rim = smoothstep(0.78, 1.0, r);
+
+  vec3 col = vec3(0.0);
+
+  // 球壳（正/背两面）：轮廓外再放 5%，让边上的丝线"散"出去一点，不出硬边
+  if(r < 1.06){
+    float edge = smoothstep(1.06, 0.84, r);
+    col += shell(wq,  1.0, t, uRibs, rim) * edge;
+    col += shell(wq, -1.0, t, uRibs, rim) * edge;
+  }
+
+  /* ── 浮尘：围着这团光的一层"海雪"，越靠外越稀 ── */
+  float rr   = length(p) / max(R, 0.05);
+  float halo = smoothstep(2.6, 0.55, rr);
+  float dust = 0.0;
+  dust += dustLayer(p + vec2(0.0,  t * 0.010), t, 30.0,  3.7, 0.060, 0.80);
+  dust += dustLayer(p - vec2(t * 0.007, 0.0), t, 58.0, 19.1, 0.050, 0.45);
+  dust += dustLayer(p + vec2(t * 0.004, 0.003), t, 110.0, 41.3, 0.034, 0.26);
+  dust *= uDust * (0.08 + 0.92 * halo);
+
+  // 球外那一圈极淡的辉光（光在水里会晕开）
+  col += hue2rgb(0.46 + uHue) * 0.042 * exp(-max(rr - 1.0, 0.0) * 2.6);
+  col += hue2rgb(0.48 + uHue * 0.6) * dust * 1.15
+       + hue2rgb(0.09 + uHue)        * dust * 0.12;   // 一点暖色尘
+
+  /* ── 水体：极淡冷雾，把黑底"垫"出水下感 ── */
+  float fog = exp(-pow(length(p) / max(R, 0.05) * 1.05, 2.0));
+  col += vec3(0.030, 0.095, 0.110) * fog * 0.55 * uHaze;
+  col += vec3(0.006, 0.020, 0.030) * uHaze;
+
+  /* ── 色调：高光溢出 + 柔压缩，别让芯白成一片 ── */
+  col *= uGlow;
+  col += 0.20 * col * col;
+  col = col / (1.0 + 0.30 * col * col);
+
+  // 最亮的那一截丝线往白里烧一下（截图里芯子是偏白的青，不是纯绿）
+  float hot = smoothstep(0.55, 1.25, max(col.r, max(col.g, col.b)));
+  col = mix(col, vec3(1.0, 1.0, 1.0) * min(max(col.r, max(col.g, col.b)), 1.6), hot * 0.18);
+
+  col = pow(max(col, 0.0), vec3(1.0 / 1.18));
+
+  // 暗角
+  float vig = smoothstep(1.45, 0.35, length(p));
+  col *= mix(0.82, 1.0, vig);
+
+  // 细颗粒：避免暗部出现色带
+  float n = fract(sin(dot(fc, vec2(12.9898, 78.233))) * 43758.5453);
+  col += (n - 0.5) * (1.2 / 255.0);
+
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}
+</script>
+
+<script>
+(function(){
+  'use strict';
+
+  var canvas = document.getElementById('gl');
+  var errBox = document.getElementById('err');
+  var gl = canvas.getContext('webgl', {
+    alpha:false, antialias:false, depth:false, stencil:false,
+    preserveDrawingBuffer:false, powerPreference:'high-performance'
+  }) || canvas.getContext('experimental-webgl');
+
+  function fail(msg){
+    errBox.style.display = 'block';
+    errBox.textContent = msg;
+  }
+  if(!gl){ fail('WebGL 不可用：这个 WebView / 浏览器没有开 WebGL。'); return; }
+
+  function compile(type, src){
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+      var log = gl.getShaderInfoLog(s);
+      fail('shader 编译失败:\n' + log);
+      throw new Error(log);
+    }
+    return s;
+  }
+
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById('vs').textContent));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+  gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+    fail('program 链接失败:\n' + gl.getProgramInfoLog(prog));
+    return;
+  }
+  gl.useProgram(prog);
+
+  // 一个盖满屏幕的大三角
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  var U = {};
+  ['iRes','iTime','uSize','uBreath','uSpin','uRibs','uGlow','uHue','uDust','uHaze'].forEach(function(k){
+    U[k] = gl.getUniformLocation(prog, k);
+  });
+
+  /* ── 参数（滑杆推的就是这些；默认值 = 我调好的那一版） ─────────────── */
+  var DEFAULTS = { SZ:38, BR:100, SP:100, RB:20, GL:100, HU:0, DU:100, HZ:100, SD:100 };
+  var P = { size:0.38, breath:1, spin:1, ribs:20, glow:1, hue:0, dust:1, haze:1, speed:1 };
+  var paused = false;
+
+  // [滑杆 id, 数值标签 id, 推参数并返回要显示的数值]
+  var BIND = [
+    ['SZ', 'vSZ', function(v){ P.size   = v/100; return v/100; }],
+    ['BR', 'vBR', function(v){ P.breath = v/100; return v/100; }],
+    ['SP', 'vSP', function(v){ P.spin   = v/100; return v/100; }],
+    ['RB', 'vRB', function(v){ P.ribs   = v;     return v;     }],
+    ['GL', 'vGL', function(v){ P.glow   = v/100; return v/100; }],
+    ['HU', 'vHU', function(v){ P.hue    = v/100; return v/100; }],
+    ['DU', 'vDU', function(v){ P.dust   = v/100; return v/100; }],
+    ['HZ', 'vHZ', function(v){ P.haze   = v/100; return v/100; }],
+    ['SD', 'vSD', function(v){ P.speed  = v/100; return v/100; }]
+  ];
+
+  function fmt(x, d){ return (Math.round(x*Math.pow(10,d))/Math.pow(10,d)).toFixed(d); }
+
+  BIND.forEach(function(b){
+    var input = document.getElementById(b[0]);
+    var label = document.getElementById(b[1]);
+    function push(){
+      var shown = b[2](+input.value);
+      label.textContent = (b[0]==='RB') ? String(Math.round(shown)) : fmt(shown, 2);
+    }
+    input.addEventListener('input', push);
+    push();
+  });
+
+  function resetAll(){
+    BIND.forEach(function(b){
+      document.getElementById(b[0]).value = DEFAULTS[b[0]];
+      var shown = b[2](DEFAULTS[b[0]]);
+      document.getElementById(b[1]).textContent =
+        (b[0]==='RB') ? String(Math.round(shown)) : fmt(shown, 2);
+    });
+    paused = false;
+    playBtn.classList.add('on');
+    playBtn.textContent = '暂停';
+    time = 0;
+  }
+
+  /* ── 面板 ───────────────────────────────────────────────────────── */
+  var panelToggle = document.getElementById('panelToggle');
+  var playBtn = document.getElementById('playBtn');
+  var resetBtn = document.getElementById('resetBtn');
+  panelToggle.addEventListener('click', function(){
+    document.body.classList.toggle('panel');
+    panelToggle.classList.toggle('on', document.body.classList.contains('panel'));
+  });
+  playBtn.addEventListener('click', function(){
+    paused = !paused;
+    playBtn.classList.toggle('on', !paused);
+    playBtn.textContent = paused ? '继续' : '暂停';
+  });
+  resetBtn.addEventListener('click', resetAll);
+
+  /* ── 尺寸 / 分辨率自适应 ─────────────────────────────────────────
+     先按设备像素密度跑（封顶 2×）；连续掉帧就降到 62%，
+     保证动画是"连续"的而不是一卡一卡。                                */
+  var quality = 1.0;
+  function dpr(){
+    var d = Math.min(window.devicePixelRatio || 1, 2);
+    return Math.max(0.75, d * quality);
+  }
+  function resize(){
+    var w = Math.max(1, Math.round(canvas.clientWidth  * dpr()));
+    var h = Math.max(1, Math.round(canvas.clientHeight * dpr()));
+    if(canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener('resize', resize, {passive:true});
+  window.addEventListener('orientationchange', function(){ setTimeout(resize, 120); });
+  if(window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  /* ── 主循环：时间自己累加，改速度不会跳帧 ───────────────────────── */
+  var time = 0, last = 0, slow = 0, fpsAcc = 0, fpsN = 0;
+  var hintEl = document.getElementById('hint');
+
+  function frame(now){
+    requestAnimationFrame(frame);
+    if(!last) last = now;
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    if(!paused) time += dt * P.speed;
+
+    resize();
+    gl.useProgram(prog);
+    gl.uniform2f(U.iRes, canvas.width, canvas.height);
+    gl.uniform1f(U.iTime, time);
+    gl.uniform1f(U.uSize,   P.size);
+    gl.uniform1f(U.uBreath, P.breath);
+    gl.uniform1f(U.uSpin,   P.spin);
+    gl.uniform1f(U.uRibs,   P.ribs);
+    gl.uniform1f(U.uGlow,   P.glow);
+    gl.uniform1f(U.uHue,    P.hue);
+    gl.uniform1f(U.uDust,   P.dust);
+    gl.uniform1f(U.uHaze,   P.haze);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // 掉帧就降一档分辨率（只降不升，避免来回抖）
+    if(dt > 0.034){ slow++; } else if(slow > 0){ slow--; }
+    if(slow > 40 && quality > 0.55){ quality = 0.62; slow = 0; resize(); }
+
+    // 面板里显示实时帧率（顺便能看出降分辨率有没有生效）
+    fpsAcc += dt; fpsN++;
+    if(fpsAcc > 0.6){
+      var fps = fpsN / fpsAcc;
+      hintEl.textContent = '连续动画 · 无分段 · ' + fps.toFixed(0) + ' fps'
+        + (quality < 1 ? ' · 自适应 ' + Math.round(quality * 100) + '%' : '');
+      fpsAcc = 0; fpsN = 0;
+    }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
