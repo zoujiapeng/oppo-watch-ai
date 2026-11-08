@@ -491,7 +491,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float wn  = ffbm3(vec2(cos(lon),sin(lon))*1.15 + vec2(lat*0.85, t*0.16));\n" +
         "  float wn2 = ffbm2(vec2(cos(lon),sin(lon))*2.4  - vec2(lat*0.70, t*0.11));\n" +
         "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*2.2  + vec2(lat*1.1, t*0.22));\n" +
-        "  float foreshorten = 0.85 + 0.15*z;                 // 只在最边上稍微收一点，别压成细直线\n" +
+        "  float foreshorten = 0.55 + 0.45*z;                 // 球面透视：越靠轮廓越密\n" +
         "  float spacing = 3.14159265/max(dens, 3.0);\n" +
         "  float shear = 0.30*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
         // 摆动幅度调大、再叠一层碎噪声：丝线不再是"一圈一圈很规整"，而是被水流扯得乱晃
@@ -522,7 +522,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float dash = smoothstep(0.02, 0.10, dph) * (1.0 - smoothstep(duty, duty+0.12, dph));\n" +
         "  g *= mix(1.0, dash, dashOn);\n" +
         // 每根丝线自己的亮度权重 + 缓慢游走的"热点"：少数段落烧到白、其余偏柔
-        "  float wSeg = mix(0.55, 1.40, segN);\n" +
+        "  float wSeg = mix(0.45, 1.45, segN);\n" +
         "  vec3 base;\n" +
         "  if(uFluidColorMode < 0.5)      base = vec3(0.96, 0.98, 1.00);        // 纯白\n" +
         "  else if(uFluidColorMode < 1.5) base = uFluidColor;                    // 单色\n" +
@@ -537,7 +537,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float halo = 0.10 * exp(-sdN * 3.0);\n" +
         // 侧对着镜头的那圈丝线会被压成又细又直的"发丝"（用户嫌像被裁了一刀）——直接让它们淡出，
         // 只留正面那几根幅度大、会发光的主线。
-        "  float facing = smoothstep(0.16, 0.58, z);\n" +
+        "  float facing = 1.0;\n" +
         "  return c * (core + halo) * (lit + rimL) * depth * facing;\n" +
         "}\n" +
         "vec3 fluidScenePx(vec2 localPx, float hx, float hy, float t){\n" +
@@ -564,11 +564,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    vec3 bc = (uFluidColorMode < 0.5) ? vec3(0.96,0.98,1.0)\n" +
         "            : ((uFluidColorMode < 1.5) ? uFluidColor : hue2rgbF(0.5));\n" +
         "    col += bc * body * 0.09;\n" +
-        "    float edge = smoothstep(1.02, 0.70, r);\n" +
+        "    float edge = smoothstep(1.06, 0.50, r);\n" +
         "    col += fluidShell(wq,  1.0, t, uFluidRibs) * edge;\n" +
         // 背面那半颗只在很暗的地方露出来，会变成"一根根不亮的线"、像建模的棱边 —— 直接不画。
         // （要厚度感就靠球面透视 + 受光，不靠背面线框。）
-        "    // col += fluidShell(wq, -1.0, t, uFluidRibs) * edge;\n" +
+        "    col += fluidShell(wq, -1.0, t, uFluidRibs) * edge * 0.55;\n" +
         "  }\n" +
         "  return col * max(uFluidGain, 0.0);\n" +
         "}\n" +
@@ -640,7 +640,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float blackMask = smoothstep(b0, b1, ny);\n" +
         // 流体发光模式：整颗球垫成纯黑（用户：背景不要东西，跟 dots 一样纯黑）。
         // 只改这一层的遮罩，玻璃的折射/边缘亮线照旧在外面叠。
-        "  blackMask = mix(blackMask, 1.0, clamp(uFluid, 0.0, 1.0));\n" +
+        // 流体模式也用同一条黑区渐变（用户要 Siri 波那种"上黑下透"），不整颗填黑
+
         "  blackMask = blackMask*blackMask*(3.0-2.0*blackMask);\n" +
         // 普通球：黑区是深色玻璃。面板：底色**保持黑**，但做成「上暗下亮」——
         // 顶上几乎纯黑，越往下越亮，最底下那一条亮到有点刺眼（像底部藏了个光源）。
@@ -666,7 +667,6 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);\n" +
         "  }\n" +
         "  float blackMix = blackMask*uTopDarken*tBlackK;\n" +
-        "  blackMix = mix(blackMix, 1.0, clamp(uFluid, 0.0, 1.0));\n" +
         "  col = mix(col, blackCol, blackMix);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         // 波照旧画（方形态收尾也画），**只挪竖直锚点**：
