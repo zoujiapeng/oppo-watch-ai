@@ -572,7 +572,10 @@ public final class SiriAssistant {
                 Log.i(TAG, "最终回复安静 " + FINAL_SHAPE_BACK_MS + "ms → 清字 + 收形状（回初始圆球）");
             }
             // ② 更久的兜底：只负责把"回答中/思考中"的光效收掉（文字/形状上面已经处理）
-            if (quiet < IDLE_CLEAR_MS) { main.postDelayed(this, 200); return; }
+            // ★ 最终回复留 FINAL_SHAPE_BACK_MS（30s）让人读完 —— 否则字 4 秒就没了，
+            //   用户根本看不到「最终回复」那套动画（Siri 波）。
+            long clearMs = turnSettled ? FINAL_SHAPE_BACK_MS : IDLE_CLEAR_MS;
+            if (quiet < clearMs) { main.postDelayed(this, 200); return; }
             if (shownText != null && !shownText.isEmpty()) sayNow("");
             if (state == State.ANSWERING || state == State.THINKING) setState(State.IDLE);
         }
