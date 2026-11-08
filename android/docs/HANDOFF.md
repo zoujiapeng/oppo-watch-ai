@@ -10,6 +10,59 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-09（第三版）：在会话卡里发消息 → 球的动画跟着这条会话走
+
+**用户原话**：「我在新回话聊天，然后在查看回话的玻璃上回复他叫他去微信点外卖，它操控手机，
+我把玻璃恢复到胶囊状态发现动画对不上，只显示待机动画但实际在调用工具/执行命令/思考」。
+
+### 病根：卡里发消息**没有那条驱动状态机的流**
+
+球自己的动画槽（思考中 / 执行中 / 调用工具 / 过程回复 / 最终回复 / 待机）由
+`resolveSlot()` 算，喂它的是三个信号：`asstToolRunning`、`stateNow`、`asstTaskActive`。
+这三个信号平时来自两处：
+
+1. `SiriAssistant.askIn()`（语音/电源键那条路：球自己提问）；
+2. `DshHttpTransport` 的**镜像流**（`session/follow` WS：tool/call ↔ tool/result）。
+
+而**会话卡里发的消息走的是 `DshApi.prompt()`**，两条都没有 —— 本机
+`siri_assistant.xml` 里 `mirror=false`（用户把镜像关了）。于是球什么都不知道，
+一直显示待机。顺带还有两个坑：`openConversation()` 从来没调过 `setAssistantSession(sid)`，
+所以即使镜像开着，这条会话的 `tool/call` 也会被 `belongsToShownSession()` 当“别的会话”丢掉。
+
+### 修法：给会话卡配一条「看护」（`startConversationWatch`）
+
+- `convoSend()` 把 prompt 发出去以后立刻：`setAssistantSession(sid)` →
+  `setAssistantTaskActive(true)` → `setAssistantToolRunning(false)` → `setState("THINKING")`，
+  然后起一个看护线程；
+- 看护每 **1.5 秒**读一次这条会话的**最新一页**事件（`DshApi.pollSnapshot`），推：
+  `tool/call` 没有配对 `tool/result` → 执行中/调用工具；`assistant/message` 带正文 → 过程回复；
+  其它还在跑 → 思考中；最新那条相关事件是 `turn/end` → 待机并收工；
+- **看护不看 `convoOpen`** —— 用户把玻璃收回胶囊、甚至点球关卡，球照样显示「执行中」；
+- 卡里的字每 4.5 秒（以及收尾时）用 `transcriptTail()` 刷一次。
+
+### ⚠️ 轮询**绝不能**每拍都查 `session/list`
+
+本机实测：`session/list` 要 **1.57 秒**（70 条会话，每条的 projections 都很肥），
+`session/page` 只要 **70 毫秒**。所以轮询只用 page，游标靠「上次读到的 seq + 600」去探，
+探过头 DSH 会回 `session page through seq N is past cursor M` —— 把 M 抄下来重试一次
+（`parsePastCursor`）。`session/list` 只在**开卡**时查一次。
+
+### 实测（本机，`ver=convo-unify-1` + 本轮）
+
+```
+会话看护：跟着 session-b8f5767b…（动画：思考中）
+场景动画: 槽=executing 动画=dots 有字=true → …          ← bash 在跑（sleep 12）
+工具在跑=true（bash） → 槽 executing
+工具在跑=false → 槽 thinking                            ← 工具回来了，模型在想
+场景动画: 槽=reply_stream 动画=cap6 有字=true → …        ← 出字
+会话看护：… 这一轮结束（7 拍）→ 动画交代给待机
+idle settle 到点 → 只交还光效，**不收方形态**
+```
+
+同一轮里三个坑都补了：`setAssistantSession()` 写进 `openConversation()`；
+换会话时 `watchGen++` 让旧看护退场；`startConversationWatch` 的代号在
+`setAssistantSession` 之后取（那个方法自己会 `++watchGen`）。
+
 ## 2026-11-09（第二版）：会话卡 = 回复页（一套界面）+ 回话内容真读出来
 
 **用户原话**：「1 菜单进入工作目录再进入回话后不显示回话内容（回话显示有两种一种是纯文字

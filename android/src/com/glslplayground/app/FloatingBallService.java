@@ -1443,6 +1443,7 @@ public class FloatingBallService extends Service {
         // 换了一条会话：上一条的「回复判定 / 工具状态」都不属于这条，必须清掉，
         // 否则新的会话会带着别人的"还在跑"或"工具在跑"显示。
         if (prev != null && !prev.equals(sid)) {
+            s.watchGen++;                    // 换了会话 → 旧会话的看护线程退场
             s.main.post(new Runnable() {
                 @Override public void run() {
                     if (!sid.equals(s.asstSessionId)) return;
@@ -9600,6 +9601,7 @@ public class FloatingBallService extends Service {
         convoTitle = title == null || title.trim().isEmpty() || "null".equals(title) ? "对话" : title;
         targetSessionId = sid;
         targetSessionTitle = title;
+        setAssistantSession(sid);          // 工具事件 / 回复判定都认这一条（否则被当成"别的会话"丢掉）
         ensureSiriForAssistant();          // 让球进入方形文字态
         // ★ 2026-11-09：开卡第一帧就把**旧的回复文字**换掉。
         //   以前这里不清字，等异步读完会话才 setSiriText()；中间那半秒里球里挂的是
@@ -9613,9 +9615,10 @@ public class FloatingBallService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 String text = "";
+                DshApi.ChatSnapshot snap = null;
                 try {
                     // 逐页回来就先摆上（工具密集的会话要翻几页才有正文，别让卡空着等）
-                    text = api.sessionTranscript(sid, 60, new DshApi.TranscriptProgress() {
+                    snap = api.sessionSnapshot(sid, 60, new DshApi.TranscriptProgress() {
                         @Override public void onPartial(final String md) {
                             if (md == null || md.trim().isEmpty()) return;
                             main.post(new Runnable() {
@@ -9632,14 +9635,18 @@ public class FloatingBallService extends Service {
                     });
                 }
                 catch (Throwable t) { Log.w("FloatingBall", "convo: 读会话失败 " + message(t)); }
+                if (snap != null) text = snap.markdown;
                 final String tt = text == null ? "" : text.trim();
+                final boolean snapRunning = snap != null && snap.running;
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (!convoOpen || gen != convoGen || !sid.equals(convoSessionId)) return;
                         convoHadText = !tt.isEmpty();
                         convoTranscriptCache = tt;
                         Log.i("FloatingBall", "convo: 会话内容 " + tt.length() + " 字"
-                                + (tt.isEmpty() ? "（空会话/还没说话）" : ""));
+                                + (tt.isEmpty() ? "（空会话/还没说话）" : "")
+                                + " / " + (snapRunning ? "这条会话在跑 → 开看护" : "闲"));
+                        if (snapRunning) startConversationWatch(sid);   // 打开就跟着动画走
                         setSiriText(tt.isEmpty() ? "（这条会话还没有内容）" : tt);
                         scrollConvoToEnd();
                         main.postDelayed(new Runnable() {
@@ -9924,28 +9931,111 @@ public class FloatingBallService extends Service {
                     });
                     return;
                 }
-                String last = convoTranscriptCache == null ? "" : convoTranscriptCache;
-                for (int i = 0; i < 60; i++) {          // 最长等 ~72s
-                    try { Thread.sleep(1200); } catch (InterruptedException e) { return; }
-                    if (gen != convoGen) return;
-                    if (convoOpen && !sid.equals(convoSessionId)) return;
-                    String tr = "";
-                    try { tr = api.sessionTranscript(sid, 60); } catch (Throwable ignored) { }
-                    if (tr != null && !tr.equals(last)) {
-                        last = tr;
-                        final String shown = tr;
-                        main.post(new Runnable() {
-                            @Override public void run() {
-                                if (gen != convoGen) return;
-                                convoTranscriptCache = shown;
-                                setSiriText(convoView(null));
-                                scrollConvoToEnd();
-                            }
-                        });
-                    }
-                }
+                // 发出去以后**交给看护线程**：球的动画槽（思考/执行/调用工具/待机）
+                // 和卡里的记录都由它跟着这条会话走 —— 本机 mirror 是关的，卡里发的消息
+                // 没有 askIn 那条流，不这么跟球就永远显示待机（用户实拍的问题）。
+                startConversationWatch(sid);
             }
         }, "convo-send").start();
+    }
+
+    // ── 会话看护：卡里发出消息以后，跟着会话的真实状态走 ──────────────────────
+
+    /** 每次发消息自增：老的看护线程看到代号变了就自己退场。 */
+    private volatile int watchGen = 0;
+
+    /**
+     * 跟一条会话：`tool/call ↔ tool/result` 决定「执行中 / 调用工具」，
+     * `running` 决定「思考」还是「待机」，`markdown` 顺手刷新卡里的记录。
+     *
+     * ⚠️ 它**不看 convoOpen**：用户把玻璃收回胶囊（甚至点球关卡）以后，球照样要显示
+     *    「执行中」而不是待机 —— 这正是用户报的「动画对不上」。
+     */
+    private void startConversationWatch(final String sid) {
+        final DshApi api = DshApi.get(this);
+        setAssistantSession(sid);                       // 工具事件/回复判定都认这一条（可能会 ++watchGen）
+        final int myGen = ++watchGen;                    // 代号必须在 setAssistantSession 之后取
+        setAssistantTaskActive(true);
+        setAssistantToolRunning(false, null, sid);
+        setAssistantTurnEnded(false);
+        setAssistantState("THINKING");
+        Log.i("FloatingBall", "会话看护：跟着 " + sid + "（动画：思考中）");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String lastMd = convoTranscriptCache == null ? "" : convoTranscriptCache;
+                DshApi.Cursor cur = new DshApi.Cursor();
+                long lastTextAt = 0;
+                for (int i = 0; i < 600; i++) {                  // 最长 ~15 分钟
+                    try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
+                    if (myGen != watchGen) {
+                        Log.i("FloatingBall", "会话看护：有新的消息了，这一条退场");
+                        return;
+                    }
+                    DshApi.ChatSnapshot snap;
+                    try {
+                        // ⚠️ 只读最新一页（~70ms）。别在这儿用 sessionSnapshot()：它先查
+                        //    session/list，本机实测 1.5 秒一拍都下不来，还会把 DSH 拖住。
+                        snap = api.pollSnapshot(sid, cur, 6);
+                    } catch (Throwable t) {
+                        Log.w("FloatingBall", "会话看护：读状态失败 " + message(t));
+                        continue;
+                    }
+                    applyConversationState(sid, snap);
+                    // 卡里的字：每 ~4.5 秒或在收尾时刷一次（翻页比状态轮询贵一档）
+                    long nowMs = android.os.SystemClock.uptimeMillis();
+                    if (convoOpen && sid.equals(convoSessionId)
+                            && (nowMs - lastTextAt > 4500 || !snap.running)) {
+                        lastTextAt = nowMs;
+                        String md = "";
+                        try { md = api.transcriptTail(sid, cur, 60); } catch (Throwable ignored) { }
+                        if (!md.isEmpty() && !md.equals(lastMd)) {
+                            lastMd = md;
+                            final String shown = md;
+                            main.post(new Runnable() {
+                                @Override public void run() {
+                                    if (myGen != watchGen) return;
+                                    if (!convoOpen || !sid.equals(convoSessionId)) return;
+                                    convoHadText = true;
+                                    convoTranscriptCache = shown;
+                                    setSiriText(convoView(null));
+                                    scrollConvoToEnd();
+                                }
+                            });
+                        }
+                    }
+                    if (!snap.running) {                          // 这一轮真结束了
+                        setAssistantToolRunning(false, null, sid);
+                        setAssistantTaskActive(false);
+                        setAssistantTurnEnded(true);
+                        setAssistantState("IDLE");
+                        Log.i("FloatingBall", "会话看护：" + sid + " 这一轮结束（" + (i + 1)
+                                + " 拍）→ 动画交代给待机");
+                        return;
+                    }
+                }
+                // 看护超时（超过 10 分钟）：别把「执行中」永远挂在球上
+                setAssistantToolRunning(false, null, sid);
+                setAssistantTaskActive(false);
+                setAssistantState("IDLE");
+                Log.w("FloatingBall", "会话看护：超时（10 分钟）→ 强制回待机");
+            }
+        }, "convo-watch").start();
+    }
+
+    /** 一次快照 → 球的动画槽（执行中 / 调用工具 / 思考中 / 过程回复 / 待机）。 */
+    private void applyConversationState(String sid, DshApi.ChatSnapshot snap) {
+        if (snap.toolRunning) {
+            setAssistantToolRunning(true, snap.toolName, sid);
+        } else {
+            setAssistantToolRunning(false, null, sid);
+        }
+        if (!snap.running) {
+            setAssistantState("IDLE");
+        } else if (snap.lastWasText) {
+            setAssistantState("ANSWERING");        // 正在出字 → 过程回复槽
+        } else {
+            setAssistantState("THINKING");         // 在等模型/等工具结果 → 思考中
+        }
     }
 
     /**

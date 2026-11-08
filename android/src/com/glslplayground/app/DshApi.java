@@ -10,6 +10,7 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 
@@ -49,7 +50,13 @@ final class DshApi {
         final String id, title, cwd;
         final long updatedAt;
         final boolean running;
+        /** 持久游标（`projections.asOfSeq`）—— 读会话记录时当 throughSeq 用。 */
+        final long asOfSeq;
         SessionRow(String id, String title, String cwd, long updatedAt, boolean running) {
+            this(id, title, cwd, updatedAt, running, 0);
+        }
+        SessionRow(String id, String title, String cwd, long updatedAt, boolean running, long asOfSeq) {
+            this.asOfSeq = asOfSeq;
             this.id = id;
             this.title = title == null || title.trim().isEmpty() ? "（未命名会话）" : title;
             this.cwd = cwd == null ? "" : cwd;
@@ -162,8 +169,10 @@ final class DshApi {
                 JSONObject vals = proj.optJSONObject("values");
                 if (vals != null) title = vals.optString("title", "");
             }
+            JSONObject pj = it.optJSONObject("projections");
             out.add(new SessionRow(it.optString("sessionId"), title, it.optString("cwd"),
-                    it.optLong("updatedAt", 0), it.optBoolean("running", false)));
+                    it.optLong("updatedAt", 0), it.optBoolean("running", false),
+                    pj == null ? 0 : pj.optLong("asOfSeq", 0)));
         }
         Collections.sort(out, new Comparator<SessionRow>() {
             @Override public int compare(SessionRow a, SessionRow b) {
@@ -374,24 +383,126 @@ final class DshApi {
     /** 逐页回来的会话记录（每翻一页回调一次，字符串是"到目前为止拼好的 markdown"）。 */
     interface TranscriptProgress { void onPartial(String markdown); }
 
+    /**
+     * 「这条会话现在在干什么」——会话卡发出去以后，球要靠它来选动画槽。
+     *
+     * 为什么需要：本机 `mirror`（DSH→球的镜像流）是**关着**的，而卡里发消息走的是
+     * `session/prompt`，不是球自己的 `askIn` —— 于是没有任何东西告诉球"工具在跑/在思考"，
+     * 球就永远显示待机（用户报的"我把玻璃收回胶囊，动画对不上"）。
+     */
+    static final class ChatSnapshot {
+        String markdown = "";      // 整段会话（同 sessionTranscript）
+        boolean running;           // session/list 的 running：这一轮还在跑
+        boolean toolRunning;       // 有 tool/call 没等到 tool/result
+        String toolName;           // 正在跑的工具名（bash / read / mobile …）
+        boolean lastWasText;       // 最新一条是带正文的 assistant 消息（= 正在出字）
+        @Override public String toString() {
+            return "running=" + running + " tool=" + toolName + "(" + toolRunning + ")"
+                    + " text=" + lastWasText + " md=" + markdown.length();
+        }
+    }
+
+    /** 读游标的盒子：轮询时靠它推进 `throughSeq`（`session/list` 要 1.5 秒，绝不能每拍都查）。 */
+    static final class Cursor {
+        long seq;
+        boolean known;
+    }
+
     String sessionTranscript(String sessionId, int maxMessages) throws Exception {
         return sessionTranscript(sessionId, maxMessages, null);
     }
 
     String sessionTranscript(String sessionId, int maxMessages, TranscriptProgress cb) throws Exception {
-        long cursor = cursorOf(sessionId);
-        if (cursor <= 0) return "";
-        // ── 往后翻页 ────────────────────────────────────────────────────────
-        // ⚠️ `maxMessages` 数的是**消息条数**，不是事件条数：一个工具密集的回合里
-        //    tool call / step 事件能把"最后 60 条消息"整个吃掉（实测一条 30 步的会话
-        //    最后 60 条消息里**一条正文都没有**，卡里就是"（这条会话还没有内容）"）。
-        //    所以这里按 `throughSeq` 一页页往回翻，翻到"够排版用的字数"就停。
+        return sessionSnapshot(sessionId, maxMessages, cb).markdown;
+    }
+
+    /** 只取"现在在干什么"，不拼整段记录。 */
+    ChatSnapshot sessionSnapshot(String sessionId, int maxMessages) throws Exception {
+        return sessionSnapshot(sessionId, maxMessages, null);
+    }
+
+    /** 打开会话卡用：整段记录 + 状态（走一次 session/list 拿游标，只在开卡时做）。 */
+    ChatSnapshot sessionSnapshot(String sessionId, int maxMessages, TranscriptProgress cb) throws Exception {
+        ChatSnapshot snap = new ChatSnapshot();
+        Cursor cur = new Cursor();
+        for (SessionRow r : sessions()) {
+            if (sessionId.equals(r.id)) { cur.seq = r.asOfSeq; cur.known = true; snap.running = r.running; break; }
+        }
+        if (cur.seq <= 0) return snap;
+        String md = pagedMarkdown(sessionId, cur.seq, maxMessages, cb, snap);
+        snap.markdown = md;
+        return snap;
+    }
+
+    /**
+     * **便宜的轮询版**：只读最新一页（~70ms），状态全从这一页推。
+     *
+     * ⚠️ 为什么不用 `sessionSnapshot` 轮询：它开头要 `session/list`，本机实测 **1.5 秒**
+     *    （70 条会话 × 每条的 projections），1.5 秒一拍根本跟不上，还把 DSH 拖住。
+     *    所以这里用「上次读到的 seq + 600」去探，探过头了 DSH 会回
+     *    `session page through seq N is past cursor M` —— 把 M 抄下来重试一次就行。
+     */
+    ChatSnapshot pollSnapshot(String sessionId, Cursor cur, int maxMessages) throws Exception {
+        ChatSnapshot snap = new ChatSnapshot();
+        if (cur == null) cur = new Cursor();
+        if (!cur.known || cur.seq <= 0) {
+            cur.seq = cursorOf(sessionId);
+            if (cur.seq <= 0) return snap;
+            cur.known = true;
+        }
+        JSONArray records;
+        try {
+            records = pageRecords(sessionId, cur.seq + 600, maxMessages);
+        } catch (Exception e) {
+            long real = parsePastCursor(e.getMessage());
+            if (real <= 0) throw e;
+            cur.seq = real;
+            records = pageRecords(sessionId, real, maxMessages);
+        }
+        if (records == null) return snap;
+        scanState(records, snap);
+        long newest = -1;
+        for (int i = 0; i < records.length(); i++) {
+            JSONObject rec = records.optJSONObject(i);
+            JSONObject ev = rec == null ? null : rec.optJSONObject("event");
+            long seq = ev == null ? -1 : ev.optLong("seq", -1);
+            if (seq > newest) newest = seq;
+        }
+        if (newest > cur.seq) cur.seq = newest;
+        return snap;
+    }
+
+    /** 会话最后一段记录（从已知游标往回翻，最多 4 页），刷新卡里的字用。 */
+    String transcriptTail(String sessionId, Cursor cur, int maxMessages) throws Exception {
+        if (cur == null || cur.seq <= 0) return "";
+        ChatSnapshot dummy = new ChatSnapshot();
+        return pagedMarkdown(sessionId, cur.seq, maxMessages, null, dummy);
+    }
+
+    private static final java.util.regex.Pattern PAST_CURSOR =
+            java.util.regex.Pattern.compile("past cursor (\\d+)");
+
+    private static long parsePastCursor(String msg) {
+        if (msg == null) return -1;
+        java.util.regex.Matcher m = PAST_CURSOR.matcher(msg);
+        return m.find() ? Long.parseLong(m.group(1)) : -1;
+    }
+
+    /**
+     * 从 `cursor` 往回翻页拼 markdown（最多 4 页、够 3000 字就停）。
+     * 同时把「最新那一页」里的工具调用记账写进 snap（toolRunning / toolName / lastWasText / running）。
+     */
+    private String pagedMarkdown(String sessionId, long cursor0, int maxMessages,
+                                 TranscriptProgress cb, ChatSnapshot snap) throws Exception {
+        long cursor = cursor0;
         List<Object[]> msgs = new ArrayList<>();          // {Boolean user, String text}，时间正序
         int page = 0;
         int textChars = 0;
+        boolean firstPage = true;
         while (page < 4 && cursor > 0) {
             JSONArray records = pageRecords(sessionId, cursor, Math.max(8, maxMessages));
             if (records == null || records.length() == 0) break;
+            if (firstPage) scanState(records, snap);
             List<Object[]> batch = new ArrayList<>();
             long oldest = -1;
             for (int i = 0; i < records.length(); i++) {
@@ -409,21 +520,59 @@ final class DshApi {
                 batch.add(new Object[]{isUser, text});
                 textChars += text.length();
             }
+            firstPage = false;
             msgs.addAll(0, batch);                        // 这一页比手上的都老 → 插到前面
             page++;
-            // 先把"手上的"抖出去：工具密集的会话要翻好几页才有正文，别让卡一直空着等
             if (cb != null && !msgs.isEmpty()) {
                 try { cb.onPartial(composeTranscript(msgs)); } catch (Throwable ignored) { }
             }
             if (textChars >= 3000) break;                 // 够一段可读的对话了
             if (oldest <= 0) break;
-            cursor = oldest - 1;                          // 再往前翻：读到这一页最老那条之前
+            cursor = oldest - 1;
         }
         if (msgs.isEmpty()) return "";
         String out = composeTranscript(msgs);
-        Log.i(TAG, "sessionTranscript: " + page + " 页 / " + msgs.size() + " 条正文 → "
-                + out.length() + " 字");
+        Log.i(TAG, "会话记录: " + page + " 页 / " + msgs.size() + " 条正文 → " + out.length() + " 字");
         return out;
+    }
+
+    /** 一页记录 → 状态：正在跑哪个工具 / 是否在出字 / 这一轮还在跑吗。 */
+    private static void scanState(JSONArray records, ChatSnapshot snap) {
+        if (records == null || snap == null) return;
+        LinkedHashMap<String, String> openTools = new LinkedHashMap<>();
+        String lastRelevant = null;
+        boolean lastWasText = false;
+        for (int i = 0; i < records.length(); i++) {
+            JSONObject rec = records.optJSONObject(i);
+            JSONObject ev = rec == null ? null : rec.optJSONObject("event");
+            if (ev == null) continue;
+            String type = ev.optString("type");
+            JSONObject data = ev.optJSONObject("data");
+            if ("tool/call".equals(type)) {
+                if (data != null) openTools.put(data.optString("callId", ""), data.optString("name", ""));
+                lastWasText = false;
+                lastRelevant = type;
+            } else if ("tool/result".equals(type)) {
+                JSONObject msg = data == null ? null : data.optJSONObject("message");
+                String id = msg == null ? null : msg.optString("toolCallId", "");
+                if (id != null && !id.isEmpty()) openTools.remove(id);
+                lastRelevant = type;
+            } else if ("turn/end".equals(type) || "turn/start".equals(type)
+                    || "step/start".equals(type) || "step/end".equals(type)
+                    || "job/registered".equals(type) || "job/settled".equals(type)
+                    || "user/message".equals(type)) {
+                lastRelevant = type;
+            } else if ("assistant/message".equals(type)) {
+                String text = textOf(contentOf(ev));
+                if (text != null && !text.isEmpty()) { lastWasText = true; lastRelevant = type; }
+            }
+        }
+        snap.toolRunning = !openTools.isEmpty();
+        snap.toolName = null;
+        for (String n : openTools.values()) snap.toolName = n;
+        snap.lastWasText = lastWasText;
+        // 最新那条相关事件是 turn/end → 这一轮停了；其它都算还在干活
+        snap.running = lastRelevant != null && !"turn/end".equals(lastRelevant);
     }
 
     /** `{user, text}` 序列 → 可渲染的 markdown（太长从**最老的**整段丢）。 */
