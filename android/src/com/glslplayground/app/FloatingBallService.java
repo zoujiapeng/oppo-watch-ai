@@ -1251,6 +1251,8 @@ public class FloatingBallService extends Service {
     // 区分不了「说完这句还要继续」和「说完了，收工」。这里等 FINAL_CONFIRM_MS 再查
     // 一次 session/list 的 running：还在跑 → 过程中回复；停了 → 最终回复。
     private static final long FINAL_CONFIRM_MS = 1200;
+    /** 最多追这么多次（≈18s）：还没停就按"过程中回复"收手，别一直耗着。 */
+    private static final int FINAL_CHECK_MAX = 12;
     private volatile boolean replySettledPending = false;
     private volatile boolean replyFinal = false;
     private Runnable finalConfirm;
@@ -1302,12 +1304,17 @@ public class FloatingBallService extends Service {
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (!replySettledPending) return;
-                        if (running == null && attempt < 3) {
-                            Log.i("FloatingBall", "会话状态查不到 → 再等一轮（第 " + attempt + " 次）");
+                        // ★ 用户口径：**绝大多数任务只有一条最终回复**，过程中回复是极少数。
+                        //   所以「还在跑」不代表它永远不是最终回复 —— 只要这条会话一旦停下来，
+                        //   这段话就该升级成最终回复。这里继续追（最多 ~18 秒），直到它停。
+                        if ((running == null || running) && attempt < FINAL_CHECK_MAX) {
+                            Log.i("FloatingBall", (running == null ? "会话状态查不到" : "会话还在跑")
+                                    + " → " + (FINAL_CONFIRM_MS * 1.25 / 1000) + "s 后再判（第 "
+                                    + attempt + " 次）");
                             finalConfirm = new Runnable() {
                                 @Override public void run() { runFinalCheck(); }
                             };
-                            main.postDelayed(finalConfirm, FINAL_CONFIRM_MS);
+                            main.postDelayed(finalConfirm, (long) (FINAL_CONFIRM_MS * 1.25));
                             return;
                         }
                         replySettledPending = false;
