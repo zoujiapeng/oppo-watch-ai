@@ -919,6 +919,7 @@ public class FloatingBallService extends Service {
 
     private String sceneSlot = AnimScene.SLOT_IDLE;   // 当前生效的槽
     private boolean sceneTextLast = false;            // 上一次「球里有没有字」（摆位跟着它变）
+    private int sceneBandLast = 0;                    // 上一次摆位时的动效带高度（变高/变矮要重摆）
     private String sceneAnim = "";                    // 当前生效的动画 id
     private String previewSlot = null;                // 设置页「预览」钉住的槽
     private volatile boolean asstToolRunning = false; // 执行中（工具调用）的显式标记
@@ -1165,9 +1166,13 @@ public class FloatingBallService extends Service {
         //   启动时那几行）把 waveMode/loaderMode 写回去之后，球就**一直**停在那个画面上，
         //   状态再变也不会重推 —— 用户看到的就是「不管什么状态都是同一个动画」。
         boolean textNow = hasBallText();
-        if (textNow != sceneTextLast) {
+        // 动效带的高度是**文字量出来之后**才有的（siriAnimBand 在文字布局里算）。
+        // 只在「有字翻转」那一刻摆一次是不够的：字刚出现时带高还是 0，
+        // 于是方形态里点阵又铺回整颗球（实测踩到过：带=0.0px）。带高一变就重摆。
+        if (textNow != sceneTextLast || (textNow && siriAnimBand != sceneBandLast)) {
             // 字出现 / 消失 → 动画该在球心还是球底那条带子里，是两套摆法（见 placeAnimForText）
             sceneTextLast = textNow;
+            sceneBandLast = siriAnimBand;
             placeAnimForText(sceneAnim, textNow);
             Log.i("FloatingBall", "有字=" + textNow + " → 动画重新摆位（槽=" + sceneSlot
                     + " 动画=" + sceneAnim + " 带=" + renderer.loaderBandPx + "px）");

@@ -336,7 +336,7 @@
     var line = $('sceneNow');
     if (!s || !line) return;
     if (!s.running) { line.textContent = '悬浮球没开'; return; }
-    var pv = s.preview ? ('预览钉住「' + animName(s.preview) + '」') : '';
+    var pv = s.preview ? ('预览钉住「' + ((slotDef(s.preview) || {}).name || s.preview) + '」') : '';
     line.textContent = (slotDef(s.slot) ? slotDef(s.slot).name : s.slot)
       + ' → ' + animName(s.anim) + (pv ? ' · ' + pv : '')
       + (s.master ? '' : ' · 总控已关（旧逻辑）');
