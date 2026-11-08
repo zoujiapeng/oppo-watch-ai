@@ -1263,7 +1263,42 @@ public class FloatingBallService extends Service {
     public static void setAssistantSession(String sid) {
         FloatingBallService s = INSTANCE;
         if (s == null || sid == null || sid.isEmpty()) return;
+        if (sid.equals(s.asstSessionId)) return;
+        final String prev = s.asstSessionId;
         s.asstSessionId = sid;
+        // 换了一条会话：上一条的「回复判定 / 工具状态」都不属于这条，必须清掉，
+        // 否则新的会话会带着别人的"还在跑"或"工具在跑"显示。
+        if (prev != null && !prev.equals(sid)) {
+            s.main.post(new Runnable() {
+                @Override public void run() {
+                    if (!sid.equals(s.asstSessionId)) return;
+                    s.replySettledPending = false;
+                    s.replyFinal = false;
+                    s.cancelFinalConfirm();
+                    s.asstToolRunning = false;
+                    s.toolSinceMs = 0;
+                    s.asstToolName = null;
+                    s.sceneDirty = true;
+                    s.refreshScene(true);
+                    Log.i("FloatingBall", "会话切换 " + prev.substring(0, Math.min(13, prev.length()))
+                            + " → " + sid.substring(0, Math.min(13, sid.length())) + "（清掉上一条的判定）");
+                }
+            });
+        }
+    }
+
+    /** 这条会话的回复还在"待确认最终"或任务还没跑完 → 镜分别急着切走。 */
+    public static boolean isReplySettling() {
+        FloatingBallService s = INSTANCE;
+        return s != null && (s.asstTaskActive || s.replySettledPending);
+    }
+
+    /** 事件是不是属于球当前显示的那条会话（不属于就别拿它改球的状态）。 */
+    private static boolean belongsToShownSession(String sid) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return false;
+        String cur = s.asstSessionId;
+        return sid == null || cur == null || sid.equals(cur);
     }
 
     /** null = 查不到（别拿「查不到」冒充「已经停了」，那会把过程中回复误判成最终回复）。 */
@@ -1506,8 +1541,17 @@ public class FloatingBallService extends Service {
      * @param toolName DSH 的 `tool/call.data.name`（bash / read / edit …）；null = 沿用上一次的名字。
      */
     public static void setAssistantToolRunning(boolean running, final String toolName) {
+        setAssistantToolRunning(running, toolName, null);
+    }
+
+    public static void setAssistantToolRunning(boolean running, final String toolName, final String sessionId) {
         FloatingBallService s = INSTANCE;
         if (s == null) return;
+        if (!belongsToShownSession(sessionId)) {
+            Log.i("FloatingBall", "忽略别的会话的工具事件（" + (sessionId == null ? "?" :
+                    sessionId.substring(0, Math.min(13, sessionId.length()))) + "）");
+            return;
+        }
         s.main.post(new Runnable() {
             @Override public void run() {
                 boolean nameChanged = toolName != null && !toolName.isEmpty()

@@ -220,13 +220,13 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                             JSONObject data = ev.optJSONObject("data");
                             String toolName = data == null ? null : data.optString("name", null);
                             synchronized (toolLock) { toolBusy[0] = true; }
-                            FloatingBallService.setAssistantToolRunning(true, toolName);
+                            FloatingBallService.setAssistantToolRunning(true, toolName, sessionId);
                         } else if ("job/registered".equals(type)) {
                             synchronized (toolLock) { toolBusy[0] = true; }
-                            FloatingBallService.setAssistantToolRunning(true, null);
+                            FloatingBallService.setAssistantToolRunning(true, null, sessionId);
                         } else if ("tool/result".equals(type) || "job/settled".equals(type)) {
                             synchronized (toolLock) { toolBusy[0] = false; }
-                            FloatingBallService.setAssistantToolRunning(false, null);
+                            FloatingBallService.setAssistantToolRunning(false, null, sessionId);
                         } else if ("assistant/message".equals(type)) {
                             String body = textOf(ev);
                             if (body != null && !body.trim().isEmpty()) {
@@ -433,6 +433,9 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             tick = 0;
             mirrorRecheck = false;
             try {
+                if (FloatingBallService.isReplySettling()) {
+                    continue;          // 球这一轮还没定成"最终回复"，别把会话切走
+                }
                 String active = pickActiveSession();
                 if (mirrorSession != null && !mirrorSession.equals(active)) {
                     Log.i(TAG, "镜像：切会话 " + mirrorSession + " → " + active);
@@ -484,16 +487,16 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 // 命令走「执行中」，其它工具走「调用工具」——两档各绑一套动画。
                 JSONObject data = ev.optJSONObject("data");
                 String toolName = data == null ? null : data.optString("name", null);
-                cb.onTool(true, toolName);
+                cb.onTool(true, toolName, mirrorSession);
             } else if ("tool/result".equals(type)) {
-                cb.onTool(false, null);
+                cb.onTool(false, null, mirrorSession);
             } else if ("job/registered".equals(type)) {
                 // 后台任务：tool/result 会先回来（只代表「已登记」），活儿还在跑
-                cb.onTool(true, null);
+                cb.onTool(true, null, mirrorSession);
             } else if ("job/settled".equals(type)) {
-                cb.onTool(false, null);
+                cb.onTool(false, null, mirrorSession);
             } else if ("user/message".equals(type)) {
-                cb.onTool(false, null);        // 新一轮用户消息：工具状态清零
+                cb.onTool(false, null, mirrorSession);   // 新一轮用户消息：工具状态清零
             }
         } catch (Throwable ignored) {}
     }

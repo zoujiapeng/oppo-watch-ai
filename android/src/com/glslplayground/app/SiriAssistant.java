@@ -46,7 +46,7 @@ public final class SiriAssistant {
          * 只亮了 2.5 秒就被「执行中」顶掉，用户看到的当然和设置对不上。
          * 镜像流里本来就有 tool/call、tool/result，直接用真信号。
          */
-        default void onTool(boolean running, String toolName) { }
+        default void onTool(boolean running, String toolName, String sessionId) { }
     }
 
     /** DSH 侧能力：问答（会话的挑选由实现负责）。 */
@@ -245,7 +245,7 @@ public final class SiriAssistant {
                 });
             }
 
-            @Override public void onTool(final boolean running, final String toolName) {
+            @Override public void onTool(final boolean running, final String toolName, final String sessionId) {
                 // 真·工具在跑 → 球切「执行中 / 调用工具」槽；工具回来 → 回到「思考中」
                 //
                 // ⚠️ 球自己那条提问流（askInFlight）在跑时，镜像**必须让路**：
@@ -253,7 +253,7 @@ public final class SiriAssistant {
                 //    别人会话里的 tool/call 就把这一轮的「思考中」顶成「执行中」——
                 //    实测就是「回复中显示的是执行中的动画」。
                 if (askInFlight) return;
-                FloatingBallService.setAssistantToolRunning(running, toolName);
+                FloatingBallService.setAssistantToolRunning(running, toolName, sessionId);
             }
 
             @Override public void onStatus(final String note) {
