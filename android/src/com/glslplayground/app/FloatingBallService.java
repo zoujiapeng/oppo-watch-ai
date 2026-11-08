@@ -884,9 +884,10 @@ public class FloatingBallService extends Service {
      */
     private void applyAssistantState(String state) {
         if (renderer == null) return;
-        // 回合收尾时把「执行中」清掉：tool/result 万一丢了（断线、取消），
-        // 球不能永远停在那圈执行动画上。
-        if ("IDLE".equals(state) || "OFF".equals(state)) asstToolRunning = false;
+        // ⚠️ 这里**不能**在 IDLE 时清「执行中」：实测 turn/end 比命令结束早 10 秒以上，
+        //    一清，整段命令执行就掉回待机动画。清它只认三件事：tool/result、
+        //    新一轮提问/新的 assistant attempt、以及 10 分钟超时兜底（见 toolRunningNow）。
+        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; }
         orbWanted = 0f;
         stateEnteredAt = android.os.SystemClock.uptimeMillis();
         sceneDirty = true;
@@ -939,6 +940,12 @@ public class FloatingBallService extends Service {
         if (searchActive) return AnimScene.SLOT_SEARCH;
         if (zonesActive) return AnimScene.SLOT_ZONES;
         if (approvalShown) return AnimScene.SLOT_APPROVAL;
+        // ★ 2026-11-08（二修）：**工具在跑就一定是「执行中」**，和 stateNow 无关。
+        //   实测事件顺序：assistant/message → tool/call → job/registered →（命令真在跑）
+        //   → 1~2 秒后 turn/end 先到 → 3.5 秒沉降把 stateNow 刷成 IDLE
+        //   —— 命令还在跑（tool/result 要十几秒后才来），球却已经回待机。
+        //   以前 EXEC 只写在 THINKING 分支里，所以整段命令执行显示的是待机动画。
+        if (toolRunningNow()) return AnimScene.SLOT_EXEC;
         if ("THINKING".equals(stateNow)) {
             // ★ 2026-11-08：这里原来还有一条「思考超过 2.5s 没出字 = 在执行」的猜测，
             //   模型正常想 5~20 秒很常见 →「思考中」的动画只亮 2.5 秒就被「执行中」顶掉，
@@ -1188,6 +1195,16 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /** 工具真的在跑（带 10 分钟兜底：result 丢了也不会永远卡在「执行中」）。 */
+    private boolean toolRunningNow() {
+        if (!asstToolRunning) return false;
+        if (toolSinceMs <= 0) return true;
+        return android.os.SystemClock.uptimeMillis() - toolSinceMs < TOOL_STUCK_MS;
+    }
+
+    private static final long TOOL_STUCK_MS = 10 * 60 * 1000;
+    private long toolSinceMs = 0;
+
     /** 正在预览（钉住某个槽）时不做漂移自检：预览就是要盖住真实状态。 */
     private boolean previewingScene() {
         return previewSlot != null;
@@ -1327,8 +1344,10 @@ public class FloatingBallService extends Service {
             @Override public void run() {
                 if (s.asstToolRunning != running) {
                     s.asstToolRunning = running;
+                    s.toolSinceMs = running ? android.os.SystemClock.uptimeMillis() : 0;
                     s.sceneDirty = true;
                     s.refreshScene(true);
+                    Log.i("FloatingBall", "执行中=" + running + " → 槽 " + s.resolveSlot());
                 }
             }
         });

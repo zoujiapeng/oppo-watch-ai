@@ -428,15 +428,22 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 String body = textOf(ev);
                 if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
             } else if ("turn/end".equals(type)) {
-                cb.onTool(false);
+                // ⚠️ 这里**不要**清「执行中」：DSH 的 turn/end 比命令真正结束早得多
+                //    （实测 turn/end 到 tool/result 隔着十几秒）。清掉的话，
+                //    整段「运行命令」期间球显示的是待机动画 —— 用户报的就是这个。
                 cb.onTurnEnd();
             } else if ("tool/call".equals(type)) {
                 // 真·工具开始跑 → 「执行中」槽（不再靠"思考超过 2.5s"猜）
                 cb.onTool(true);
             } else if ("tool/result".equals(type)) {
                 cb.onTool(false);
+            } else if ("job/registered".equals(type)) {
+                // 后台任务：tool/result 会先回来（只代表「已登记」），活儿还在跑
+                cb.onTool(true);
+            } else if ("job/settled".equals(type)) {
+                cb.onTool(false);
             } else if ("user/message".equals(type)) {
-                cb.onTool(false);        // 新一轮：工具状态清零
+                cb.onTool(false);        // 新一轮用户消息：工具状态清零
             }
         } catch (Throwable ignored) {}
     }
