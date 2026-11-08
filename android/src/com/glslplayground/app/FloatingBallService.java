@@ -3045,7 +3045,7 @@ public class FloatingBallService extends Service {
 
     public static int getFluidGain() {
         FloatingBallService s = INSTANCE;
-        return s == null ? 85 : s.prefs().getInt("float_fluid_gain", 100);
+        return s == null ? 85 : s.prefs().getInt("float_fluid_gain", 120);
     }
 
     /**
@@ -3169,7 +3169,7 @@ public class FloatingBallService extends Service {
         renderer.fluidRibs  = Math.max(4, Math.min(24, prefs().getInt("float_fluid_ribs", 12)));
         renderer.fluidSize  = Math.max(0.1f, Math.min(4.0f, prefs().getInt("float_fluid_size", 100) / 100f));
         renderer.fluidHot   = Math.max(0f, Math.min(2f, prefs().getInt("float_fluid_hot", 100) / 100f));
-        renderer.fluidGain  = Math.max(0.2f, Math.min(3f, prefs().getInt("float_fluid_gain", 100) / 100f));
+        renderer.fluidGain  = Math.max(0.2f, Math.min(3f, prefs().getInt("float_fluid_gain", 120) / 100f));
         renderer.fluidDash  = Math.max(0f, Math.min(24f, prefs().getInt("float_fluid_dash", 0) / 100f));
         renderer.fluidColorMode = Math.max(0, Math.min(2, prefs().getInt("float_fluid_color_mode", 0)));
         int hue = prefs().getInt("float_fluid_hue", 190);

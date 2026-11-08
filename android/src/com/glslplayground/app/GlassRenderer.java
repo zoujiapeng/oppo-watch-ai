@@ -506,7 +506,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float f = (lat + latWarp + shear)/spacing;\n" +
         "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
 
-        "  float thick = 0.72 + 0.55*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
+        "  float thick = 0.85 + 0.70*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
         // 先算"这根丝线这一段有多亮/有多热"，再决定芯的粗细 —— 热点处芯会变粗、变白
         "  float segN = ffbm2(vec2(band*0.73, hb*4.0 + t*0.13));\n" +
         "  float hotN = ffbm2(vec2(lat*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
@@ -536,7 +536,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float depth = (side > 0.0) ? 1.0 : 0.26;                   // 背面暗 → 有厚度\n" +
         // 芯 + 宽光晕：球很小，只有芯就像玻璃碴；加一层 exp 晕才是"发光"
         "  float core = g * (wSeg * (1.0 + hot*2.6) + hot*1.2);\n" +
-        "  float halo = 0.10 * exp(-sdN * 3.0);\n" +
+        "  float halo = 0.15 * exp(-sdN * 2.8);\n" +
         // 侧对着镜头的那圈丝线会被压成又细又直的"发丝"（用户嫌像被裁了一刀）——直接让它们淡出，
         // 只留正面那几根幅度大、会发光的主线。
         "  float facing = mix(1.0, smoothstep(0.05, 0.40, z), 0.90);   // 侧对镜头的丝线会被压成一道细锐的"折痕"，和宽光带交叉 → 看着像割裂\n" +
