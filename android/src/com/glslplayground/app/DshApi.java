@@ -262,15 +262,7 @@ final class DshApi {
     private JSONArray recordsOf(String sessionId, int maxMessages) throws Exception {
         long cursor = cursorOf(sessionId);
         if (cursor <= 0) return null;
-        JSONObject req = new JSONObject();
-        JSONObject addr = new JSONObject();
-        addr.put("kind", "session");
-        addr.put("sessionId", sessionId);
-        req.put("address", addr);
-        req.put("throughSeq", cursor);
-        req.put("maxMessages", maxMessages);
-        JSONObject page = call("session/page", argsOf(req));
-        return page == null ? null : page.optJSONArray("records");
+        return pageRecords(sessionId, cursor, maxMessages);
     }
 
     /**
@@ -379,22 +371,69 @@ final class DshApi {
      * 回答（原始 markdown，表格照排）
      * </pre>
      */
+    /** 逐页回来的会话记录（每翻一页回调一次，字符串是"到目前为止拼好的 markdown"）。 */
+    interface TranscriptProgress { void onPartial(String markdown); }
+
     String sessionTranscript(String sessionId, int maxMessages) throws Exception {
-        JSONArray records = recordsOf(sessionId, Math.max(8, maxMessages));
-        if (records == null) return "";
+        return sessionTranscript(sessionId, maxMessages, null);
+    }
+
+    String sessionTranscript(String sessionId, int maxMessages, TranscriptProgress cb) throws Exception {
+        long cursor = cursorOf(sessionId);
+        if (cursor <= 0) return "";
+        // ── 往后翻页 ────────────────────────────────────────────────────────
+        // ⚠️ `maxMessages` 数的是**消息条数**，不是事件条数：一个工具密集的回合里
+        //    tool call / step 事件能把"最后 60 条消息"整个吃掉（实测一条 30 步的会话
+        //    最后 60 条消息里**一条正文都没有**，卡里就是"（这条会话还没有内容）"）。
+        //    所以这里按 `throughSeq` 一页页往回翻，翻到"够排版用的字数"就停。
+        List<Object[]> msgs = new ArrayList<>();          // {Boolean user, String text}，时间正序
+        int page = 0;
+        int textChars = 0;
+        while (page < 4 && cursor > 0) {
+            JSONArray records = pageRecords(sessionId, cursor, Math.max(8, maxMessages));
+            if (records == null || records.length() == 0) break;
+            List<Object[]> batch = new ArrayList<>();
+            long oldest = -1;
+            for (int i = 0; i < records.length(); i++) {
+                JSONObject rec = records.optJSONObject(i);
+                JSONObject ev = rec == null ? null : rec.optJSONObject("event");
+                if (ev == null) continue;
+                long seq = ev.optLong("seq", -1);
+                if (seq >= 0 && (oldest < 0 || seq < oldest)) oldest = seq;
+                String type = ev.optString("type");
+                boolean isUser = "user/message".equals(type);
+                if (!isUser && !"assistant/message".equals(type)) continue;
+                String text = textOf(contentOf(ev));
+                if (text.isEmpty()) continue;
+                if (isUser && isInjectedContext(text)) continue;
+                batch.add(new Object[]{isUser, text});
+                textChars += text.length();
+            }
+            msgs.addAll(0, batch);                        // 这一页比手上的都老 → 插到前面
+            page++;
+            // 先把"手上的"抖出去：工具密集的会话要翻好几页才有正文，别让卡一直空着等
+            if (cb != null && !msgs.isEmpty()) {
+                try { cb.onPartial(composeTranscript(msgs)); } catch (Throwable ignored) { }
+            }
+            if (textChars >= 3000) break;                 // 够一段可读的对话了
+            if (oldest <= 0) break;
+            cursor = oldest - 1;                          // 再往前翻：读到这一页最老那条之前
+        }
+        if (msgs.isEmpty()) return "";
+        String out = composeTranscript(msgs);
+        Log.i(TAG, "sessionTranscript: " + page + " 页 / " + msgs.size() + " 条正文 → "
+                + out.length() + " 字");
+        return out;
+    }
+
+    /** `{user, text}` 序列 → 可渲染的 markdown（太长从**最老的**整段丢）。 */
+    private static String composeTranscript(List<Object[]> msgs) {
         List<String> blocks = new ArrayList<>();          // 排版好的整段，时间正序
         String pendingUser = null;
         StringBuilder answer = new StringBuilder();
-        for (int i = 0; i < records.length(); i++) {
-            JSONObject rec = records.optJSONObject(i);
-            JSONObject ev = rec == null ? null : rec.optJSONObject("event");
-            if (ev == null) continue;
-            String type = ev.optString("type");
-            boolean isUser = "user/message".equals(type);
-            if (!isUser && !"assistant/message".equals(type)) continue;
-            String text = textOf(contentOf(ev));
-            if (text.isEmpty()) continue;
-            if (isUser && isInjectedContext(text)) continue;
+        for (Object[] m : msgs) {
+            boolean isUser = (Boolean) m[0];
+            String text = (String) m[1];
             if (isUser) {
                 flushTurn(blocks, pendingUser, answer);
                 pendingUser = text;
@@ -412,12 +451,29 @@ final class DshApi {
             from--;
             used += blocks.get(from).length();
         }
+        if (from == blocks.size() && !blocks.isEmpty()) {
+            // 单段就超预算：留最后这一段（截断交给渲染层），别把整张卡清空
+            from = blocks.size() - 1;
+        }
         StringBuilder out = new StringBuilder();
         for (int i = from; i < blocks.size(); i++) {
             if (out.length() > 0) out.append("\n\n");
             out.append(blocks.get(i));
         }
         return out.toString();
+    }
+
+    /** 一页历史：`throughSeq` 之前（含）最近 maxMessages 条消息。 */
+    private JSONArray pageRecords(String sessionId, long throughSeq, int maxMessages) throws Exception {
+        JSONObject req = new JSONObject();
+        JSONObject addr = new JSONObject();
+        addr.put("kind", "session");
+        addr.put("sessionId", sessionId);
+        req.put("address", addr);
+        req.put("throughSeq", throughSeq);
+        req.put("maxMessages", maxMessages);
+        JSONObject page = call("session/page", argsOf(req));
+        return page == null ? null : page.optJSONArray("records");
     }
 
     /** 把「这一轮我说了什么 + AI 答了什么」拼成一段；answer 用掉后清空。 */

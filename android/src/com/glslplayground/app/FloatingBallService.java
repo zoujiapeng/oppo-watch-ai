@@ -9613,7 +9613,24 @@ public class FloatingBallService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 String text = "";
-                try { text = api.sessionTranscript(sid, 60); }
+                try {
+                    // 逐页回来就先摆上（工具密集的会话要翻几页才有正文，别让卡空着等）
+                    text = api.sessionTranscript(sid, 60, new DshApi.TranscriptProgress() {
+                        @Override public void onPartial(final String md) {
+                            if (md == null || md.trim().isEmpty()) return;
+                            main.post(new Runnable() {
+                                @Override public void run() {
+                                    if (!convoOpen || gen != convoGen || !sid.equals(convoSessionId)) return;
+                                    if (md.length() <= siriStr.length()) return;   // 只往后加，不来回缩
+                                    convoHadText = true;
+                                    convoTranscriptCache = md;
+                                    setSiriText(md);
+                                    scrollConvoToEnd();
+                                }
+                            });
+                        }
+                    });
+                }
                 catch (Throwable t) { Log.w("FloatingBall", "convo: 读会话失败 " + message(t)); }
                 final String tt = text == null ? "" : text.trim();
                 main.post(new Runnable() {
@@ -9721,12 +9738,15 @@ public class FloatingBallService extends Service {
         return true;
     }
 
-    /** 输入行的提示语：带会话名时**截断**（长标题会把 40dp 那条输入行撑成两行、字被切掉）。 */
+    /**
+     * 输入行的提示语。
+     *
+     * ⚠️ 别把会话标题拼进来：40dp 那条输入行左边还有放大镜 + 「当前」小块，标题长一点就换行、
+     * 第二行被切掉（实拍「回复「修复菜单恢…」」只剩上半截）。卡里现在是一整段会话记录，
+     * 用户自己看得见是哪条会话 —— 提示语只要说清"在这儿打字 = 接着这条会话"就够。
+     */
     private static String composerHint(String title) {
-        String t = title == null ? "" : title.trim();
-        if (t.isEmpty() || "null".equals(t)) return "发消息…";
-        if (t.length() > 6) t = t.substring(0, 6) + "…";
-        return "回复「" + t + "」…";
+        return "发消息…";
     }
 
     /**

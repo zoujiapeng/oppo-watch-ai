@@ -31,6 +31,12 @@
 另外：DSH 每一拍往会话里塞的 `Current runtime context…` / `[pj-snapshot …]` 注入消息会被
 `isInjectedContext()` 跳过（那是给模型看的，不是"我说的话"），否则卡里全是噪音。
 
+⚠️ `session/page` 的 `maxMessages` 数的是**消息条数、不是事件条数**：一个 30 步的工具回合
+就能把"最后 60 条消息"全吃光（实测一条会话最后 60 条消息里一条正文都没有 → 卡里显示
+"（这条会话还没有内容）"）。所以 `sessionTranscript()` 改成按 `throughSeq` **一页页往回翻**
+（最多 4 页、翻到够 3000 字就停），每翻完一页就 `TranscriptProgress.onPartial()` 把手上
+那部分先摆到卡上（正常会话第一页就够了；工具密集的会话至少不会一直空着）。
+
 ### ② 输入行不再归 `convoOpen` 管 —— 归"玻璃此刻画成什么"
 
 新增 `composerShouldShow()`：**只有玻璃真的是"装着字的方形态"**才露输入行 ——
