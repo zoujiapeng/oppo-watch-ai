@@ -225,6 +225,12 @@
         <button id="btnStyleDots">流体圆点 dots</button>
         <button id="btnStyleFluid">连续流体发光</button>
       </div>
+      <div class="btns" style="margin-top:6px">
+        <button id="btnPreviewOn">▶ 预览（钉住思考态）</button>
+        <button id="btnPreviewOff">■ 结束预览</button>
+      </div>
+      <div class="muted" style="margin-top:4px">球<b>只在「思考中」</b>才显示这个动画 —— 空闲时改参数是看不见效果的。
+        点「预览」把球钉在思考态，再拖下面的滑杆就能实时看到变化。</div>
       <div class="btns" style="margin-top:8px">
         <button id="btnColWhite">纯白</button>
         <button id="btnColSingle">单色</button>
@@ -778,6 +784,14 @@
   vFluidSize.textContent = (fluidSize.value / 100).toFixed(2);
   vFluidGain.textContent = (fluidGain.value / 100).toFixed(2);
 
+  var btnPreviewOn = document.getElementById('btnPreviewOn');
+  var btnPreviewOff = document.getElementById('btnPreviewOff');
+  if (btnPreviewOn) btnPreviewOn.addEventListener('click', function () {
+    try { W.previewThinking(); } catch (e) {}
+  });
+  if (btnPreviewOff) btnPreviewOff.addEventListener('click', function () {
+    try { W.previewIdle(); } catch (e) {}
+  });
   if (btnStyleDots) btnStyleDots.addEventListener('click', function () {
     paintStyle(0); try { W.setFluidStyle(0); } catch (e) {}
   });

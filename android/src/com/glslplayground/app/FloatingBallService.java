@@ -3048,6 +3048,28 @@ public class FloatingBallService extends Service {
         return s == null ? 85 : s.prefs().getInt("float_fluid_gain", 100);
     }
 
+    /**
+     * 设置页的「预览」：直接把球钉在思考态，方便一边拖滑杆一边看效果。
+     * （用户报「点了没反应」——真因是球只在思考中才显示这个动画，空闲时改了也看不见。）
+     */
+    public static void previewThinking() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(() -> {
+            Log.i("FloatingBall", "预览：钉住思考动画");
+            setAssistantState("THINKING");
+        });
+    }
+
+    public static void previewIdle() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(() -> {
+            Log.i("FloatingBall", "预览：结束");
+            setAssistantState("IDLE");
+        });
+    }
+
     /** 思考中动画该用哪个 waveMode：2 = dots，3 = 流体发光。 */
     private int thinkForm() {
         return prefs().getInt("float_fluid_style", 0) == 1 ? 3 : 2;

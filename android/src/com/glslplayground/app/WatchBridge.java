@@ -463,6 +463,17 @@ public class WatchBridge {
 
     // ─────────── 思考中动画：圆点 / 连续发光流体（Fluid Glow）───────────
 
+    /** 设置页「预览」：钉住思考态 / 结束预览。 */
+    @JavascriptInterface
+    public void previewThinking() {
+        ui(new Runnable() { public void run() { FloatingBallService.previewThinking(); } });
+    }
+
+    @JavascriptInterface
+    public void previewIdle() {
+        ui(new Runnable() { public void run() { FloatingBallService.previewIdle(); } });
+    }
+
     /** 0 = 流体圆点（dots），1 = 连续发光流体。 */
     @JavascriptInterface
     public int getFluidStyle() { return FloatingBallService.getFluidStyle(); }
