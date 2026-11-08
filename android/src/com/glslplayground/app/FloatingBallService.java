@@ -887,7 +887,7 @@ public class FloatingBallService extends Service {
         // ⚠️ 这里**不能**在 IDLE 时清「执行中」：实测 turn/end 比命令结束早 10 秒以上，
         //    一清，整段命令执行就掉回待机动画。清它只认三件事：tool/result、
         //    新一轮提问/新的 assistant attempt、以及 10 分钟超时兜底（见 toolRunningNow）。
-        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; asstToolName = null; }
+        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; asstToolName = null; asstTaskActive = false; }
         orbWanted = 0f;
         stateEnteredAt = android.os.SystemClock.uptimeMillis();
         sceneDirty = true;
@@ -925,6 +925,8 @@ public class FloatingBallService extends Service {
     private String previewSlot = null;                // 设置页「预览」钉住的槽
     private volatile boolean asstToolRunning = false; // 工具在跑的显式标记（命令 / 其它工具共用）
     private volatile String asstToolName = null;      // 当前跑的工具名（bash / read / edit …）
+    /** 球自己提问的那一轮还在跑（从 ask 发出到 DSH 真正收尾）。 */
+    private volatile boolean asstTaskActive = false;
     private boolean sceneDirty = false;               // 参数/绑定变了，要重推
     private Runnable sceneCommit = null;              // 幅度淡到 0 时执行的形态切换
     private long sceneLastCheck = 0;
@@ -965,6 +967,10 @@ public class FloatingBallService extends Service {
         //   —— 打字机还在弹、或者用户还没看完。这一段必须算「最终回复」。
         //   以前这里直接落到 idle，所以整段回复期间球显示的是待机动画（用户报的就是这个）。
         if (turnEnded && hasBallText()) return AnimScene.SLOT_FINAL;
+        // ★ 球自己那一轮还在跑（工具之间模型在思考、球里没字）——这时不能显示待机：
+        //   「帮我点个外卖」这类任务，工具一秒一个、间隙两三秒，
+        //   以前每段间隙都落回 idle，用户看到的就是"大部分时候是待机动画"。
+        if (asstTaskActive) return AnimScene.SLOT_THINK;
         return AnimScene.SLOT_IDLE;
     }
 
@@ -1360,6 +1366,21 @@ public class FloatingBallService extends Service {
         setAssistantToolRunning(running, null);
     }
 
+    /** 球自己那一轮提问开始 / 结束（由 SiriAssistant 调）。 */
+    public static void setAssistantTaskActive(final boolean active) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                if (s.asstTaskActive == active) return;
+                s.asstTaskActive = active;
+                s.sceneDirty = true;
+                s.refreshScene(true);
+                Log.i("FloatingBall", "任务在跑=" + active + " → 槽 " + s.resolveSlot());
+            }
+        });
+    }
+
     /**
      * @param toolName DSH 的 `tool/call.data.name`（bash / read / edit …）；null = 沿用上一次的名字。
      */
@@ -1381,6 +1402,7 @@ public class FloatingBallService extends Service {
                     }
                     s.sceneDirty = true;
                     s.refreshScene(true);
+                    if (running) SiriAssistant.noteToolActivity();
                     Log.i("FloatingBall", "工具在跑=" + running
                             + (running ? "（" + s.asstToolName + "）" : "")
                             + " → 槽 " + s.resolveSlot());

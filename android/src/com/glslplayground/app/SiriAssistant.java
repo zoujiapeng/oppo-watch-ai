@@ -329,11 +329,39 @@ public final class SiriAssistant {
     }
 
     /** 直接以文本提问（搜索框 / 设置页 / 调试用）——目标仍是"最近在用的那条会话"。 */
+    /**
+     * 新的一轮开始。
+     *
+     * ★ 2026-11-08：以前 ask/askIn **没有**把 turnSettled 重置回 false，于是第一轮之后
+     *   它永远是 true —— quietTick 会把每一段「工具在跑、球里没字」都当成"最终回复已安静"，
+     *   4 秒后把状态按回 IDLE。整段操控手机的任务里，球绝大多数时间显示的就是待机动画。
+     */
+    private void beginTurn() {
+        turnSettled = false;
+        shapeBackSent = false;
+        lastTextAt = android.os.SystemClock.uptimeMillis();
+        armQuiet();
+        FloatingBallService.setAssistantTaskActive(true);
+    }
+
+    /** 工具在跑也算「这一轮还活着」：别让安静计时把状态按回 IDLE。 */
+    static void noteToolActivity() {
+        final SiriAssistant a = instance;
+        if (a == null) return;
+        a.main.post(new Runnable() {
+            @Override public void run() {
+                a.lastTextAt = android.os.SystemClock.uptimeMillis();
+                if (a.askInFlight || a.state == State.THINKING || a.state == State.ANSWERING) a.armQuiet();
+            }
+        });
+    }
+
     public void ask(final String text) {
         if (transport == null) { toast("DSH 未连接"); return; }
         FloatingBallService.setAssistantPinned(false);   // 新一轮开始：解除文字钉住
         FloatingBallService.setAssistantToolRunning(false);   // 上一轮的「执行中」不许漏到这一轮
         FloatingBallService.setAssistantTurnEnded(false);     // 新一轮：先离开「最终回复」
+        beginTurn();
         setState(State.THINKING);
         // 球里不显示这句提问：球内只允许出现 AI 的回答，
         // 别的字（思考中…、提问原文、状态词）一律不写。
@@ -367,6 +395,7 @@ public final class SiriAssistant {
                 main.post(new Runnable() {
                     @Override public void run() {
                         askInFlight = false;
+                        FloatingBallService.setAssistantTaskActive(false);
                         toast("DSH 出错：" + message);
                         setState(State.IDLE);
                     }
@@ -402,6 +431,7 @@ public final class SiriAssistant {
         FloatingBallService.setAssistantPinned(false);
         FloatingBallService.setAssistantToolRunning(false);   // 新的一轮：工具状态清零
         FloatingBallService.setAssistantTurnEnded(false);     // 新一轮：先离开「最终回复」
+        beginTurn();
         setState(State.THINKING);
         askInFlight = true;
         transport.askContent(sessionId, text, receipts, mode, new Stream() {
@@ -422,6 +452,7 @@ public final class SiriAssistant {
                         if (!answer.isEmpty()) sayTyped(answer);
                         turnSettled = true;
                         FloatingBallService.setAssistantTurnEnded(true);   // 最终回复：字还在球上就是 reply_final
+                        FloatingBallService.setAssistantTaskActive(false);
                         setState(State.IDLE);
                     }
                 });
@@ -449,6 +480,7 @@ public final class SiriAssistant {
         askInFlight = false;
         stopTyping();
         FloatingBallService.setAssistantTurnEnded(false);
+        FloatingBallService.setAssistantTaskActive(false);
         if (note != null && !note.isEmpty()) toast(note);
         setState(State.IDLE);
     }

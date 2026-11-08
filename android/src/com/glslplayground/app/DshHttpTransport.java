@@ -172,6 +172,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         final int port = uri.getPort() > 0 ? uri.getPort() : 80;
 
         final Object lock = new Object();
+        final Object toolLock = new Object();
+        final boolean[] toolBusy = {false};
         final StringBuilder buf = new StringBuilder();
         final boolean[] done = {false};
         final boolean[] failed = {false};
@@ -209,7 +211,22 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                         JSONObject ev = value.optJSONObject("event");
                         if (ev == null) ev = value;
                         String type = ev.optString("type");
-                        if ("assistant/message".equals(type)) {
+                        // ★ 2026-11-08：球自己提问的这一轮，工具事件以前**整条被丢掉**——
+                        //   镜像那条流在 askInFlight 时让路，这条流又不看 tool/call，
+                        //   于是「帮我去微信点个外卖」这种整段在操控手机的任务，
+                        //   球全程停在思考/待机。这里把工具/任务事件直接喂给球。
+                        if ("tool/call".equals(type)) {
+                            JSONObject data = ev.optJSONObject("data");
+                            String toolName = data == null ? null : data.optString("name", null);
+                            synchronized (toolLock) { toolBusy[0] = true; }
+                            FloatingBallService.setAssistantToolRunning(true, toolName);
+                        } else if ("job/registered".equals(type)) {
+                            synchronized (toolLock) { toolBusy[0] = true; }
+                            FloatingBallService.setAssistantToolRunning(true, null);
+                        } else if ("tool/result".equals(type) || "job/settled".equals(type)) {
+                            synchronized (toolLock) { toolBusy[0] = false; }
+                            FloatingBallService.setAssistantToolRunning(false, null);
+                        } else if ("assistant/message".equals(type)) {
                             String body = textOf(ev);
                             if (body != null && !body.trim().isEmpty()) {
                                 synchronized (lock) {
@@ -219,7 +236,15 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                                 }
                             }
                         } else if ("turn/end".equals(type) || "session/removed".equals(type)) {
-                            synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                            // 工具还在跑就不算这一轮结束：DSH 会先把 turn/end 发出来，
+                            // 命令/工具是异步 job（job/registered → job/settled）。
+                            boolean busy;
+                            synchronized (toolLock) { busy = toolBusy[0]; }
+                            if (busy) {
+                                Log.i(TAG, "turn/end 但工具还在跑 → 不结束这一轮");
+                            } else {
+                                synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                            }
                         }
                     } catch (Throwable ignored) {}
                 }
