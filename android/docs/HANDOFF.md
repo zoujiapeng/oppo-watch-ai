@@ -45,6 +45,21 @@
 「工具在跑 → 思考/执行；否则 → 待机」。实测 `隐藏所有文字` 与 `场景动画: 槽=idle`
 在同一毫秒（00:26:46.851 → .904）发生，空胶囊不再顶着一道波。
 
+**追加（同一晚，用户截图：「胶囊在屏上、回复的字还摊在桌面上」）**：
+
+- `auditWindowAgainstBall()` 的缩窗分支原来只看 `textHold`：文字还在、hold 刚被放掉那一瞬
+  会把窗口打回 793×579（甚至更小）→ 玻璃没了、文字层还 VISIBLE。
+  现在**有字/在保持一律不许缩窗**（`hasBallText() || textHold` → 直接 return，并把
+  `ballRestSince` 清 0），缩窗那一下也顺手 `forceHideAllText()` 兜底。
+- `hideSiriTextNow()` 里原来有一条「钉住就 return」——结果钉住的字会一直留在缩小的胶囊外面。
+  钉住只表示**内容别自动清空**，不代表要画在胶囊上：这条 return 已删，球回最小形态就 GONE，
+  `siriStr` / `asstTextPinned` 保留，下次长成方形态还能放回来。
+- 文字层可见度改成跟着**画出来的**几何走：新增 `squareDrawn01()`（看动画值 `aHalf*`，
+  不是目标 `tHalf*`）。`updateSiriTextPos()` 里 `alpha *= squareDrawn01()`，
+  触摸层也要求 `> 0.5` —— 球一缩回胶囊，字立刻淡没、也不再吃触摸。
+- `resolveSlot()` 的回复槽 / `refreshFinalWave()` 也加了 `squareDrawn01() > 0.05`：
+  胶囊形态上永远不画回复波。
+
 **验证**（真机、`files/witness` 合成截图 + 像素量）：短回复玻璃窗 974×579 与长回复
 969×968，波头可见高度都是 **76~77px**（同一 `uWaveHead`），位置都在玻璃底边；
 `witness` 的状态 txt 里 `glassWin` 可直接对。

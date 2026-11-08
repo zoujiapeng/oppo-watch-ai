@@ -860,6 +860,7 @@ public class FloatingBallService extends Service {
         String finalAnim = AnimScene.master(animPrefs())
                 ? AnimScene.binding(animPrefs(), AnimScene.SLOT_FINAL) : AnimScene.A_WAVE;
         boolean show = siriEnabled && replyFinal && waveHold && hasBallText()
+                && squareDrawn01() > 0.05f          // 胶囊形态上绝不画回复波（球已经是胶囊了）
                 && AnimScene.A_WAVE.equals(finalAnim);
         if (show) {
             renderer.waveInGlass = 1f;      // 有字 + 波 → 永远钉玻璃底、只露波头
@@ -1082,7 +1083,7 @@ public class FloatingBallService extends Service {
         //   以前只看 turn/end —— 可 DSH 每一步都会先 turn/end 再继续（工具是异步 job），
         //   于是"还会接着干"的那些回复全被当成最终回复。现在 turn/end 只算"这段说完了"，
         //   真正定性要等 1.2 秒后查一次这条会话还在不在跑（见 markReplySettled）。
-        if ("ANSWERING".equals(stateNow) && hasBallText()) {
+        if ("ANSWERING".equals(stateNow) && hasBallText() && squareDrawn01() > 0.05f) {
             return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
         }
         // ★ 2026-11-08（用户问「为什么变回胶囊后还显示一段 Siri 波才回待机动画」）：
@@ -1093,7 +1094,7 @@ public class FloatingBallService extends Service {
         //   现在「有没有字」是硬条件：球里没字就不可能是回复槽，立刻落到下面
         //   （工具还在跑 → 思考/执行；否则 → 待机）。
         // 字还在球上、但流已经收了：pending = 还没确认，先按过程中回复；确认停了才转最终回复
-        if (hasBallText() && (replyFinal || replySettledPending)) {
+        if (hasBallText() && squareDrawn01() > 0.05f && (replyFinal || replySettledPending)) {
             return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
         }
         // ★ 球自己那一轮还在跑（工具之间模型在思考、球里没字）——这时不能显示待机：
@@ -1228,7 +1229,8 @@ public class FloatingBallService extends Service {
                 renderer.waveOn = wantWaveOn;
                 // ★ 2026-11-08：有字 + 槽里绑的是 Siri 波 → 波永远沉到玻璃底部（只露波头）。
                 //   这是**唯一**的波定位方式，文字和波之间不再有任何可调距离。
-                renderer.waveInGlass = (AnimScene.A_WAVE.equals(anim) && hasBallText()) ? 1f : 0f;
+                renderer.waveInGlass = (AnimScene.A_WAVE.equals(anim)
+                        && hasBallText() && squareDrawn01() > 0.05f) ? 1f : 0f;
             }
         };
 
@@ -5490,7 +5492,10 @@ public class FloatingBallService extends Service {
      */
     private void syncSiriTouchLayer() {
         if (siriText == null || siriParams == null || wm == null) return;
-        boolean scrollable = siriTextShown && mdContentH > siriViewportH + 2;
+        // 球没画成方形态（还是/已经变回胶囊）时，文字层一律不可触摸 ——
+        // 否则一层看不见的文字窗会吃掉胶囊上的点按。
+        boolean scrollable = siriTextShown && squareDrawn01() > 0.5f
+                && mdContentH > siriViewportH + 2;
         // 判据直接看**真实 flags**，不看缓存：早期版本把文字层建成"可触摸"，缓存却是 false，
         // 于是这里一直 return —— 文字层永远可触摸，把球中部/下方的点按全吃掉（2026-10-22 报的）。
         int flagsNow = siriParams.flags;
@@ -5618,9 +5623,10 @@ public class FloatingBallService extends Service {
                 Log.i("FloatingBall", "文字消失 → 交还 Siri 波（本轮已结束）");
             }
         }
-        // 钉住状态下文字必须一直留着（否则就点不到、解不开了）——
-        // 这时球缩回最小形态，但文字保持可见不动，直到用户再点一下文字
-        if (asstTextPinned && siriStr != null && !siriStr.isEmpty()) return;
+        // ★ 2026-11-08（用户口径）：「胶囊状态下不能显示文字，文字要暂时隐藏」。
+        //   以前钉住时这里会 return，把字留在缩小的胶囊外面（用户截图那种"字飘在桌面上"）。
+        //   钉住只表示**内容别自动清空**，不代表要画在胶囊上：球回最小形态就 GONE，
+        //   siriStr / asstTextPinned 都保留，下次球长成方形态还能放回来。
         if (siriText.getVisibility() != View.GONE) {
             siriText.setVisibility(View.GONE);
             Log.i("FloatingBall", "siri text hidden (ball back to minimal)");
@@ -5640,6 +5646,20 @@ public class FloatingBallService extends Service {
     private boolean squareFormActive() {
         if (textHold) return true;
         return tHalfX > minHalfX * 1.06f || tHalfY > minHalfY * 1.06f;
+    }
+
+    /**
+     * 球**画出来**的形态有多"方"：0 = 已经是最小胶囊，1 = 已明显长成方形态。
+     *
+     * 和 {@link #squareFormActive()} 的区别：那个看的是**目标**几何（textHold / tHalf*），
+     * 在"文字还在、球正缩回胶囊"的过渡里它是 true，可屏幕上的球已经是胶囊了。
+     * 用户 2026-11-08 的截图就是这种：胶囊在屏上、回复的字还挂在桌面上。
+     * 所以文字层的可见度用**动画值** aHalf* 来判 —— 球画成什么样，字才配长什么样。
+     */
+    private float squareDrawn01() {
+        float x = (aHalfX - minHalfX * 1.06f) / Math.max(0.0001f, minHalfX * 0.30f);
+        float y = (aHalfY - minHalfY * 1.06f) / Math.max(0.0001f, minHalfY * 0.30f);
+        return Math.max(0f, Math.min(1f, Math.max(x, y)));
     }
 
     private void showSiriTextNow() {
@@ -6104,13 +6124,19 @@ public class FloatingBallService extends Service {
         // 用户看到的是"啪一下跳回去"（代码里其它地方专门为这个调过 siriEaseTau）。
         long now = android.os.SystemClock.uptimeMillis();
         if (!ballAtRest) { ballRestSince = 0; return; }
+        // ★ 2026-11-08（用户截图：球已经缩成胶囊、回复的字还摊在桌面上）：
+        //   有字/正在保持方形态的时候，这个巡检**一律不许缩窗**。以前判据只看 textHold，
+        //   于是「文字还在、hold 刚好被放掉」的那一瞬，窗口被打回 793×579（甚至更小），
+        //   玻璃没了、文字层却还 VISIBLE → 截图里那种"字飘在桌面上"。
+        if (hasBallText() || textHold) { ballRestSince = 0; return; }
         if (ballRestSince == 0) ballRestSince = now;
         if (now - ballRestSince < 700) return;
-        if (!textHold && (winW > restW + dp(8) || winH > restH + dp(8))) {
+        if (winW > restW + dp(8) || winH > restH + dp(8)) {
             Log.i("FloatingBall", "window audit: 球已回最小形态，窗口 " + winW + "x" + winH
                     + " → " + restW + "x" + restH + "（触摸有效区域跟着缩）");
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             updateSiriWindow(base * minHalfX, base * minHalfY);
+            forceHideAllText();          // 兜底：缩窗的同时把文字层收掉（胶囊上绝不带字）
         }
         // ★ 2026-11-06：窗口已经**落定**在常态最小球窗（不是动画途中）→ 顺手校准一次「家」。
         //   centerBallOnScreen() 在启动那一帧记不了（窗口还是 993×993 / winY0=0），
@@ -6461,7 +6487,10 @@ public class FloatingBallService extends Service {
             }
         }
         syncSiriTouchLayer();
-        siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)));
+        // ★ 2026-11-08：胶囊状态（球还没长成方形态 / 正在缩回）里不许露字。
+        //   可见度跟着**画出来的**几何走 → 球一缩成胶囊，字立刻淡没（不是等下一次测量）。
+        float sq = squareDrawn01();
+        siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)) * sq);
     }
 
     /** 上一次打过"越界"告警的文字高度（抑制刷屏）。 */
