@@ -103,15 +103,11 @@ public final class AnimScene {
             out.put(anim(A_OFF, "none", "关闭", "这个状态不出动画（只留水晶球本身）", new JSONObject[0]));
 
             out.put(anim(A_WAVE, "wave", "Siri 波",
-                    "原版那道波：贴着球底 / 黑区起伏；默认和 Liquid Glass 页面同一条（不被镜片掰弯），想要旧版沉底就把「沉入玻璃」打开",
+                    "原版那道波；有 AI 回复文字时它固定在玻璃底边、只露波头（玻璃多高都一样），没有文字时是球里那条波",
                     new JSONObject[]{
                             param("amp", "波动幅度", 20, 400, 5, 190, "pct"),
                             param("scale", "波长缩放", 30, 200, 5, 85, "pct"),
-                            param("drop", "沉底偏移", 0, 300, 5, 78, "px"),
-                            param("speed", "速度", 20, 300, 5, 100, "pct"),
-                            // 0 = 和 Liquid Glass 页面那条波完全一样的画法（默认）；
-                            // 1 = 旧版"最终回复"那种：整道波沉到球底下方、只露波顶一截
-                            param("inglass", "沉入玻璃（旧版）", 0, 1, 1, 0, "onoff")
+                            param("speed", "速度", 20, 300, 5, 100, "pct")
                     }));
 
             out.put(anim(A_DOTS, "dots", "流体圆点 dots",
@@ -194,7 +190,7 @@ public final class AnimScene {
                     "判据：回复出来后这条会话还在跑"));
             out.put(slot(SLOT_FINAL, "最终回复", "这段回复之后会话就**停了**，没有后续动作",
                     A_WAVE, false,
-                    "判据：回复出来后这条会话不再 running（会等 1.2 秒确认一次）。默认和 Liquid Glass 是同一条波；想要旧版「沉进球底只露一截」，在动画库的 Siri 波里把「沉入玻璃」调成 1"));
+                    "判据：回复出来后这条会话不再 running（会等 1.2 秒确认一次）。有回复文字时 Siri 波固定钉在玻璃底边、只露波头（玻璃长高变矮都不变）"));
             out.put(slot(SLOT_APPROVAL, "审批 / 提问卡片", "DSH 要你点头时弹出来的卡片", A_OFF, false,
                     ""));
             out.put(slot(SLOT_SEARCH, "搜索胶囊", "双指长按打开的输入胶囊", A_OFF, true,
@@ -364,7 +360,8 @@ public final class AnimScene {
         SharedPreferences.Editor e = scene.edit();
         try {
             if (watch != null) {
-                e.putFloat("p.wave.drop", watch.getInt("float_wave_drop", 78));
+                // ★ 2026-11-08：p.wave.drop / p.wave.inglass 两个定位参数已删除
+                //   （波头固定钉在玻璃底边，不再可调），这里不再迁移它们。
                 // ★ 波的幅度/波长一直存在 float_params 里（液态玻璃页那两个滑杆）。
                 //   不搬过来的话，新逻辑会用目录默认 1.90/0.85 —— 用户调过的手感就丢了，
                 //   表现就是「Siri 波变得不一样了」。

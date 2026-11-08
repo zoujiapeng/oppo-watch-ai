@@ -399,12 +399,9 @@
     slider(box, '正文比例', 5, 120, 1, safe(function () { return W.getMdFontRatioPct(); }, 25),
       function (v) { return (v / 100).toFixed(2); },
       function (v) { try { W.setMdFontRatioPct(v); } catch (e) {} });
-    slider(box, '黑区下沿', -40, 300, 1, safe(function () { return W.getSiriTextDy(); }, 10),
-      function (v) { return String(Math.round(v)); },
-      function (v) { try { W.setSiriTextDy(v); } catch (e) {} });
-    slider(box, '安全距离', 0, 450, 5, safe(function () { return W.getSiriBlackStep(); }, 100),
-      function (v) { return (v / 1000).toFixed(2); },
-      function (v) { try { W.setSiriBlackStep(v); } catch (e) {} });
+    // ★ 2026-11-08：「黑区下沿 / 安全距离」两个滑块已删 ——
+    //   Siri 波现在固定钉在回复玻璃的底边、只露固定高度的波头，
+    //   文字和波之间不再有可调距离（见 FloatingBallService 的 BLACK_GAP_NY / WAVE_HEAD_DP）。
   }
   $('btnMd').addEventListener('click', function () { try { W.previewSiriText(); } catch (e) {} });
   $('btnMdStop').addEventListener('click', function () { try { W.previewSiriTextStop(); } catch (e) {} });

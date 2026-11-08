@@ -191,19 +191,17 @@ pm install -r glsl-playground.apk
 黑区就对不上了。现在直接由文字像素高度反推：
 
 ```java
-float textTopPx     = max(0, siriTextDy) + dp(4);           // 字形顶相对球顶
+float textTopPx     = dp(TEXT_TOP_INSET_DP);                // 4dp，固定
 float textBottomNy  = 1f - (textTopPx + th) / hypx;         // 文字下沿的 ny
-float waveGap       = siriBlackStep / 1000f;                // 「文字与 Siri 波的安全距离」
-tBlack = clamp(uBlack1 - (textBottomNy - waveGap), 0, 1.5);
+tBlack = clamp(uBlack1 - (textBottomNy - BLACK_GAP_NY), 0, 1.5);   // BLACK_GAP_NY = 0.10
 ```
 
-于是 `b1 = 文字下沿 - 安全距离`：黑区永远刚好盖住文字，再往下留出的那道空隙就是
-给 Siri 波的。**与字号、行数、球体大小全部无关** —— 实测两种极端都对：
-10sp 两行短句（黑区不动，b1 仍在赤道）；10sp 约 28 行长文（黑区下移到 ny≈-0.85，
-文字底 -0.62，空隙 0.23）。
+于是 `b1 = 文字下沿 - 0.10`：黑区永远刚好盖住文字。**与字号、行数、球体大小全部无关**。
 
-设置页原来的「每多一行黑区下移」滑块改名为「文字与 Siri 波的安全距离」
-（默认 0.10，范围 0~0.45），语义变了，用的也是新的 pref key `float_siri_wavegap`。
+> ★ 2026-11-08 变更（用户定稿）：Siri 波已经**钉死在玻璃底边**、只露固定高度的波头，
+> 不再靠「黑区下沿」决定位置。所以「黑区下沿」(`float_siri_dy`) 和
+> 「安全距离」(`float_siri_wavegap`) 两个滑块、以及它们的 get/set **全部删除**，
+> 公式里只剩常量。波的位置见 `HANDOFF.md` 2026-11-08 那一节。
 
 ## 球体截图（调试）
 

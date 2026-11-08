@@ -266,18 +266,6 @@ public class WatchBridge {
     }
 
     @JavascriptInterface
-    public int getSiriTextDy() {
-        return act.getSiriTextDy();
-    }
-
-    @JavascriptInterface
-    public void setSiriTextDy(final int dy) {
-        ui(new Runnable() {
-            public void run() { act.setSiriTextDy(dy); }
-        });
-    }
-
-    @JavascriptInterface
     public int getSiriTextSp() {
         return act.getSiriTextSp();
     }
@@ -408,18 +396,6 @@ public class WatchBridge {
         } catch (Throwable t) {
             return false;
         }
-    }
-
-    @JavascriptInterface
-    public int getSiriBlackStep() {
-        return act.getSiriBlackStep();
-    }
-
-    @JavascriptInterface
-    public void setSiriBlackStep(final int v) {
-        ui(new Runnable() {
-            public void run() { act.setSiriBlackStep(v); }
-        });
     }
 
     /** 思考中（流体圆点）的环半径：屏幕像素。 */

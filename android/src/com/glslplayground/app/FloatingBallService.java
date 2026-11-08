@@ -845,9 +845,12 @@ public class FloatingBallService extends Service {
     /**
      * 方形态（球里有字）的出波闸门：**只有整轮结束**才出波，而且波走玻璃、贴球底。
      *
-     * ★ 2026-11-08：这道「沉进玻璃的波」现在是**最终回复这个槽绑了 Siri 波**才出现。
-     * 槽里绑的是 dots / 流体 / 胶囊加载时，最终回复照常在球里画那个动画，不沉底
-     * （以前是写死的，所以「最终回复换成别的动画」根本做不到）。
+     * ★ 2026-11-08（二改，用户定稿）：「Siri 波固定在回复 AI 文字的那块玻璃的底部，
+     *   无论玻璃变高还是变矮，固定只显示 Siri 波头」。
+     *   所以：
+     *   · **不再**看「沉入玻璃」开关 —— 有字 + 槽里绑的是 Siri 波，就一定是沉底那一支；
+     *   · 文字和波之间**不再互相定位**（「黑区下沿 / 安全距离」两个滑块已删）：
+     *     波钉在玻璃底边，只由渲染器的固定波头带决定露多少（见 WAVE_HEAD_DP）。
      */
     private void refreshFinalWave() {
         if (renderer == null) return;
@@ -856,20 +859,18 @@ public class FloatingBallService extends Service {
         // 也就是说 waveInGlass=1 时，**整段流体圆点的绘制被跳过**。
         String finalAnim = AnimScene.master(animPrefs())
                 ? AnimScene.binding(animPrefs(), AnimScene.SLOT_FINAL) : AnimScene.A_WAVE;
-        // ★ 2026-11-08 用户要求：「所有动画载入玻璃的方式都要和 Liquid Glass 里那个一样」。
-        //   所以默认**不再**把最终回复的波沉到球底（那是旧版另开的一支画法）；
-        //   想要那种「只露波顶一截」的老效果，在动画库的 Siri 波里把「沉入玻璃」调成 1。
-        boolean sunk = AnimScene.param(animPrefs(), AnimScene.A_WAVE, "inglass") >= 0.5f;
         boolean show = siriEnabled && replyFinal && waveHold && hasBallText()
-                && AnimScene.A_WAVE.equals(finalAnim) && sunk;
-        renderer.waveInGlass = show ? 1f : 0f;
+                && AnimScene.A_WAVE.equals(finalAnim);
         if (show) {
+            renderer.waveInGlass = 1f;      // 有字 + 波 → 永远钉玻璃底、只露波头
             renderer.waveOn = true;
             // ⚠️ 这里**不走 setWaveForm()**：那个函数为了"看不见跳变"会先把幅度淡到 0、
             // 换完形态再淡回来；而这个函数每打一个字就会被调用一次（镜像打字机），
             // 一走淡出淡入就是用户看到的"LED 一闪一闪"。方形态固定用 Siri 波，直接钉住。
             if (renderer.waveMode != 1) { renderer.waveMode = 1; waveModePending = -1; }
             waveGateTarget = 1f;
+        } else if (!hasBallText() || !AnimScene.A_WAVE.equals(sceneAnim)) {
+            renderer.waveInGlass = 0f;      // 没字 / 槽不是波（圆点、胶囊）→ 交还给球心那套
         }
     }
 
@@ -1081,9 +1082,16 @@ public class FloatingBallService extends Service {
         //   以前只看 turn/end —— 可 DSH 每一步都会先 turn/end 再继续（工具是异步 job），
         //   于是"还会接着干"的那些回复全被当成最终回复。现在 turn/end 只算"这段说完了"，
         //   真正定性要等 1.2 秒后查一次这条会话还在不在跑（见 markReplySettled）。
-        if ("ANSWERING".equals(stateNow)) {
+        if ("ANSWERING".equals(stateNow) && hasBallText()) {
             return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
         }
+        // ★ 2026-11-08（用户问「为什么变回胶囊后还显示一段 Siri 波才回待机动画」）：
+        //   根因就是上面这一支原来**只看 stateNow**。最终回复收完、文字已经清掉、球也缩回
+        //   胶囊了，可状态机还要等 IDLE 沉降（IDLE_SETTLE_MS）才把 stateNow 从 ANSWERING
+        //   改回 IDLE —— 这段时间里 resolveSlot() 仍然报「最终回复」→ 空胶囊继续画 Siri 波，
+        //   直到沉降到点才换回待机动画。
+        //   现在「有没有字」是硬条件：球里没字就不可能是回复槽，立刻落到下面
+        //   （工具还在跑 → 思考/执行；否则 → 待机）。
         // 字还在球上、但流已经收了：pending = 还没确认，先按过程中回复；确认停了才转最终回复
         if (hasBallText() && (replyFinal || replySettledPending)) {
             return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
@@ -1149,7 +1157,9 @@ public class FloatingBallService extends Service {
         if (AnimScene.A_WAVE.equals(anim)) {
             renderer.waveAmp = Math.max(.2f, AnimScene.param(sp, anim, "amp") / 100f);
             renderer.waveScale = Math.max(.3f, AnimScene.param(sp, anim, "scale") / 100f);
-            renderer.waveDropPx = Math.max(0f, AnimScene.param(sp, anim, "drop"));
+            // 「沉底偏移 / 沉入玻璃」两个定位参数已删：波心藏在玻璃底边下方多少、
+            // 露出的波头多高，都由渲染器的固定规则算（见 GlassRenderer 的 uWaveHead）。
+            renderer.waveHeadPx = dp(WAVE_HEAD_DP);
             renderer.animSpeed = Math.max(.2f, AnimScene.param(sp, anim, "speed") / 100f);
             return;
         }
@@ -1216,6 +1226,9 @@ public class FloatingBallService extends Service {
                 renderer.loaderMode = wantLoader;
                 renderer.suppressWave = wantSuppress;
                 renderer.waveOn = wantWaveOn;
+                // ★ 2026-11-08：有字 + 槽里绑的是 Siri 波 → 波永远沉到玻璃底部（只露波头）。
+                //   这是**唯一**的波定位方式，文字和波之间不再有任何可调距离。
+                renderer.waveInGlass = (AnimScene.A_WAVE.equals(anim) && hasBallText()) ? 1f : 0f;
             }
         };
 
@@ -2743,7 +2756,7 @@ public class FloatingBallService extends Service {
         float contentBottomPx = apTextH + apGap + apActH
                 + (apInputH > 0 ? apGap + apInputH : 0) + dp(8);
         float ny = 1f - contentBottomPx / Math.max(1f, halfH);
-        float gap = Math.max(0f, Math.min(0.25f, siriBlackStep / 1000f));
+        float gap = BLACK_GAP_NY;                 // 固定值（原来的「安全距离」滑块已删）
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
         aprBlack = Math.max(0f, Math.min(1.5f, black1Base - (ny - gap)));
     }
@@ -3535,14 +3548,21 @@ public class FloatingBallService extends Service {
     /** 文字层当前是否可触摸（内容超出视口才 true —— 装得下时手势归球）。 */
     private volatile boolean siriTextTouchable = false;
     /**
-     * 方形底部给"处理中动画"预留的带子占球高的比例。
+     * 方形底部给「Siri 波头 / 处理中动画」预留的**固定**带子高度（dp）。
      *
-     * 用户要求：「方形回复后进入思考/执行命令时也要看得到处理中动画」——
-     * 以前"有字就把动画压到 0"（那是早期"文字和波不能同时出现"的要求）。
-     * 现在文字区底部让出这条带子，流体圆点沉到这里显示（见 applyAssistantState）。
-     * 想让带子更高/更矮就改这个数（0.10 ~ 0.22 之间比较合适）。
+     * ★ 2026-11-08 用户定稿：「Siri 波固定在回复 AI 文字的那块玻璃的底部，无论玻璃变高
+     *   还是变矮，固定只显示 Siri 波头」。所以这里不再按球高算比例（旧逻辑 14%、70~200px，
+     *   玻璃一变高带子就变高、波头露出的量也跟着变），改成**和玻璃高度无关的常量**：
+     *   · 文字视口底 = 玻璃底 − 这条带子 → 玻璃长高只多显示几行字，波头位置不动；
+     *   · 胶囊加载 / 流体圆点在有字时也落在同一条带子里（placeAnimForText）。
      */
-    private static final float ANIM_BAND_RATIO = 0.14f;
+    private static final float ANIM_BAND_DP = 40f;
+
+    /**
+     * Siri 波头在玻璃底部的可见高度（dp）。渲染器按这个高度做一道竖直蒙版：
+     * 玻璃多高、波幅多大，露出来的都只有贴底这一截（见 GlassRenderer 的 headMask）。
+     */
+    private static final float WAVE_HEAD_DP = 30f;
 
     /** 方形底部给"处理中动画"预留的带子高度（px）。 */
     private volatile int siriAnimBand = 0;
@@ -3575,9 +3595,11 @@ public class FloatingBallService extends Service {
     private long siriTickLast = 0;
     /** 几何缓动时间常数（秒）：生长 0.06 跟手，收起 0.22 从容。 */
     private volatile float siriEaseTau = 0.06f;
-    private volatile int siriTextDy = 10;   // 文字相对球顶的上下偏移(px)：正=更低
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
-    private volatile int siriBlackStep = 100; // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）
+    /** 黑区下沿比文字下沿再低多少（ny，1.0 = 半个玻璃高）：固定值，不再给滑块调。 */
+    private static final float BLACK_GAP_NY = 0.10f;
+    /** 文字块从玻璃顶再往下留几 dp（原「黑区下沿」滑块的位置，固定下来）。 */
+    private static final float TEXT_TOP_INSET_DP = 4f;
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
     /**
@@ -3605,12 +3627,6 @@ public class FloatingBallService extends Service {
             });
         }
         if (s != null) s.main.post(() -> s.applySiriText(text));
-    }
-
-    /** 文字相对球顶的上下偏移(px)，实时生效。 */
-    public static void setSiriTextDy(int dy) {
-        FloatingBallService s = INSTANCE;
-        if (s != null) s.main.post(() -> s.siriTextDy = dy);
     }
 
     /** Siri 文字字号(sp)，实时生效：重设 TextView 字号并重新测量球体尺寸。 */
@@ -3705,12 +3721,6 @@ public class FloatingBallService extends Service {
                 }
             }
         });
-    }
-
-    /** 每多一行黑区整体下移量（百分之一单位，35=0.35），实时生效。 */
-    public static void setSiriBlackStep(int v) {
-        FloatingBallService s = INSTANCE;
-        if (s != null) s.main.post(() -> s.applySiriBlackStep(v));
     }
 
     /** 思考中流体圆点的环半径（屏幕像素），实时生效。 */
@@ -4111,11 +4121,6 @@ public class FloatingBallService extends Service {
         renderer.fluidColorB = android.graphics.Color.blue(c) / 255f;
     }
 
-    private void applySiriBlackStep(int v) {
-        siriBlackStep = Math.max(0, Math.min(450, v));
-        if (siriEnabled) measureSiriTargets(siriStr);
-    }
-
     /**
      * 球（胶囊形）的整体缩放系数：把球宽从「2 × 基准 × 原版半宽」缩到「屏宽 × {@link #BALL_W_RATIO}」。
      * 高度、圆角、窗口、触摸区、拖拽夹取、家位置全部跟着它走 —— 等比缩小，形状比例不变。
@@ -4133,9 +4138,9 @@ public class FloatingBallService extends Service {
     private void applySiriEnabled(boolean en) {
         siriEnabled = en;
         if (en) {
-            siriTextDy = prefs().getInt("float_siri_dy", 10);
             siriTextPx = dp(prefs().getInt("float_siri_sp", 34));
-            siriBlackStep = prefs().getInt("float_siri_wavegap", 100);
+            // Siri 波头高度是**固定 dp**：玻璃长高/变矮，露出来的波头都一样多。
+            if (renderer != null) renderer.waveHeadPx = dp(WAVE_HEAD_DP);
             // 记录“原来的水晶球”尺寸，作为最短形态。
             // 这里刻意【不】乘整体 scale(master)：设置页的「球体大小」滑块走的是 master，
             // 而 Siri 模式下球体几何走 svHalf*/tMaster —— minHalf 只作为「空球时的基准比例」，
@@ -4261,8 +4266,8 @@ public class FloatingBallService extends Service {
         st.headPx = st.bodyPx * 1.06f;
         st.codePx = st.bodyPx * 0.94f;
         st.padH = (int) dp(20);
-        // ⚠️ 顶部留白**不要**用 siriTextDy（那是给"文字距球顶"滑块、配合 Siri 波用的，
-        // 默认 10px 会让首行离球顶显得很空）。富文本用固定的小留白即可。
+        // ⚠️ 顶部留白用固定的小值（0/10px 会让首行离球顶显得很空）。
+        //   「黑区下沿」滑块已删，别再找那个值 —— 见 TEXT_TOP_INSET_DP。
         st.padTop = (int) dp(8);
         st.padBottom = (int) dp(10);
         st.gap = Math.round(st.bodyPx * 0.55f);
@@ -6016,15 +6021,13 @@ public class FloatingBallService extends Service {
         // ── 黑区下移量：按「文字到底有多高」算，而不是按行数 ───────────────
         // 着色器里黑区下沿 b1 = uBlack1 - blackOffset，ny 以球顶为 +1、球底为 -1。
         // 文字从球顶往下铺，占 [1 - textTop/hypx, 1 - (textTop+th)/hypx]；
-        // 只要把 b1 放在文字下沿再往下一个「安全距离」，文字就永远待在黑区里、
-        // 不会碰到黑区下方那道 Siri 波 —— 而且和字号无关（字号变小、行数变多也照样对）。
-        float textTopPx = Math.max(0f, siriTextDy) + dp(4);
+        // b1 放在文字下沿再往下一个**固定**的距离，文字就永远待在黑区里。
+        // ★ 2026-11-08：这个距离原来是「安全距离」滑块 + 「黑区下沿」滑块调出来的
+        //   （用户要求：Siri 波改钉玻璃底之后，文字和波不再互相定位 → 两个滑块一起删）。
+        float textTopPx = dp(TEXT_TOP_INSET_DP);
         float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
-        // 黑区下沿：**保持原来的样子**（用户 2026-10-16 明确说"原本黑区就不改了，恢复成原来的渐变黑"）。
-        // 即：文字下面留出 siriBlackStep 这段安全距离，且黑区从下沿一路渐变到球底。
-        float waveGap = Math.max(0f, Math.min(0.45f, siriBlackStep / 1000f));
         float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
-        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - waveGap)));
+        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - BLACK_GAP_NY)));
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
@@ -6419,10 +6422,11 @@ public class FloatingBallService extends Service {
         int topPad = (int) dp(8);           // 与 rebuildMarkdown 的 padTop 保持一致
         int padBottomSafe = (int) dp(14);
         int tw = Math.max((int) dp(40), mdLayoutWidthPx());
-        // ★ 方形里给"处理中动画"留一条底带（用户要求：方形内也要能看到处理中动画）。
-        //   文字区不占满到球底，底部留出这条带子；带子高度 = 球高的 14%（夹在 70~200px）。
-        float glassHalfH = Math.max(dp(20), (winH - 2f * dp(24)) / 2f);
-        animBandPx = Math.round(Math.max(dp(70), Math.min(dp(200), glassHalfH * 2f * ANIM_BAND_RATIO)));
+        // ★ 2026-11-08：底带改成**固定高度**（dp），不再跟玻璃高度按比例长。
+        //   原来 14%（夹在 70~200px）的算法有个副作用：玻璃一变高带子就变高，
+        //   Siri 波头露出的位置也跟着「长」——用户要的是「玻璃怎么变，只露波头这一截」。
+        //   现在文字视口底 = 玻璃底 − 这条固定带子：玻璃长高只多显示几行字，波头纹丝不动。
+        animBandPx = Math.round(dp(ANIM_BAND_DP));
         siriAnimBand = animBandPx;
         // 高度 = 球顶+留白 → 球底−留白（再减动效带），**同时**不能超出屏幕可用范围，
         // 也不能小于 0（球被摆得很高时空间会不够）。空间不足就变矮，由 ScrollView 滚。
@@ -11529,9 +11533,9 @@ public class FloatingBallService extends Service {
         renderer.loaderDot = prefs().getFloat("think_loader_dot", 1f);
         renderer.loaderMode = 0;
         renderer.orbOffsetDefault = renderer.orbOffset;   // 有字时会被临时改到"底带"，恢复用这个
-        // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
-        // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
-        renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
+        // Siri 波头：固定显示在玻璃底边往上这一截（dp）。旧版「沉底偏移」滑块已删 ——
+        // 现在玻璃怎么变高变矮，露出的都是同样多的一条波头（见 GlassRenderer 的 headMask）。
+        renderer.waveHeadPx = dp(WAVE_HEAD_DP);
         targetFps = Math.max(1, Math.min(144, prefs().getInt("float_fps", 60)));
         int src = prefs().getInt("float_capture_src", 0);
         boolean lowlatPref = prefs().getBoolean("float_lowlat", false);
@@ -11855,7 +11859,7 @@ public class FloatingBallService extends Service {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
-            renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
+            renderer.waveHeadPx = dp(WAVE_HEAD_DP);
             applyFluidPrefs();                    // 流体发光的颜色/密度/刺眼程度（热重载）
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");

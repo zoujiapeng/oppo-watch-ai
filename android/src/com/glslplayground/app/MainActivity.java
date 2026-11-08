@@ -367,18 +367,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    // 文字相对球顶的上下偏移(px)，正=更低
-    public int getSiriTextDy() {
-        return prefs().getInt("float_siri_dy", 10);
-    }
-
-    public void setSiriTextDy(int dy) {
-        dy = Math.max(-120, Math.min(240, dy));
-        prefs().edit().putInt("float_siri_dy", dy).apply();
-        if (FloatingBallService.running) {
-            FloatingBallService.setSiriTextDy(dy);
-        }
-    }
+    // 文字相对球顶的上下偏移、文字与 Siri 波的安全距离两个滑块（2026-11-08 删）：
+    // Siri 波已固定钉在玻璃底边、只露固定高度的波头，文字和波之间不再有可调距离。
+    // prefs（float_siri_dy / float_siri_wavegap）保留在设备上也不再读取，留着无害。
 
     // Siri 文字字号(sp)
     public int getSiriTextSp() {
@@ -440,20 +431,6 @@ public class MainActivity extends Activity {
             + "> 引用：黑区下沿按文字实际高度算。\n\n"
             + "```bash\necho 0.25 > files/md-ratio\n```\n\n"
             + "最后一段普通文字，验证换行与滚动。\n";
-
-    // 文字下沿与 Siri 波的安全距离（千分之一单位，100=0.10）；
-    // 黑区下沿本身由文字实际高度决定，不再按行数下移。
-    public int getSiriBlackStep() {
-        return prefs().getInt("float_siri_wavegap", 100);
-    }
-
-    public void setSiriBlackStep(int v) {
-        v = Math.max(0, Math.min(450, v));
-        prefs().edit().putInt("float_siri_wavegap", v).apply();
-        if (FloatingBallService.running) {
-            FloatingBallService.setSiriBlackStep(v);
-        }
-    }
 
     // ---------- WebView / 生命周期 ----------
     @Override

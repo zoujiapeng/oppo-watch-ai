@@ -128,12 +128,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      */
     public volatile float waveInGlass = 0f;
     /**
-     * 方形态收尾时，Siri 波**中心**藏在球底下方多少**像素**（与球高无关）。
-     * 用像素而不是 ny：方框的宽固定、高随文字长，若按球高比例给锚点，
-     * 字号一变大球就变高、露出来的波顶也同比变多（用户报的「调字号时波往上跑了」就是这个）。
-     * 150px 时球底边缘正好切在波的顶部一点点；想更藏就加大，想多露就减小。
+     * Siri 波头在玻璃底边往上的**可见高度**（像素）。玻璃多高、波幅多大，都只露这一截。
+     *
+     * 旧的 `waveDropPx`（「沉底偏移」）已经没有意义：波心藏多深不再由外部设，
+     * 着色器按「波峰包络」自己算（见 FS_COMP 里 uWaveInGlass 那一支），
+     * 这里只留「露多少」一个常量，由服务侧按 dp 写进来。
      */
-    public volatile float waveDropPx = 78f;
+    public volatile float waveHeadPx = 78f;
     public float waveAmp = 1.90f, waveScale = 0.85f;
     public boolean waveOn = true;
     public int waveMode = 1;   // 0=关(由 waveOn 决定) 1=siriWaveCore 2=siriFluidDotsCore
@@ -392,9 +393,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec2 uHalf, uCenter;\n" +
         "uniform float uCorner, uRefraction, uBand, uDome, uAberration;\n" +
         "uniform float uTopDarken, uBlack0, uBlack1, uEdgeBleed, uBlackOffset;\n" +
-        "uniform float uWaveInGlass;  // 1 = 方形态收尾：波整体沉到球底以下，只露波顶\n" +
+        "uniform float uWaveInGlass;  // 1 = 玻璃里有字：波钉在玻璃底边，只露波头\n" +
         "uniform float uPxToScreen;    // 绘制缓冲像素 → 屏幕像素（方形态降分辨率渲染时 > 1）\n" +
-        "uniform float uWaveDrop;     // 方形态收尾：波中心藏在球底下方多少像素\n" +
+        "uniform float uWaveHead;     // 波头可见高度（缓冲像素）：从玻璃底边往上只画这一截\n" +
         "uniform float iTime, uWaveAmp, uWaveScale, uZoom, uScale, uOrbMix;\n" +
         // 审批/提问面板：0=普通球（黑区还是纯黑），1=面板（黑区底部带强调色渐变 + 光晕）
         "uniform float uPanelMode;\n" +
@@ -711,30 +712,39 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    col += texture2D(iLoader, clamp(luv, 0.0, 1.0)).rgb * (uLoaderOn * lfade * lvis);\n" +
         "  }\n" +
         "  vec3 wglow = vec3(0.0);\n" +
-        // 波照旧画（方形态收尾也画），**只挪竖直锚点**：
+        // 波照旧画，**只挪竖直锚点**：
         //   圆球态 = 黑区下沿 b1（原来的观感，一点没动），坐标按球高归一化；
-        //   方形态收尾 = 球底**下方 uWaveDrop 像素**处，且竖直尺度也用半宽（半宽是固定的
-        //   85% 屏宽的一半）→ 球高怎么变，露出来的波顶都是同样多。
-        // 用户原话：「Siri 出现在球的 y 轴往下，刚刚好能看到波的顶部一点点」。
+        //   玻璃里有字 = 钉在玻璃底边：波心藏在底边下方，藏多深由「波的峰高」反推，
+        //   露出来的永远只是贴底那一截波头（uWaveHead 像素，再往上渐隐）。
+        //   竖直尺度也用半宽（85% 屏宽的一半，固定）→ 玻璃长高/变矮，波头一像素都不变。
+        // 用户原话：「Siri 波固定在回复 AI 文字的那块玻璃的底部，无论玻璃变高还是变矮，
+        //           固定只显示 Siri 波头」。
         "  if(uWaveAmp > 0.001){\n" +
         // 动画不打弯：直接用球内坐标（不叠加透镜位移、也不吃 zoom）。
         "    vec2 cw = c;\n" +
         "    vec2 wp;\n" +
         "    if(uWaveInGlass > 0.5){\n" +
         "      float s = max(uHalf.x * max(uWaveScale, 0.1), 1.0);\n" +
-        "      wp = vec2(cw.x / s, (-cw.y + uHalf.y + uWaveDrop) / s);\n" +
+        "      float dropPx = 0.32 * s - 0.55 * uWaveHead;   // 波心藏在玻璃底边下方\n" +
+        "      wp = vec2(cw.x / s, (-cw.y + uHalf.y + dropPx) / s);\n" +
         "    } else {\n" +
         "      wp = vec2(cw.x/uHalf.x, -cw.y/uHalf.y - b1) / max(uWaveScale, 0.1);\n" +
         "    }\n" +
-        // ── 方形态（uWaveInGlass=1）：只有球底那一小截要画，其余照旧算就是白烧 GPU ──
-        // 用户反馈方形态"卡卡的、像 LED 一闪一闪"：方框面积是圆球的 ~4 倍（最大 1044×2115），
-        // 而这段原来每像素要算 2 次 waveCol（核心 + 辉光）+ 整套流体圆点（6 个点带 smin/pow）。
-        // 方形态既不显示圆点、也不需要辉光（那截波顶是加在玻璃上的），而且离波带远的像素
-        // 波函数本来就是 0 —— 于是这里整段短路：只算 1 次 waveCol，且只算球底附近那一条带。
+        // ── 玻璃底边那一道波头：只有贴底 uWaveHead 像素内要画，其余照旧算就是白烧 GPU ──
+        // 只算底边这条带（headMask=0 的像素直接跳过）。光的配方和球里那条波完全一样
+        // （核心 + 蓝白辉光 + 黑区遮蔽），所以"沉到玻璃底"看起来就是同一条 Siri 波，
+        // 只是锚点固定、只露波头。
         "    if(uWaveInGlass > 0.5){\n" +
-        "      if(abs(wp.y) < 1.6){\n" +                       // 只有贴着球底的这一条带需要画
-        "        vec3 waveEff = waveCol(wp, iTime, 1.0) * 2.2;\n" +   // ×2.2：加在亮桌面内容上，不提亮看不见
-        "        col += waveEff * uWaveAmp;\n" +
+        "      float hAbove = uHalf.y - cw.y;\n" +          // 距玻璃底边多少像素（向上为正）
+        "      float headMask = 1.0 - smoothstep(0.0, max(uWaveHead, 1.0), hAbove);\n" +
+        "      if(abs(wp.y) < 1.6 && headMask > 0.004){\n" +
+        // 黑区遮蔽照旧：玻璃里那块底是黑的，波不压一下会过曝（用户原话：「像 LED 一样白」）
+        "        float gVis = mix(0.45, 1.0 - uTopDarken*0.85, blackMask);\n" +
+        "        vec3 gWave = waveCol(wp, iTime, 1.0);\n" +
+        "        vec3 gGlow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
+        "        float gBelow = smoothstep(0.7, -0.5, wp.y);\n" +
+        "        gWave += gGlow*(0.25 + 0.6*gBelow);\n" +
+        "        col += gWave * (uWaveAmp * gVis * headMask);\n" +
         "      }\n" +
         "    } else {\n" +
         // 黑区遮蔽：圆球态照旧（波画在黑区里，不压一下会过曝）
@@ -960,7 +970,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uBlackOffset"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), 0f);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveHead"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), 1f);
         GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uPanelAccent"), 1f, 1f, 1f);
 
@@ -1324,7 +1334,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uEdgeBleed"), edgeBleed);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), waveInGlass);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPxToScreen"), invK);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), waveDropPx * k);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveHead"), waveHeadPx * k);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), animClock());
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveAmpEff);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);

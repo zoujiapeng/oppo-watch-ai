@@ -10,6 +10,46 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-08：Siri 波钉死在回复玻璃底边 —— 只露波头，删掉文字/波距离滑块
+
+**用户原话**：「Siri 波固定在回复 AI 文字的那块玻璃的底部，无论玻璃变高还是变矮但固定
+只显示 Siri 波头；删掉以前文字和 Siri 波动画的定位逻辑（原本文字与 Siri 波是可设置距离的，
+现在删掉）」。
+
+**以前的毛病**：这道波在圆球坐标里锚在黑区下沿 `b1`。长回复时 `tBlack` 被夹到 1.5，
+`b1` 落到球底下方，碰巧看起来像"贴着玻璃底露波头"；短回复 `b1` 在黑区里，波就跑到文字
+下面去了 —— 位置随文字高度乱跑。**现在**：
+
+1. `waveInGlass`（玻璃里那一支波）不再由动画参数 / 「沉入玻璃」开关决定：
+   `applyAnimToRenderer()` 的 commit 里写死
+   `waveInGlass = (槽动画 == wave && hasBallText()) ? 1 : 0`。
+   有字 + Siri 波 = 一定是贴玻璃底那一支；没字 = 回圆球那一支。
+2. 位置在 `GlassRenderer` 的 FS_COMP 里算（不再有 `uWaveDrop`）：
+   - `s = max(uHalf.x * uWaveScale, 1)`（半宽固定 → 玻璃高度不影响波头）；
+   - 波心藏在底边下方 `dropPx = 0.32*s - 0.55*uWaveHead`；
+   - `headMask = 1 - smoothstep(0, uWaveHead, hAbove)`，`hAbove = uHalf.y - c.y`
+     —— **只画贴底 `uWaveHead` 像素**，再往上渐隐。玻璃长高/变矮，露出来的就是同样一截。
+   - `uWaveHead = waveHeadPx * k`，服务侧按 `WAVE_HEAD_DP = 30dp` 写进去。
+3. 文字不再给波让「可调距离」：
+   - 删掉滑块「黑区下沿」(`float_siri_dy`) 和「安全距离」(`float_siri_wavegap`)，
+     `MainActivity`/`WatchBridge` 的 get/set 也一起删；
+   - `measureSiriTargets()` 用常量 `TEXT_TOP_INSET_DP = 4dp`、`BLACK_GAP_NY = 0.10`；
+   - 文字视口底 = 玻璃底 − `ANIM_BAND_DP = 40dp`（固定 dp，不再按玻璃高的 14% 算）。
+4. 动画库里 Siri 波删掉「沉底偏移 / 沉入玻璃」两个参数（只剩幅度/波长/速度）；
+   旧 prefs `p.wave.drop`、`p.wave.inglass` 不再读取（留着无害）。
+
+**顺带修掉用户问的「变回胶囊后还显示一段 Siri 波才回待机动画」**：
+`resolveSlot()` 里 `ANSWERING` 那一支原来**只看状态**，文字清空、球缩回胶囊后
+状态机还要等 IDLE 沉降（`IDLE_SETTLE_MS`）才改 `stateNow` → 这段时间仍报 `SLOT_FINAL`
+（wave）。现在加了硬条件 `hasBallText()`：**球里没字就不可能是回复槽**，字一没就落到
+「工具在跑 → 思考/执行；否则 → 待机」。实测 `隐藏所有文字` 与 `场景动画: 槽=idle`
+在同一毫秒（00:26:46.851 → .904）发生，空胶囊不再顶着一道波。
+
+**验证**（真机、`files/witness` 合成截图 + 像素量）：短回复玻璃窗 974×579 与长回复
+969×968，波头可见高度都是 **76~77px**（同一 `uWaveHead`），位置都在玻璃底边；
+`witness` 的状态 txt 里 `glassWin` 可直接对。
+
+
 ## 2026-11-08：搜索胶囊「待久了显示就坏了」—— 根因是窗口被球几何打回 793×579
 
 **用户原话**：「搜索框待久了，等会就会出现显示问题。」
