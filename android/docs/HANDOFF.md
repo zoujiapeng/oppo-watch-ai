@@ -10,6 +10,59 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-09：黑区钉死（不跟文字）+ 从菜单回来文字不再丢
+
+**用户原话**：「这是 AI 最终回复后然后长按呼出菜单再恢复回来的界面（文字在菜单里消失了是
+对的，但是恢复回文字页面文字就没有恢复回来），还有黑区不要和文字产生关联，黑区要像当前
+截图的一样位置固定住，保持亮的地方在地下一点点，最顶上永远是最黑的」。
+
+### ① 菜单回来字没了 —— 病根是 `forceHideAllText()` 把内容删了、没人重建
+
+`forceHideAllText()`（进六区 `enterZones()` / 开胶囊 / 收字回球都走它）为了"一帧干净"
+做的是 **`mdColumn.removeAllViews()` + `mdVisibility=GONE` + `mdBuiltFor=""`**。
+可是之后所有"把字放出来"的路径 —— `showSiriTextNow()`、`measureSiriTargets()`、
+`restoreReplyTextAfterUi()` —— **只改可见性**，谁也不重建内容：
+
+- 于是玻璃照旧长回来了（`textHold` 里留着方形态几何），里面**一个字都没有**；
+- `siriStr` 是好的，所以只有"再来一段新回复"才会碰巧恢复 —— 用户看到的就是空玻璃。
+
+三处补刀（都在 `FloatingBallService`）：
+
+| 位置 | 做了什么 |
+|---|---|
+| 新增 `ensureMarkdownContent()` | 内容被清空过（`mdColumn` 子 View=0 或 `mdBuiltFor` 为空）就按 `siriStr` 重建一次；已在就立刻返回（16ms tick 上不会反复排版） |
+| `showSiriTextNow()` | 露字之前先 `ensureMarkdownContent()` —— 所有"放字出来"的总口子 |
+| `measureSiriTargetsInner()` | `mdContentH <= 0` 时先重建再量高度（否则 `th` 退回 `dp(40)`，玻璃缩成一条窄条） |
+| `restoreReplyTextAfterUi()` | ①重建内容 ②`!squareFormActive()` 时 `measureSiriTargets()` 重排几何 ③再露字；`uiHidden` 时**不**清标记（下一帧重试） |
+
+**实测**（`ver=blackfix-1`，文件钩子灌 51 字假回复）：
+
+```
+隐藏所有文字：视图=8（8=GONE）内容块=0            ← 进菜单
+文字层是空的（内容被清空过）→ 按 siriStr 重建（51 字）
+md rebuild: 内容=345px 宽=732 字号=38px len=51
+离开菜单/胶囊 → AI 回复的字放回来（51 字，内容块=1，已显示）
+```
+
+两条路都验过：`zone-open`/`zone-release`（六区）与 `menu-settings`+点空白处（玻璃面板）。
+
+### ② 黑区改成常量，和文字彻底脱钩
+
+以前 `measureSiriTargetsInner()` 里按文字像素高度反推黑区下沿
+（`tBlack = black1Base − (textBottomNy − 0.10)`）：回复一变长黑区就跟着往下长、字一收走
+（或玻璃变矮）黑区又跳回来 —— 用户看到的就是"黑区跟着字跑"。
+
+现在只有一个常量（`BLACK_FIXED_NY = 0.0f` → 发给着色器的 `uBlackOffset`）：
+
+- 玻璃顶**永远**纯黑（`uTopDarken=0.93`，`blackMask` 上半段恒为 1）；
+- 到球心以下才开始变亮，最底边一条最亮 —— 就是用户截图里那块（实测黑区下沿落在
+  `ny≈−0.02`，抓帧量下来玻璃上半 51% 是黑的）；
+- 玻璃长高/变矮，黑区只是同比跟着形状走，**不再读文字高度**。
+- `TEXT_TOP_INSET_DP` 随之删掉；`BLACK_GAP_NY` 只剩审批面板（`aprBlack`）在用。
+
+想整体把黑区往下压（亮面只留玻璃底一条）：把 `BLACK_FIXED_NY` 调大（0.2 ≈ 下压玻璃高的 20%）。
+
+
 ## 2026-11-08：Siri 波钉死在回复玻璃底边 —— 只露波头，删掉文字/波距离滑块
 
 **用户原话**：「Siri 波固定在回复 AI 文字的那块玻璃的底部，无论玻璃变高还是变矮但固定

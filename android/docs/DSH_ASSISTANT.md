@@ -184,24 +184,28 @@ pm install -r glsl-playground.apk
   最终方形态在 `FINAL_SHAPE_BACK_MS`（30s）后收回。长按取消则立即清空。
 - 想彻底不要浏览器聊天的内容进球，把设置页「镜像当前会话」关掉即可。
 
-## 黑区下沿：按文字实际高度算，不再按行数
+## 黑区：**固定常量**，和文字彻底脱钩（2026-11-09 起）
 
-着色器里黑区下沿 `b1 = uBlack1 - blackOffset`（ny 以球顶为 +1、球底为 -1）。
-旧实现用 `blackOffset = (行数-1) × 每行下移` —— 字号一小，同样行数装下的字少一半，
-黑区就对不上了。现在直接由文字像素高度反推：
+着色器里黑区下沿 `b1 = uBlack1 - blackOffset`、起始 `b0 = uBlack0 - blackOffset`
+（ny 以球顶为 +1、球底为 -1，窗口里再按 `uHalf.y` 归一化）。
+
+旧实现按文字像素高度反推（`tBlack = uBlack1 - (文字下沿 - 0.10)`）：回复一变长黑区就跟着
+往下长、文字被收走/玻璃变矮黑区又跳回来 —— 用户看到的就是「黑区跟着字跑」。
+
+现在**只发一个常量**（`FloatingBallService.BLACK_FIXED_NY`，当前 `0.0f`）：
 
 ```java
-float textTopPx     = dp(TEXT_TOP_INSET_DP);                // 4dp，固定
-float textBottomNy  = 1f - (textTopPx + th) / hypx;         // 文字下沿的 ny
-tBlack = clamp(uBlack1 - (textBottomNy - BLACK_GAP_NY), 0, 1.5);   // BLACK_GAP_NY = 0.10
+tBlack = BLACK_FIXED_NY;      // 0 = 球体默认那条渐变
 ```
 
-于是 `b1 = 文字下沿 - 0.10`：黑区永远刚好盖住文字。**与字号、行数、球体大小全部无关**。
+- 玻璃顶**永远**纯黑（`uTopDarken = 0.93`，`blackMask` 在上半段恒为 1）；
+- 球心以下才开始变亮，最底边一条最亮 —— 亮面留在底下一点点，正是用户截图里那块；
+- 玻璃长高/变矮只是同比缩放，**不再读文字高度、不再读行数、不再读字号**；
+- 想整体下压黑区（亮面只留玻璃底一条）：把 `BLACK_FIXED_NY` 调大（0.2 ≈ 下压玻璃高的 20%）。
 
-> ★ 2026-11-08 变更（用户定稿）：Siri 波已经**钉死在玻璃底边**、只露固定高度的波头，
-> 不再靠「黑区下沿」决定位置。所以「黑区下沿」(`float_siri_dy`) 和
-> 「安全距离」(`float_siri_wavegap`) 两个滑块、以及它们的 get/set **全部删除**，
-> 公式里只剩常量。波的位置见 `HANDOFF.md` 2026-11-08 那一节。
+> `BLACK_GAP_NY = 0.10` 现在只剩**审批面板**（`aprBlack`）在用；`TEXT_TOP_INSET_DP` 已删。
+> Siri 波的位置见 `HANDOFF.md` 2026-11-08 那一节（钉死在玻璃底边、只露固定波头）。
+
 
 ## 球体截图（调试）
 

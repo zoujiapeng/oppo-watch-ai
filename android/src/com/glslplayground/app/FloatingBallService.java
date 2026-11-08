@@ -1044,13 +1044,32 @@ public class FloatingBallService extends Service {
         syncSiriTouchLayerQuiet();
     }
 
-    /** 回到能显示回复的界面：原来有字就再放出来。 */
+    /**
+     * 回到能显示回复的界面：原来有字就再放出来。
+     *
+     * ★ 2026-11-09（用户实拍「菜单里字消失是对的，回来以后字没回来」）：这里以前只有
+     *   一句 `showSiriTextNow()` —— 而它只改可见性。菜单（六区）进来时
+     *   `forceHideAllText()` 已经把内容 View 全删了，所以必须：
+     *     ① 先按 siriStr 把内容重建出来；
+     *     ② 球如果还停在最小胶囊上（菜单把几何重置了），按文字重新量一遍几何。
+     *   两件事都做完再露字，否则屏幕上还是那块空玻璃。
+     */
     private void restoreReplyTextAfterUi() {
+        if (siriText == null || uiHidden) return;   // 界面还藏着 / 文字层还没建：标记留着，下一帧再放
+        if (siriStr == null || siriStr.trim().isEmpty()) {
+            replyTextHiddenForUi = false;
+            return;
+        }
         replyTextHiddenForUi = false;
-        if (siriText == null || uiHidden) return;
-        if (siriStr == null || siriStr.trim().isEmpty()) return;
-        showSiriTextNow();
-        Log.i("FloatingBall", "离开菜单/胶囊 → AI 回复的字放回来（" + siriStr.length() + " 字）");
+        ensureMarkdownContent();                    // ① 内容（菜单里被清空过 → 重建）
+        if (!squareFormActive()) {                  // ② 几何（球可能还停在胶囊上）
+            measureSiriTargets(siriStr);
+        }
+        showSiriTextNow();                          // ③ 露字
+        boolean up = siriText != null && siriText.getVisibility() == View.VISIBLE;
+        Log.i("FloatingBall", "离开菜单/胶囊 → AI 回复的字放回来（" + siriStr.length() + " 字，内容块="
+                + (mdColumn == null ? -1 : mdColumn.getChildCount()) + "，"
+                + (up ? "已显示" : "还没显示") + "）");
     }
 
     /** 麦克风正在用（按住说话 / 输入法语音 / 旧的开麦路径）—— 这几个都算「刚开始用麦克风」。 */
@@ -3603,10 +3622,21 @@ public class FloatingBallService extends Service {
     /** 几何缓动时间常数（秒）：生长 0.06 跟手，收起 0.22 从容。 */
     private volatile float siriEaseTau = 0.06f;
     private float aBlack = 0f, tBlack = 0f; // 黑区下移动画
-    /** 黑区下沿比文字下沿再低多少（ny，1.0 = 半个玻璃高）：固定值，不再给滑块调。 */
+    /** 审批面板：黑区下沿比文字下沿再低多少（ny，1.0 = 半个玻璃高）。 */
     private static final float BLACK_GAP_NY = 0.10f;
-    /** 文字块从玻璃顶再往下留几 dp（原「黑区下沿」滑块的位置，固定下来）。 */
-    private static final float TEXT_TOP_INSET_DP = 4f;
+    /**
+     * 回复玻璃的**黑区是固定的**，和文字多少、玻璃高矮全都无关（用户 2026-11-09 口径：
+     * 「黑区不要和文字产生关联，黑区要像当前截图的一样位置固定住」）。
+     *
+     * 值 = 发送给着色器的 `uBlackOffset`（ny，+1＝玻璃顶、−1＝玻璃底）。着色器里
+     * `b1 = uBlack1 − uBlackOffset` 是黑区下沿、`b0 = uBlack0 − uBlackOffset` 是它的起始：
+     *   · 0          → 球体默认那条渐变：**玻璃顶永远是纯黑**，到球心以下才慢慢变亮，
+     *                  最底下一条最亮（用户截图上就是这块，实测黑区下沿落在 ny≈−0.01）。
+     *   · 调大（>0） → 整块黑区往下压，亮面只剩玻璃底边一窄条。
+     * 以前这里是「按文字实际高度反推 b1」，字一变长黑区就跟着往下长、字一清空又跳回来
+     * （玻璃一缩更明显）—— 用户看到的就是「黑区跟着字跑」。
+     */
+    private static final float BLACK_FIXED_NY = 0.0f;
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
     /**
@@ -4274,7 +4304,6 @@ public class FloatingBallService extends Service {
         st.codePx = st.bodyPx * 0.94f;
         st.padH = (int) dp(20);
         // ⚠️ 顶部留白用固定的小值（0/10px 会让首行离球顶显得很空）。
-        //   「黑区下沿」滑块已删，别再找那个值 —— 见 TEXT_TOP_INSET_DP。
         st.padTop = (int) dp(8);
         st.padBottom = (int) dp(10);
         st.gap = Math.round(st.bodyPx * 0.55f);
@@ -4293,6 +4322,32 @@ public class FloatingBallService extends Service {
                 + " 字号=" + Math.round(st.bodyPx) + "px len=" + src.length()
                 + (r.truncated ? "（超长已截断）" : ""));
         if (siriEnabled) measureSiriTargets(siriStr);
+    }
+
+    /**
+     * **保证文字层里真的有内容**（用户 2026-11-08 实拍：「菜单里字消失是对的，回来以后字没回来」）。
+     *
+     * 病根：{@link #forceHideAllText()} 为了"一帧干净"会把 `mdColumn` 的子 View **全部删掉**
+     * 并把 `mdBuiltFor` 清空（进六区菜单 / 开胶囊 / 收字回球都会走它）。可是之后所有
+     * 「把字放出来」的路径（{@link #showSiriTextNow()} / `measureSiriTargets()` /
+     * {@link #restoreReplyTextAfterUi()}）**只改可见性**，不重建内容 —— 于是玻璃照旧长回来了，
+     * 里面却一个字都没有；`siriStr` 本身是好的，所以只有"再来一段新回复"才能碰巧恢复。
+     *
+     * 这里就是那个补刀口：内容被清空过（子 View 数为 0 或 `mdBuiltFor` 为空）就按 `siriStr`
+     * 重建一次。已经在的（子 View 有内容、`mdBuiltFor` 有值）直接返回，16ms 的 tick 上调
+     * 也不会反复排 StringBuilder。
+     *
+     * @return true = 这次真的重建了（几何已经跟着重量过）
+     */
+    private boolean ensureMarkdownContent() {
+        if (mdColumn == null) return false;
+        String src = displayTextOf(siriStr);
+        if (src == null || src.trim().isEmpty()) return false;
+        if (mdColumn.getChildCount() > 0 && mdBuiltFor != null && !mdBuiltFor.isEmpty()) return false;
+        Log.i("FloatingBall", "文字层是空的（内容被清空过）→ 按 siriStr 重建（" + src.length() + " 字）");
+        mdBuiltFor = "";
+        rebuildMarkdown();
+        return true;
     }
 
     /** 球内内容的排版宽度（方形态固定内宽）。 */
@@ -5676,6 +5731,11 @@ public class FloatingBallService extends Service {
             hideReplyTextForUi();
             return;
         }
+        // ★ 2026-11-09（用户实拍：长按进菜单再回来，玻璃回来了、字没了）：
+        //   `forceHideAllText()` 会把 mdColumn 的子 View **全删掉**，之后所有"露出文字"的
+        //   路径都只把可见性打开 —— 内容早就不在了，屏幕上就是一块空玻璃。所以露字之前
+        //   先补一刀：内容被清空过就按 siriStr 重建一次。
+        ensureMarkdownContent();
         if (!squareFormActive()) {
             // 圆球态本该不显示内容 —— 但如果**球里确实有字**（比如刚被清空又来了新字、
             // 或用户点了文字导致几何重置），那就把方形态撑起来，而不是把内容藏掉。
@@ -6007,6 +6067,10 @@ public class FloatingBallService extends Service {
         // ── 文字高度从哪来 ────────────────────────────────────────────────────
         // 不再在 Java 里"猜"换行（StaticLayout 对表格/列表本来也不准），
         // 也不用 WebView 的 JS 回报 —— 原生渲染器已经 measure 过了，直接读。
+        // ⚠️ 但 `mdContentH == 0` 说明内容被 forceHideAllText() 清空过（进菜单 / 开胶囊 /
+        //    收字回球）：这时 mdContentH 已经不是"文字高度"了，先按 siriStr 重建再量，
+        //    否则玻璃会退回一条窄条、字也没了（用户 2026-11-08 那张空玻璃截图就是这么来的）。
+        if (mdContentH <= 0) ensureMarkdownContent();
         float th = Math.max(dp(20), mdContentH > 0 ? mdContentH : dp(40));
         float tw = mdLayoutW > 0 ? mdLayoutW : siriTextMaxW();
         // 上下留白（黑区/球高的余量）：字号大就多留一点
@@ -6043,16 +6107,13 @@ public class FloatingBallService extends Service {
         }
         updateSiriWindow(hxpx, hypx);
 
-        // ── 黑区下移量：按「文字到底有多高」算，而不是按行数 ───────────────
-        // 着色器里黑区下沿 b1 = uBlack1 - blackOffset，ny 以球顶为 +1、球底为 -1。
-        // 文字从球顶往下铺，占 [1 - textTop/hypx, 1 - (textTop+th)/hypx]；
-        // b1 放在文字下沿再往下一个**固定**的距离，文字就永远待在黑区里。
-        // ★ 2026-11-08：这个距离原来是「安全距离」滑块 + 「黑区下沿」滑块调出来的
-        //   （用户要求：Siri 波改钉玻璃底之后，文字和波不再互相定位 → 两个滑块一起删）。
-        float textTopPx = dp(TEXT_TOP_INSET_DP);
-        float textBottomNy = 1f - ((textTopPx + th) / Math.max(1f, hypx));
-        float black1Base = (renderer != null) ? renderer.black1 : -0.01f;
-        tBlack = Math.max(0f, Math.min(1.5f, black1Base - (textBottomNy - BLACK_GAP_NY)));
+        // ── 黑区：**固定死**，一个字都不看（用户 2026-11-09 口径）─────────────
+        // 以前这里按「文字实际高度」反推 b1（b1 = 文字下沿 − 0.10），于是：
+        //   · 回复变长 → 黑区跟着往下长；
+        //   · 文字被收走 / 玻璃变矮 → 黑区又跳回去（用户截图里那块位置是对的，就是不稳）。
+        // 现在只发一个常量：着色器 b1 = uBlack1 − uBlackOffset，玻璃顶永远纯黑、
+        // 球心以下才开始变亮、最底边一条最亮 —— 位置跟着玻璃走，跟文字彻底脱钩。
+        tBlack = BLACK_FIXED_NY;
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;
@@ -6554,7 +6615,7 @@ public class FloatingBallService extends Service {
 
     /** 构建版本号（日志里认版本用，省得怀疑装错了包）。 */
     static final class BuildConfigVersion {
-        static final String V = "approval-orb-4";
+        static final String V = "blackfix-1";
     }
 
     /** 允许反射调用 @hide 的 SurfaceControl#setSkipScreenshot（抓屏排除本窗口）。
