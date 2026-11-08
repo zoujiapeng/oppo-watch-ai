@@ -3117,7 +3117,8 @@ public class FloatingBallService extends Service {
     }
 
     // ══════════════════════ 取证快门（witness）═══════════════════════════════
-    //  触发：**双击音量减**（没在按住说话时）／ files/witness 文件钩子 ／ tools/witness.sh
+    //  触发：**快速双击音量加**（PowerKeyDaemon 判双击 → VOLUME_SHOT）
+    //        ／ files/witness 文件钩子 ／ tools/witness.sh
     //  产出：/sdcard/Pictures/Screenshots/glass_<时间>.png  ← 普通截图（玻璃层在里面，相册可见）
     //        /sdcard/glass-evidence/glass_<时间>.txt      ← 那一刻的状态机快照（数值全在里面）
     //        /sdcard/glass-evidence/glass_<时间>.log      ← logcat 里 FloatingBall 最近 400 行
@@ -3130,7 +3131,6 @@ public class FloatingBallService extends Service {
 
     private volatile boolean witnessBusy = false;
     private long witnessCount = 0;
-    private long lastVolDownShotAt = 0;
 
     /**
      * 取证文件的旁挂目录 = App 自己的外部目录（这个目录**一定可写**）。
@@ -3141,6 +3141,28 @@ public class FloatingBallService extends Service {
     private File witnessDir() {
         return gateDir();
     }
+
+    /**
+     * 音量加双击这条路的入口：**不能被"上一张还在拍"吞掉**。
+     *
+     * 用户按两次是很明确的动作，而 witness 本身要撤抓屏排除 → 等两帧 → screencap →
+     * 再恢复，整个过程 1~2 秒。这段时间里再按一次双击，以前直接丢掉（"没反应"）；
+     * 现在排队补拍一张。另外界面被音量加藏起来时先叫回来，否则拍到的是空屏。
+     */
+    private void witnessCaptureFromKey() {
+        if (uiHidden) applyUiHidden(false, "双击音量加取证");
+        if (witnessBusy) {
+            Log.i("FloatingBall", "双击音量加：上一张还在拍 → 600ms 后补拍");
+            main.removeCallbacks(witnessKeyRetry);
+            main.postDelayed(witnessKeyRetry, 600);
+            return;
+        }
+        witnessCapture("双击音量加");
+    }
+
+    private final Runnable witnessKeyRetry = new Runnable() {
+        @Override public void run() { witnessCaptureFromKey(); }
+    };
 
     private void witnessCapture(final String why) {
         if (witnessBusy) { Log.i("FloatingBall", "witness: 上一张还没拍完，忽略这次"); return; }
@@ -5392,6 +5414,15 @@ public class FloatingBallService extends Service {
                     s.lastTextAt = android.os.SystemClock.uptimeMillis();
                     return;
                 }
+                // ★ 搜索胶囊开着：这次"收回初始圆球"先记在账上 —— 球这会儿本来就是藏着的，
+                //   真要收也只该等胶囊收起之后。否则不光会把整屏玻璃窗打回球窗（见
+                //   updateSiriWindow 的守卫），还会把刚到的最终回复从球里清掉，
+                //   用户收起胶囊就看到一颗空球（2026-11-08「搜索框待久了显示有问题」同一条线）。
+                if (s.searchActive) {
+                    Log.i("FloatingBall", "最终回复到了，但搜索胶囊还开着 → 先不收（等胶囊收起再收）");
+                    s.holdReleasePending = true;
+                    return;
+                }
                 Log.i("FloatingBall", "最终回复安静 1.5s → 收起方形态，回初始圆球");
                 s.releaseTextHold();
             }
@@ -5660,6 +5691,8 @@ public class FloatingBallService extends Service {
     //   · 文字被清空但保持还没结束 → 不缩回圆球，继续用那份最大几何；
     //   · 本轮真正结束（idle settle 到点 / answerSettledAfterTurn / OFF）→ 释放，回圆球。
     private boolean textHold = false;
+    /** 搜索胶囊开着时到了「最终回复该收回」的时刻 → 记下来，等胶囊收起再执行。 */
+    private boolean holdReleasePending = false;
     private boolean releasingHold = false;   // 释放时那次重新测量不要再把保持武装起来
     private float holdHalfX = 0f, holdHalfY = 0f, holdCorner = 1f, holdBlack = 0f;
     private long lastTextAt = 0;                         // 最后一次「球里有非空文字」的时刻
@@ -6167,7 +6200,14 @@ public class FloatingBallService extends Service {
         // （之前 audit 已挡了，但 siriTick 每帧还会经 measureSiriTargets 调到这里，窗口被打回球尺寸）
         // ★ zonesActive 也要挡：状态 3 期间窗口归卡片用（卡片比球窗高时我们主动撑高窗口），
         //   不挡的话 siriTick → measureSiriTargets → 这里每帧把窗口打回球尺寸 → 卡片又被裁成 4 行。
-        if (menuShown || zonesActive || (glassFullscreen && searchActive)) return;
+        // ★ 2026-11-08：searchActive 要**单挡**。以前写的是 `glassFullscreen && searchActive`，
+        //   而搜索层从来没把 glassFullscreen 置 true（那是玻璃菜单的标志）→ 这个守卫等于不存在。
+        //   于是搜索胶囊开着的时候，只要「最终回复安静 1.5s → releaseHoldForFinalReply()」
+        //   （或任何别的路径）走到这里，整屏玻璃窗就被打回球窗 793×579@(143,117) ——
+        //   屏幕上就是"搜索框待久了，自己变成一个小胶囊/显示错位"（2026-11-08 复现：
+        //   win=0,-90,1080x2340 → 793x579，期间 search=1/phase2）。
+        //   搜索期间窗口归弹簧/胶囊用，别人一律不许改。
+        if (menuShown || zonesActive || searchActive) return;
         float m = dp(24);
         // ★ 2026-11-06：球缩到屏宽 1/3，但**窗口还是原版大小** —— 六区菜单、列表面板、
         //   聊天卡的排版全都按这个窗口算，窗口一缩它们就全变（用户要求：菜单/聊天不能受影响）。
@@ -6805,6 +6845,11 @@ public class FloatingBallService extends Service {
         if (volumeSendReceiver != null) return;
         volumeSendReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
+                if (i != null && PowerBallReceiver.ACTION_VOLUME_SHOT.equals(i.getAction())) {
+                    Log.i("FloatingBall", "收到 VOLUME_SHOT（音量加双击）→ 取证快门");
+                    witnessCaptureFromKey();
+                    return;
+                }
                 if (i != null && PowerBallReceiver.ACTION_VOLUME_HIDE.equals(i.getAction())) {
                     Log.i("FloatingBall", "收到 VOLUME_HIDE → 隐藏全部界面");
                     applyUiHidden(true, "音量加");
@@ -6812,18 +6857,9 @@ public class FloatingBallService extends Service {
                 }
                 Log.i("FloatingBall", "收到 VOLUME_SEND：holdActive=" + powerHoldActive);
                 if (!powerHoldActive) {
-                    // ★ 2026-11-07 取证：没在说话时 **双击音量减 = 拍一张带玻璃的截图**。
-                    //   为什么要它：玻璃层带 SKIP_SCREENSHOT，MIUI 的「音量减+电源」截图拍不到它；
-                    //   而手指一碰屏幕搜索框就收起，也不适合点按钮。音量键是唯一"不碰屏幕"的键。
-                    long nowMs = android.os.SystemClock.uptimeMillis();
-                    if (nowMs - lastVolDownShotAt <= 800) {
-                        lastVolDownShotAt = 0;
-                        Log.i("FloatingBall", "音量减双击 → 取证快门");
-                        witnessCapture("双击音量减");
-                        return;
-                    }
-                    lastVolDownShotAt = nowMs;
-                    Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（0.8s 内再按一次 = 取证截图）");
+                    // 音量减只负责"收麦 + 发新会话"。取证快门已经挪到**大声量加双击**
+                    // （见 VOLUME_SHOT）：放在音量减上会和"再多说一段"抢同一颗键。
+                    Log.i("FloatingBall", "音量减：没在按住说话 → 忽略（取证 = 快速双击音量加）");
                     return;
                 }
                 Log.i("FloatingBall", "音量减 → 换行继续听（多轮）");
@@ -6834,6 +6870,7 @@ public class FloatingBallService extends Service {
         try {
             IntentFilter f = new IntentFilter(PowerBallReceiver.ACTION_VOLUME_SEND);
             f.addAction(PowerBallReceiver.ACTION_VOLUME_HIDE);
+            f.addAction(PowerBallReceiver.ACTION_VOLUME_SHOT);
             registerReceiver(volumeSendReceiver, f);
             Log.i("FloatingBall", "音量减广播接收器已注册");
         } catch (Throwable t) {
@@ -10572,6 +10609,21 @@ public class FloatingBallService extends Service {
         sqCx.step(dt); sqCy.step(dt); sqBx.step(dt); sqBy.step(dt);
         sqK.step(dt); sqDark.step(dt); sqCont.step(dt);
         float d = sqDensity();
+        // 兜底：搜索层这一帧必须铺满整屏。任何路径（新加的、异步晚到的、ROM 自己摆的）
+        // 把玻璃窗改小了，这里当场掰回来 —— 用户报的「搜索框待久了显示出问题」
+        // 根子在窗口被别人的球几何打回 793×579，这一条保证就算再漏一个口子也立刻自愈。
+        if (wm != null && glView != null && (winW != screenW || winH != screenH)) {
+            Log.w("FloatingBall", "search: 玻璃窗被改成 " + winW + "x" + winH + "（应为 "
+                    + screenW + "x" + screenH + "），当场掰回整屏");
+            winW = screenW; winH = screenH;
+            params.width = screenW;
+            params.height = screenH;
+            params.x = 0;
+            params.y = -Math.round(winY0());
+            if (renderer != null) { renderer.winPixelW = screenW; renderer.winPixelH = screenH; }
+            try { wm.updateViewLayout(glView, params); } catch (Throwable ignored) { }
+            glView.post(winSync);
+        }
         if (renderer != null) {
             renderer.searchMode = true;
             renderer.sBlobCx = sqCx.x * d;
@@ -10640,6 +10692,13 @@ public class FloatingBallService extends Service {
         measureSiriTargets(siriStr);                         // 有字就按字重排（方形态），没字就是圆球
         clampBallOnScreen();
         centerBallOnScreen();
+        // 胶囊开着期间到的「最终回复该收回」→ 这时才补做（窗口已经交还给球了，收得动、
+        // 也不会把整屏搜索层裁掉）。没这条待办的话，球会一直顶着方形态到下一个兜底。
+        if (holdReleasePending) {
+            holdReleasePending = false;
+            Log.i("FloatingBall", "search: 收起 → 补做胶囊期间欠下的「最终回复收回」");
+            releaseTextHold();
+        }
         // 代理触摸窗口这时可能还是"整屏大小"：先别让它接手，等窗口真的收完再放行
         main.postDelayed(new Runnable() {
             @Override public void run() {
@@ -11217,6 +11276,15 @@ public class FloatingBallService extends Service {
         if (fClose.exists()) {
             fClose.delete();
             closeSearchMode("文件钩子");
+        }
+        // hold-release：模拟「最终回复安静 1.5s → 收起方形态」那条释放路径。
+        // 为什么要有：搜索胶囊开着的时候助手照样会把最终回复推过来，这条释放就在那一刻跑；
+        // 它以前不看 searchActive，一跑就把整屏玻璃窗打回球窗（搜索层被裁进 793×579）。
+        File fHold = new File(dir, "hold-release");
+        if (fHold.exists()) {
+            fHold.delete();
+            Log.i("FloatingBall", "hook: hold-release（模拟最终回复释放）");
+            releaseHoldForFinalReply();
         }
         // search-type：只把字填进输入框（不发送）—— 用来验证"键盘上的回车/发送键"那条路
         File fType = new File(dir, "search-type");

@@ -28,6 +28,8 @@ import android.util.Log;
  *                        （还没有就新建一条；详见 FloatingBallService#sendTextToHoldSession）
  *   · 音量减键          → 结束「按住说话」→ 转写 → 发到**全新会话**
  *                        只做这一件事：球没开 / 没在说话时**什么都不做，绝不呼球**
+ *   · 音量加键单击      → 藏起全部悬浮界面（daemon 先等 420ms 确认不是双击）
+ *   · 音量加键双击      → 取证截图（VOLUME_SHOT → witnessCapture）
  *   · 不回桌面、不按 HOME、不动别的东西
  */
 public class PowerBallReceiver extends BroadcastReceiver {
@@ -37,6 +39,11 @@ public class PowerBallReceiver extends BroadcastReceiver {
     public static final String ACTION_VOLUME_SEND = "com.glslplayground.app.action.VOLUME_SEND";
     /** 音量加键：把所有悬浮界面藏起来（之后弹审批 / 按电源键 / 打开 App 会恢复）。 */
     public static final String ACTION_VOLUME_HIDE = "com.glslplayground.app.action.VOLUME_HIDE";
+    /**
+     * 音量加键**快速双击**：取证截图（把玻璃层临时放回抓屏，拍一张"眼睛看到的真样子"）。
+     * 单击 / 双击由 PowerKeyDaemon 判（它才看得到两下的间隔），这里只负责收。
+     */
+    public static final String ACTION_VOLUME_SHOT = "com.glslplayground.app.action.VOLUME_SHOT";
     private static final String TAG = "PowerBall";
 
     @Override public void onReceive(final Context ctx, Intent intent) {

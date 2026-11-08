@@ -15,8 +15,9 @@
  *     · KEY_VOLUMEDOWN 按下 → 立刻发 VOLUME_SEND
  *       （App 那边：只有正在按住说话时才收麦 + 发到全新会话；球没开就什么都不做，
  *         所以平时按音量减仍然是正常的调音量）
- *     · KEY_VOLUMEUP 按下   → 立刻发 VOLUME_HIDE
+ *     · KEY_VOLUMEUP 单击   → 等 420ms 没等到第二下，发 VOLUME_HIDE
  *       （App 那边：把所有悬浮界面藏起来；之后弹审批、按电源键、或重新打开 App 会恢复）
+ *     · KEY_VOLUMEUP 快速双击 → 发 VOLUME_SHOT（App 那边取证截图：把玻璃层也拍进去）
  *
  * 用法（root）：
  *   CLASSPATH=/data/local/tmp/powerkey/powerkey-daemon.jar \
@@ -52,6 +53,8 @@ public class PowerKeyDaemon {
     static final String ACTION_POWER = APP_PKG + ".action.POWER_BALL";
     static final String ACTION_VOLUME = APP_PKG + ".action.VOLUME_SEND";
     static final String ACTION_HIDE = APP_PKG + ".action.VOLUME_HIDE";
+    /** 音量加双击 → 取证截图（App 里把玻璃层临时放回抓屏，拍一张"真样子"）。 */
+    static final String ACTION_SHOT = APP_PKG + ".action.VOLUME_SHOT";
 
     // 阈值要比框架自己的长按判定（~500ms）**长**：
     // 短按是锁屏，框架在 500ms 就把这次按键标成 long-press，松手不再锁；
@@ -80,10 +83,44 @@ public class PowerKeyDaemon {
     static volatile long lastPowerFireMs = 0L;
     /** 音量减：按下即触发，700ms 内只算一次（多个节点 / 注入节点同时上报时去重）。 */
     static volatile long lastVolFireMs = 0L;
-    /** 音量加：同样按下即触发，700ms 去重。 */
-    static volatile long lastHideFireMs = 0L;
+    /**
+     * 音量加：**要看双击**，不能再"按下即发"。
+     *
+     * 一次物理按下的判定：
+     *   · 80ms 内同一颗键的重复上报（多路 input 节点）→ 丢掉；
+     *   · 距上一次按下 ≤ {@link #VOL_DOUBLE_MS} → 这是一次**双击** → 发 VOLUME_SHOT；
+     *   · 只有一下 → 等 {@link #VOL_DOUBLE_MS} 确认没第二下，再发 VOLUME_HIDE。
+     *
+     * 以前是"按下即发 VOLUME_HIDE" + 700ms 去重：双击的第二下正好被 700ms 吃掉，
+     * 所以 App 里那个「双击音量减截图」永远等不到第二下（用户：「取证没了」）。
+     */
+    static final long VOL_DOUBLE_MS = 420L;
+    static final long VOL_UP_DUP_MS = 80L;
+    static volatile long lastVolUpDownAt = 0L;
+    static volatile String lastVolUpDev = "";
+    static volatile java.util.TimerTask pendingVolHide = null;
+    /** 单线程定时器：只用来"等第二下"。 */
+    static final java.util.Timer volTimer = new java.util.Timer("pk-vol", true);
+
+    /** 单例锁：开机脚本和手动 daemon-start 会各起一个，两个一起听同一颗键 = 一次按下发两条广播。 */
+    static java.io.RandomAccessFile lockRaf;
+
+    static boolean acquireSingleton() {
+        try {
+            lockRaf = new java.io.RandomAccessFile("/data/adb/powerkey/daemon.lock", "rw");
+            if (lockRaf.getChannel().tryLock() == null) return false;
+            return true;                       // 进程活着就持有，退出自动释放
+        } catch (Throwable t) {
+            Log.w(TAG, "单例锁不可用（" + t + "）→ 照常跑");
+            return true;
+        }
+    }
 
     public static void main(String[] args) throws Exception {
+        if (!acquireSingleton()) {
+            Log.i(TAG, "已经有一个 PowerKeyDaemon 在跑 → 本实例退出（避免一次按键发两条广播）");
+            return;
+        }
         List<String> devs = new ArrayList<String>();
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -157,8 +194,8 @@ public class PowerKeyDaemon {
                         continue;
                     }
                     if (code == KEY_VOLUMEUP) {
-                        // 音量加：按下就发 → App 那边把所有悬浮界面藏起来
-                        if (value == 1) fireHide(dev);
+                        // 音量加：单击 = 藏界面（延迟 420ms 判定），双击 = 取证截图
+                        if (value == 1) onVolumeUp(dev);
                         else if (value == 0) Log.i(TAG, "KEY_VOLUMEUP up @" + dev);
                         continue;
                     }
@@ -244,6 +281,65 @@ public class PowerKeyDaemon {
     }
 
     /**
+     * 音量加按下：判定「单击（藏界面）」还是「双击（取证截图）」。
+     *
+     * 为什么必须在 daemon 这一层判：App 那边只收到"按了一下"的广播，看不到中间隔了多久；
+     * 而"单击藏界面"和"双击截图"又必须在**第一下按下时就分开**——否则第一下已经把界面藏了，
+     * 截出来的是空屏。
+     */
+    static void onVolumeUp(String dev) {
+        final long now = SystemClock.uptimeMillis();
+        synchronized (lock) {
+            // ① 多路节点把同一次按下报了两遍：80ms 内一律当重复
+            if (now - lastVolUpDownAt <= VOL_UP_DUP_MS) {
+                Log.i(TAG, "KEY_VOLUMEUP down 重复（同一按键的另一路节点）→ 忽略 @" + dev);
+                return;
+            }
+            // ② 距上一次按下足够近 → 双击
+            long gap = lastVolUpDownAt > 0 ? now - lastVolUpDownAt : 0L;
+            boolean dbl = lastVolUpDownAt > 0 && gap <= VOL_DOUBLE_MS;
+            lastVolUpDownAt = now;
+            lastVolUpDev = dev;
+            if (pendingVolHide != null) {              // 上一轮还在等第二下：先撤掉
+                pendingVolHide.cancel();
+                pendingVolHide = null;
+            }
+            if (dbl) {
+                lastVolUpDownAt = 0;                   // 三连击只算一次双击
+                Log.i(TAG, "音量加双击（间隔 " + gap + "ms）→ 取证截图 @" + dev);
+                fireShot(dev);
+                return;
+            }
+            // ③ 只有一下：等 VOL_DOUBLE_MS，没人跟就藏界面
+            final long at = now;
+            java.util.TimerTask t = new java.util.TimerTask() {
+                @Override public void run() {
+                    synchronized (lock) {
+                        if (lastVolUpDownAt != at) return;     // 中间又按了（双击被别处吃掉）
+                        lastVolUpDownAt = 0;
+                        pendingVolHide = null;
+                    }
+                    Log.i(TAG, "音量加单击 → 藏界面");
+                    fireHide(lastVolUpDev);
+                }
+            };
+            pendingVolHide = t;
+            volTimer.schedule(t, VOL_DOUBLE_MS);
+        }
+    }
+
+    /** 音量加双击 → 发 VOLUME_SHOT（App 收到后拍一张带玻璃的取证图）。 */
+    static void fireShot(String dev) {
+        Log.i(TAG, "音量加双击 → 发 VOLUME_SHOT @" + dev + (dry ? "（dry）" : ""));
+        if (dry) return;
+        try {
+            sh("am broadcast -a " + ACTION_SHOT + " -p " + APP_PKG + " --user 0");
+        } catch (Throwable t) {
+            Log.e(TAG, "取证触发失败：" + t);
+        }
+    }
+
+    /**
      * 音量加键：发 VOLUME_HIDE。
      *
      * 语义（App 那边实现）：**把所有悬浮界面藏起来**（球、胶囊、卡片、菜单、四区），
@@ -251,11 +347,8 @@ public class PowerKeyDaemon {
      * 同样发隐式广播（-p 限定包名），球没开的时候没人收 —— 不会把 App 冷启动起来。
      */
     static void fireHide(String dev) {
-        long now = SystemClock.uptimeMillis();
-        synchronized (lock) {
-            if (now - lastHideFireMs < 700L) return;
-            lastHideFireMs = now;
-        }
+        // 不再在这里做时间去重：单击/双击已经由 onVolumeUp() 按"每次按下"判过了，
+        // 这里多一层 700ms 会把双击的那条路挡掉（以前就是这么丢的）。
         Log.i(TAG, "音量加键 → 发 VOLUME_HIDE @" + dev + (dry ? "（dry）" : ""));
         if (dry) return;
         try {

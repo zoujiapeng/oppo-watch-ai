@@ -10,7 +10,8 @@
 #   su -c 'sh android/assets/pkctl.sh fire-vol'          # 手动发一次「音量减 = 收麦+发新会话」
 #   su -c 'sh android/assets/pkctl.sh test'              # 模拟长按电源键（sendevent 注入 uinput）
 #   su -c 'sh android/assets/pkctl.sh voltest'           # 模拟按一下音量减键（同上）
-#   su -c 'sh android/assets/pkctl.sh volup'             # 模拟按一下音量加键（= 隐藏全部悬浮界面）
+#   su -c 'sh android/assets/pkctl.sh volup'             # 模拟单击音量加（= 隐藏全部悬浮界面）
+#   su -c 'sh android/assets/pkctl.sh voldbl'            # 模拟快速双击音量加（= 取证截图）
 #   su -c 'sh android/assets/pkctl.sh uninstall'
 #
 # 结构（为什么这么分）：
@@ -85,9 +86,11 @@ set_power_settings() {
 }
 
 # ───────────────────────── 常驻监听 ─────────────────────────
-daemon_pid() { pidof app_process 2>/dev/null | tr ' ' '\n' | while read -r p; do
-  [ -n "$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q PowerKeyDaemon && echo "$p" && break
+daemon_pids() { pidof app_process 2>/dev/null | tr ' ' '\n' | while read -r p; do
+  [ -n "$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q PowerKeyDaemon && echo "$p"
 done; }
+
+daemon_pid() { daemon_pids | head -1; }
 
 daemon_install() {
   jar="${1:-}"
@@ -108,8 +111,16 @@ LOG=$DLOG
 i=0
 while [ "\$(getprop sys.boot_completed)" != "1" ] && [ \$i -lt 180 ]; do sleep 1; i=\$((i+1)); done
 sleep 5
+running() {
+  for p in \$(pidof app_process); do
+    tr '\\0' ' ' < "/proc/\$p/cmdline" 2>/dev/null | grep -q PowerKeyDaemon && return 0
+  done
+  return 1
+}
 while true; do
   if [ -z "\$(pm path $APP 2>/dev/null)" ]; then sleep 60; continue; fi
+  # 已经在跑就别再起一个（两个一起听同一颗键 = 一次按下发两条广播）
+  if running; then sleep 10; continue; fi
   CLASSPATH="\$JAR" /system/bin/app_process /system/bin PowerKeyDaemon $HOLD_MS >>"\$LOG" 2>&1
   sleep 5
 done &
@@ -135,8 +146,13 @@ daemon_start() {
 }
 
 daemon_stop() {
-  p=$(daemon_pid)
-  if [ -n "$p" ]; then kill "$p" 2>/dev/null; echo "ok 停掉 pid=$p"; else echo "ok 本来就没在跑"; fi
+  # ⚠ 可能同时跑着不止一个（开机脚本 + 手动 start 各起一个）：
+  #   两个 daemon 听同一颗键 → 一次按下发两条广播 → 双击判定/取证全乱。全杀掉。
+  killed=""
+  for p in $(daemon_pids); do
+    kill "$p" 2>/dev/null && killed="$killed $p"
+  done
+  if [ -n "$killed" ]; then echo "ok 停掉 pid$killed"; else echo "ok 本来就没在跑"; fi
 }
 
 daemon_status() {
@@ -211,7 +227,19 @@ sim_longpress() {
 sim_volup() {
   dev=$(uinput_power_dev)
   [ -n "$dev" ] || { echo "ERR 没找到 uinput 节点（这台机器没法用 sendevent 模拟）"; return 1; }
-  echo "注入 $dev：KEY_VOLUMEUP down/up"
+  echo "注入 $dev：KEY_VOLUMEUP down/up（单击 = 藏界面）"
+  sendevent "$dev" 1 115 1; sendevent "$dev" 0 0 0
+  sendevent "$dev" 1 115 0; sendevent "$dev" 0 0 0
+}
+
+# 模拟「快速双击音量加」：两下间隔 ~160ms（< daemon 的 420ms 双击窗口）
+sim_voldbl() {
+  dev=$(uinput_power_dev)
+  [ -n "$dev" ] || { echo "ERR 没找到 uinput 节点（这台机器没法用 sendevent 模拟）"; return 1; }
+  echo "注入 $dev：KEY_VOLUMEUP ×2（间隔 160ms，= 取证截图）"
+  sendevent "$dev" 1 115 1; sendevent "$dev" 0 0 0
+  sendevent "$dev" 1 115 0; sendevent "$dev" 0 0 0
+  sleep 0.16
   sendevent "$dev" 1 115 1; sendevent "$dev" 0 0 0
   sendevent "$dev" 1 115 0; sendevent "$dev" 0 0 0
 }
@@ -309,6 +337,7 @@ case "${1:-status}" in
   test) sim_longpress ;;
   voltest) sim_volkey ;;
   volup) sim_volup ;;
+  voldbl) sim_voldbl ;;
   uninstall)
     daemon_stop
     rm -f "$DSVC"

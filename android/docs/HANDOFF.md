@@ -2465,7 +2465,7 @@ hb: zones=1 win=144,0,574x574 view=574x574 pixel=574x574   ← 三者一致
 那时照样 `enterZones()` —— 屏幕上凭空冒出六区，接着随便点一下就变成"菜单操作"。
 现在 `longPress` 里加了 `fingerDown` 判据（手指已抬起就不弹）。
 
-### 新工具：取证快门 `files/witness` / `tools/witness.sh` / 双击音量减
+### 新工具：取证快门 `files/witness` / `tools/witness.sh` / 双击音量加
 
 玻璃层带 `SKIP_SCREENSHOT`，所以**普通截图 / 录屏里它是完全隐身的** —— 出问题时根本拍不到证据。
 现在有三条入口，产出同一套三件套：
@@ -2474,7 +2474,7 @@ hb: zones=1 win=144,0,574x574 view=574x574 pixel=574x574   ← 三者一致
 |---|---|
 | `bash tools/witness.sh`（Termux） | 一条命令，拍完自动把 png/txt/log 收进 `shots/witness/<时间>/` |
 | `su -c 'touch .../files/witness'` | 文件钩子（脚本/调试用） |
-| **双击音量减**（0.8s 内两次，没在按住说话时） | 手上正在看 bug、又不想碰屏幕时用 |
+| **快速双击音量加**（两下间隔 <420ms；daemon 判，和「单击藏界面」互斥） | 手上正在看 bug、又不想碰屏幕时用 |
 
 产出：
 * `/sdcard/Pictures/Screenshots/glass_<时间>.png` —— **普通截图**，玻璃层在里面（相册可见，可直接发给 AI）；
