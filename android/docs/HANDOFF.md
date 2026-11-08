@@ -10,6 +10,53 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-08：搜索胶囊「待久了显示就坏了」—— 根因是窗口被球几何打回 793×579
+
+**用户原话**：「搜索框待久了，等会就会出现显示问题。」
+
+**现场**（`files/glass_*.txt` 与 `logcat -s FloatingBall`，两者时间对得上）：
+
+```
+hb: search=1/phase2 ... win=0,-90,1080x2340   ← 刚弹出来，对
+hb: search=1/phase2 ... win=143,117,793x579   ← 待了一会儿，错
+最终回复安静 1.5s → 收起方形态，回初始圆球     ← 就在这两行之间反复出现
+```
+
+**根因**：搜索层把整屏玻璃窗撑成 `screenW×screenH`，可 `updateSiriWindow()` 的守卫写的是
+
+```java
+if (menuShown || zonesActive || (glassFullscreen && searchActive)) return;   // 旧
+```
+
+而 `glassFullscreen` 是**玻璃菜单**的标志，搜索路径从来没把它置 true
+（`enterSearchMode()` 只改 `params.width/height`）→ `glassFullscreen && searchActive`
+恒为 false，这个守卫等于不存在。于是搜索胶囊开着时，任何走到 `updateSiriWindow()` 的
+路径都会把整屏窗口打回球窗：
+
+* 最常走的一条是 `releaseHoldForFinalReply()`（`SiriAssistant.quietTick` 在最终回复
+  安静 1.5s 后调）→ `releaseTextHold()` → `updateSiriWindow(球半径)`。
+  搜索开着的时候助手照样会把这句"最终回复"推过来 —— 这就是"待久了才坏"。
+
+**修法**（三处，都在 `FloatingBallService`）：
+
+1. `updateSiriWindow()` 守卫改成 `if (menuShown || zonesActive || searchActive) return;`
+   —— 搜索期间窗口归弹簧/胶囊，别人一律不许改。
+2. `releaseHoldForFinalReply()`：`searchActive` 时**先不收**，记 `holdReleasePending`，
+   等 `finishSearchClose()` 里补做。这样既不打回窗口，也不会把刚到的最终回复从球里清掉
+   （否则收起胶囊是颗空球）。
+3. `searchStep()` 每帧兜底：`winW/winH` 不是 `screenW/screenH` 就当场掰回整屏并打 warn ——
+   以后再有新路径漏了守卫，下一页就自愈，用户看不到坏相。
+
+**回归钩子**：`files/hold-release`（模拟上面那条释放路径，`pumpSearchRequest()` 里）。
+不用真的让助手回一句就能复现/验收。
+
+**实测（同一颗球、同一个钩子，改前 vs 改后）**：
+
+| | 打开胶囊 + `hold-release` 后 |
+|---|---|
+| 改前 | `ball window -> 793x579`，`hb: search=1/phase2 ... win=143,117,793x579` |
+| 改后 | 窗口一直 `0,-90,1080x2340`，日志 `最终回复到了，但搜索胶囊还开着 → 先不收`；收起时 `search: 收起 → 补做胶囊期间欠下的「最终回复收回」` |
+
 ## 2026-10-29（续）：让球"当无事发生"到底卡在哪 —— 已解决
 
 目标：AI 点击时**玻璃一个像素都不动**，下面的 App 照常被操控。结论先说：
