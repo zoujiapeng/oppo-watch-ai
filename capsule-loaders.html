@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<!--
+  Capsule Loaders —— 5 个胶囊加载动画（单文件、零依赖、Canvas）
+  ──────────────────────────────────────────────────────────────
+  视觉：只有一种元素 —— 白色发光点（亮核心 + 长柔光晕，和 App 里 dots
+  同一族的质感）；背景是纯黑，没有任何线条、纹理、边框、阴影装饰。
+  动作：元素简单，但编排复杂、连续、不循环接缝。
+  容器：胶囊（border-radius:999px + overflow:hidden），画布等比铺满。
+
+  五个：
+    01 脉冲 Pulse   引力井在胶囊里游走，光点先聚成旋涡，再被甩到壁上撞回
+    02 珠链 Chain   一条由光点串起来的珠链跟着蛇头游动、缠绕、甩尾
+    03 螺旋 Helix   三股光点拧成的螺旋从胶囊里穿过，随胶囊两端的收口收窄
+    04 环轨 Orbit   两圈光点贴着胶囊内壁反向绕圈，时快时慢、聚散追逐
+    05 星座 Morph   一团光点不断重组：横线 → 椭圆环 → 波 → 星核
+
+  尺寸：.cap 的 --w 控制宽度，--h = --w × .675（1.48:1）——
+  和 App 里那颗悬浮玻璃球的胶囊形状一致（GlassRenderer halfX .37 / halfY .25）。
+  画布和所有点径/间距都按 --h 等比缩放。默认 min(40vw,220px)。
+
+  交互：点按胶囊放大预览，再点收回（Esc 同效）。
+  嵌入：整页可直接开；要单个动画，抄走 .cap、.cap canvas 的 CSS 和
+  Loaders 里对应的那个类即可（所有类都只依赖 base 里的工具函数）。
+  ──────────────────────────────────────────────────────────────
+-->
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Capsule Loaders · 胶囊加载</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{color-scheme:dark}
+  html,body{height:100%}
+  body{
+    background:#000;
+    color:#fff;
+    overflow:hidden;
+    display:grid;
+    place-items:center;
+    font-family:-apple-system,system-ui,"PingFang SC","Noto Sans SC",sans-serif;
+    -webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;
+  }
+
+  /* ── 展示页（不属于动画本身） ─────────────────────────────── */
+  .gallery{display:grid;grid-template-columns:repeat(2, auto);
+    gap:22px 18px;justify-content:center;align-content:center;padding:20px}
+  .item{display:flex;flex-direction:column;gap:9px;cursor:pointer;
+    -webkit-user-select:none;user-select:none}
+  .item:last-child{grid-column:1 / -1;justify-self:center}
+  figcaption{font:10px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:#2e2e2e;letter-spacing:.14em}
+  .hint{position:fixed;left:0;right:0;bottom:calc(16px + env(safe-area-inset-bottom));
+    text-align:center;font-size:10px;letter-spacing:.1em;color:#232323;
+    pointer-events:none;animation:cap-hint 6s 1.2s forwards}
+  @keyframes cap-hint{to{opacity:0}}
+
+  /* 点按放大预览 */
+  body.soloing .item:not(.solo){display:none}
+  body.soloing .gallery{display:flex;align-items:center;justify-content:center}
+  .item.solo figcaption{display:none}
+  .item.solo .cap{--w:min(86vw,560px)}
+
+  /* ── 胶囊容器（要嵌入时抄这一段） ─────────────────────────── */
+  .cap{
+    --w:min(40vw,220px);
+    --h:calc(var(--w) * .675);   /* 1.48:1，对齐悬浮玻璃球的胶囊 */
+    position:relative;
+    width:var(--w);
+    height:var(--h);
+    border-radius:999px;
+    background:#000;
+    overflow:hidden;
+    isolation:isolate;
+    contain:paint;
+  }
+  .cap canvas{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    display:block;
+  }
+</style>
+</head>
+<body>
+
+<main class="gallery" aria-label="胶囊加载动画">
+
+  <figure class="item">
+    <div class="cap"><canvas class="ld" data-kind="pulse"></canvas></div>
+    <figcaption>01 · 脉冲</figcaption>
+  </figure>
+
+  <figure class="item">
+    <div class="cap"><canvas class="ld" data-kind="chain"></canvas></div>
+    <figcaption>02 · 珠链</figcaption>
+  </figure>
+
+  <figure class="item">
+    <div class="cap"><canvas class="ld" data-kind="helix"></canvas></div>
+    <figcaption>03 · 螺旋</figcaption>
+  </figure>
+
+  <figure class="item">
+    <div class="cap"><canvas class="ld" data-kind="orbit"></canvas></div>
+    <figcaption>04 · 环轨</figcaption>
+  </figure>
+
+  <figure class="item">
+    <div class="cap"><canvas class="ld" data-kind="morph"></canvas></div>
+    <figcaption>05 · 星座</figcaption>
+  </figure>
+
+</main>
+
+<p class="hint">点按胶囊放大 · 再点收回</p>
+
+<script>
+(() => {
+  "use strict";
+
+  const TAU = Math.PI * 2;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+  /* 白色光点贴图：亮核 + 很长很柔的衰减。所有动画都只画它。 */
+  const SPRITE = (() => {
+    const S = 128, c = document.createElement("canvas");
+    c.width = c.height = S;
+    const g = c.getContext("2d");
+    const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grd.addColorStop(0,    "rgba(255,255,255,1)");
+    grd.addColorStop(.07,  "rgba(255,255,255,1)");
+    grd.addColorStop(.16,  "rgba(255,255,255,.92)");
+    grd.addColorStop(.30,  "rgba(255,255,255,.55)");
+    grd.addColorStop(.48,  "rgba(255,255,255,.22)");
+    grd.addColorStop(.68,  "rgba(255,255,255,.07)");
+    grd.addColorStop(.86,  "rgba(255,255,255,.016)");
+    grd.addColorStop(1,    "rgba(255,255,255,0)");
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2, 0, TAU); g.fill();
+    return c;
+  })();
+
+  /* 胶囊内的「跑道」：离胶囊内壁 inset 的一条胶囊线。
+     保证点永远在胶囊里，撞壁时沿法线反弹。 */
+  function stadium(p, w, h, inset, bounce) {
+    const R = Math.max(2, h / 2 - inset);
+    const cy = h / 2;
+    const x0 = Math.min(R, w / 2), x1 = Math.max(w - R, w / 2);
+    const sx = clamp(p.x, x0, x1);
+    let dx = p.x - sx, dy = p.y - cy;
+    let d = Math.hypot(dx, dy);
+    if (d > R) {
+      if (d < 1e-6) { dx = 1; dy = 0; d = 1; }
+      const nx = dx / d, ny = dy / d;
+      p.x = sx + nx * R;
+      p.y = cy + ny * R;
+      if (bounce && (p.vx * nx + p.vy * ny) > 0) {
+        const vn = p.vx * nx + p.vy * ny;
+        p.vx -= (1 + bounce) * vn * nx;
+        p.vy -= (1 + bounce) * vn * ny;
+      }
+    }
+  }
+
+  /* 胶囊形跑道上的位置：s 是弧长，绕一圈 = 2*(w-2R)+2πR */
+  function rimPoint(s, w, h, inset) {
+    const R = Math.max(2, h / 2 - inset), cy = h / 2;
+    const straight = Math.max(0, w - 2 * R);
+    const L = straight * 2 + TAU * R;
+    s = ((s % L) + L) % L;
+    if (s < straight) return [R + s, cy - R];
+    s -= straight;
+    if (s < Math.PI * R) {
+      const a = -Math.PI / 2 + s / R;
+      return [w - R + Math.cos(a) * R, cy + Math.sin(a) * R];
+    }
+    s -= Math.PI * R;
+    if (s < straight) return [w - R - s, cy + R];
+    s -= straight;
+    const a = Math.PI / 2 + s / R;
+    return [R + Math.cos(a) * R, cy + Math.sin(a) * R];
+  }
+
+  class Base {
+    constructor(cap, canvas) {
+      this.cap = cap;
+      this.canvas = canvas;
+      this.ctx = canvas.getContext("2d");
+      this.w = 0; this.h = 0; this.u = 1;
+      this.fit(true);
+      if (window.ResizeObserver) new ResizeObserver(() => this.fit()).observe(canvas);
+      else addEventListener("resize", () => this.fit());
+    }
+    fit(force) {
+      const r = this.canvas.getBoundingClientRect();
+      const w = Math.round(r.width), h = Math.round(r.height);
+      if (!w || !h) { this.w = this.h = 0; return; }
+      if (!force && w === this.w && h === this.h) return;
+      this.w = w; this.h = h;
+      this.u = h / 82;                      /* 所有点径/间距的基准倍率 */
+      this.canvas.width = Math.round(w * DPR);
+      this.canvas.height = Math.round(h * DPR);
+      this.ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      this.ctx.imageSmoothingEnabled = true;
+      this.init();
+    }
+    /* 画一个发光点：r 是亮核尺度，光晕会自然散到 6.5r */
+    dot(x, y, r, a) {
+      const S = r * 6.5, c = this.ctx;
+      c.globalAlpha = clamp(a, 0, 1);
+      c.drawImage(SPRITE, x - S, y - S, S * 2, S * 2);
+    }
+    clear() {
+      const c = this.ctx;
+      c.clearRect(0, 0, this.w, this.h);
+      c.globalCompositeOperation = "lighter";
+    }
+  }
+
+  /* ── 01 脉冲：会呼吸的引力井 ─────────────────────────────── */
+  class Pulse extends Base {
+    init() {
+      const w = this.w, h = this.h;
+      this.dots = Array.from({ length: 40 }, () => {
+        const p = {
+          x: Math.random() * w, y: Math.random() * h,
+          vx: (Math.random() - .5) * 40, vy: (Math.random() - .5) * 40,
+          r: (.011 + Math.random() * .011) * h,
+          a: .42 + Math.random() * .48
+        };
+        stadium(p, w, h, 10 * this.u, 0);
+        return p;
+      });
+      this.ax = w / 2; this.ay = h / 2;
+    }
+    frame(t, dt) {
+      const w = this.w, h = this.h, u = this.u;
+      const well = { x: 0, y: 0, vx: 0, vy: 0 };
+      well.x = w / 2 + Math.sin(t * .47) * w * .29;
+      well.y = h / 2 + Math.sin(t * .71 + 1.1) * h * .30;
+      stadium(well, w, h, 18 * u, 0);
+      this.ax = well.x; this.ay = well.y;
+
+      /* 引力 / 斥力交替：先把光点吸成旋涡，再甩开撞壁 */
+      const s = Math.sin(t * .88);
+      const pull = (s >= 0 ? 1 : -.5) * (0.55 + 0.45 * Math.abs(s));
+      const swirl = 0.55 * (0.4 + 0.6 * Math.abs(s));
+
+      for (const p of this.dots) {
+        const dx = well.x - p.x, dy = well.y - p.y;
+        const d2 = dx * dx + dy * dy + 90;
+        const d = Math.sqrt(d2);
+        const a = Math.min(900, 230000 / d2) * pull;
+        p.vx += (dx / d) * a * dt - (dy / d) * a * swirl * dt;
+        p.vy += (dy / d) * a * dt + (dx / d) * a * swirl * dt;
+        const damp = Math.exp(-1.05 * dt);
+        p.vx *= damp; p.vy *= damp;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        stadium(p, w, h, 9 * u, .55);
+      }
+    }
+    draw(t) {
+      this.clear();
+      /* 引力井本身也亮一下：聚拢时是一颗更亮的核 */
+      const s = Math.sin(t * .88);
+      const pull = Math.max(0, s);
+      this.dot(this.ax, this.ay, .026 * this.h, .06 + .30 * pull);
+      for (const p of this.dots) {
+        const d = Math.hypot(this.ax - p.x, this.ay - p.y);
+        const hot = clamp(1 - d / (this.w * .42), 0, 1);
+        this.dot(p.x, p.y, p.r * (.85 + .4 * hot), p.a * (.55 + .55 * hot));
+      }
+    }
+  }
+
+  /* ── 02 珠链：跟着蛇头游动的光点链 ───────────────────────── */
+  class Chain extends Base {
+    init() {
+      const w = this.w, h = this.h;
+      this.n = 13;
+      this.gap = .105 * h;
+      this.b = Array.from({ length: this.n }, (_, i) => ({
+        x: w * .5 - i * this.gap, y: h * .5
+      }));
+    }
+    frame(t) {
+      const w = this.w, h = this.h, u = this.u;
+      const head = this.b[0];
+      /* 两条不同频率的 Lissajous 叠在一起 → 蛇头会绕小圈、会突然窜出去 */
+      const tt = t + .38 * Math.sin(t * .61);
+      head.x = w / 2 + (w / 2 - 26 * u) *
+        (Math.sin(tt * .57) * .78 + Math.sin(tt * 1.13 + 1.4) * .22);
+      head.y = h / 2 + (h * .30) *
+        (Math.sin(tt * .83 + .9) * .80 + Math.cos(tt * 1.41) * .20);
+      stadium(head, w, h, 11 * u, 0);
+
+      /* 跟带：每一节贴着前一节，保持节距；头一甩，尾巴自然甩 */
+      for (let i = 1; i < this.n; i++) {
+        const a = this.b[i - 1], b = this.b[i];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const k = ((d - this.gap) / d) * .62;
+        b.x += dx * k; b.y += dy * k;
+        stadium(b, w, h, 8 * u, 0);
+      }
+    }
+    draw(t) {
+      this.clear();
+      for (let i = 0; i < this.n; i++) {
+        const b = this.b[i];
+        const wv = .5 + .5 * Math.sin(t * 3.3 - i * .62);
+        const r = (.026 - i * .0008) * this.h * (.82 + .34 * wv);
+        this.dot(b.x, b.y, r, .40 + .60 * wv);
+      }
+    }
+  }
+
+  /* ── 03 螺旋：三股光点拧成的螺旋穿过胶囊 ─────────────────── */
+  class Helix extends Base {
+    init() {
+      const h = this.h;
+      this.n = 13;
+      this.strands = 3;
+      this.dots = [];
+      for (let s = 0; s < this.strands; s++)
+        for (let i = 0; i < this.n; i++)
+          this.dots.push({ i, s, ph: Math.random() * TAU, rr: .8 + Math.random() * .5 });
+    }
+    frame(t) {
+      const w = this.w, h = this.h;
+      const cy = h / 2, R = h / 2;
+      const pad = Math.max(6, h * .09);
+      const span = Math.max(1, w - pad * 2);
+      for (const d of this.dots) {
+        const u = ((d.i / this.n + d.s / this.strands + t * .05) % 1 + 1) % 1;
+        const x = pad + u * span;
+        /* 胶囊两端收口：螺旋跟着胶囊的轮廓收窄 */
+        let half = R;
+        if (x < R) half = Math.sqrt(Math.max(0, R * R - (R - x) * (R - x)));
+        if (x > w - R) half = Math.sqrt(Math.max(0, R * R - (x - (w - R)) * (x - (w - R))));
+        half = Math.max(0, half - 6);
+        const amp = Math.min(h * .285, half * .95);
+        const phase = u * TAU * 1.15 + t * 1.7 + .5 * Math.sin(t * .6) + d.s * TAU / 3;
+        const depth = .5 + .5 * Math.cos(phase);
+        d.x = x;
+        d.y = cy + amp * Math.sin(phase);
+        d.depth = depth;
+        d.env = smooth(0, .055, u) * smooth(0, .055, 1 - u);
+      }
+    }
+    draw(t) {
+      this.clear();
+      const h = this.h;
+      for (const d of this.dots) {
+        const r = (.011 + .010 * d.depth) * h * d.rr;
+        const a = d.env * (.20 + .80 * d.depth);
+        this.dot(d.x, d.y, r, a);
+      }
+    }
+  }
+
+  /* ── 04 环轨：两圈光点沿胶囊内壁反向追逐 ─────────────────── */
+  class Orbit extends Base {
+    init() {
+      const h = this.h;
+      this.rings = [
+        { inset: h * .095, n: 9, dir: 1, speed: h * 1.35, base: .017 * h, alpha: .95 },
+        { inset: h * .255, n: 7, dir: -1, speed: h * 1.05, base: .0135 * h, alpha: .66 }
+      ];
+      for (const ring of this.rings) {
+        ring.dots = Array.from({ length: ring.n }, (_, i) => ({
+          s: (i / ring.n) * 700 + Math.random() * 40,
+          ph: Math.random() * TAU
+        }));
+      }
+    }
+    frame(t, dt) {
+      const w = this.w, h = this.h;
+      for (const ring of this.rings) {
+        const R = Math.max(2, h / 2 - ring.inset);
+        const L = Math.max(1, (w - 2 * R) * 2 + TAU * R);
+        for (const d of ring.dots) {
+          const sp = ring.speed * (.62 + .38 * Math.sin(t * 1.15 + d.ph));
+          d.s = ((d.s + ring.dir * sp * dt) % L + L) % L;
+          const [x, y] = rimPoint(d.s, w, h, ring.inset);
+          d.x = x; d.y = y;
+        }
+      }
+    }
+    draw(t) {
+      this.clear();
+      for (const ring of this.rings) {
+        for (const d of ring.dots) {
+          const wv = .5 + .5 * Math.sin(t * 1.7 + d.ph * 1.9);
+          this.dot(d.x, d.y, ring.base * (.82 + .4 * wv), ring.alpha * (.55 + .45 * wv));
+        }
+      }
+    }
+  }
+
+  /* ── 05 星座：同一团光点在几种形状间不断重组 ─────────────── */
+  class Morph extends Base {
+    init() {
+      const w = this.w, h = this.h;
+      this.n = 38;
+      this.dots = Array.from({ length: this.n }, (_, i) => {
+        const a = (i / this.n) * TAU;
+        return {
+          i,
+          x: w / 2 + Math.cos(a) * h * .22,
+          y: h / 2 + Math.sin(a) * h * .22,
+          vx: 0, vy: 0,
+          ph: Math.random() * TAU,
+          k: 30 + (i % 6) * 7
+        };
+      });
+    }
+    target(k, i, t) {
+      const w = this.w, h = this.h, cx = w / 2, cy = h / 2;
+      const n = this.n, u = i / (n - 1), m = Math.min(24, w * .08);
+      if (k === 0) {  /* 横线 */
+        return [m + u * (w - m * 2), cy + Math.sin(i * 1.9) * 1.6];
+      }
+      if (k === 1) {  /* 旋转的椭圆环 */
+        const a = (i / n) * TAU + t * .45;
+        return [cx + Math.cos(a) * w * .275, cy + Math.sin(a) * h * .275];
+      }
+      if (k === 2) {  /* 中间有包络的波 */
+        const x = m + u * (w - m * 2);
+        return [x, cy + Math.sin(u * TAU * 1.25 - t * .9) * h * .275 * Math.sin(u * Math.PI)];
+      }
+      /* 收成一团更亮的星核 */
+      const a = (i / n) * TAU * 2 + t * .95 + (i % 2) * .3;
+      return [cx + Math.cos(a) * h * .145, cy + Math.sin(a) * h * .145];
+    }
+    frame(t, dt) {
+      const w = this.w, h = this.h, u = this.u;
+      const PER = 3.3;
+      const k = Math.floor(t / PER) % 4, nk = (k + 1) % 4;
+      const blend = smooth(PER - 1.05, PER, t % PER);
+      for (const d of this.dots) {
+        const A = this.target(k, d.i, t);
+        const B = this.target(nk, d.i, t);
+        const tx = A[0] + (B[0] - A[0]) * blend + Math.sin(t * 1.6 + d.ph) * 1.4;
+        const ty = A[1] + (B[1] - A[1]) * blend + Math.cos(t * 1.35 + d.ph) * 1.4;
+        d.vx += (tx - d.x) * d.k * dt;
+        d.vy += (ty - d.y) * d.k * dt;
+        const damp = Math.exp(-3.3 * dt);
+        d.vx *= damp; d.vy *= damp;
+        d.x += d.vx * dt; d.y += d.vy * dt;
+        stadium(d, w, h, 9 * u, .25);
+      }
+    }
+    draw(t) {
+      this.clear();
+      for (const d of this.dots) {
+        const wv = .5 + .5 * Math.sin(t * 2.1 + d.ph);
+        this.dot(d.x, d.y, (.012 + .007 * wv) * this.h, .45 + .55 * wv);
+      }
+    }
+  }
+
+  const TYPES = { pulse: Pulse, chain: Chain, helix: Helix, orbit: Orbit, morph: Morph };
+  const loaders = [...document.querySelectorAll(".ld")].map(canvas =>
+    new TYPES[canvas.dataset.kind](canvas.parentElement, canvas));
+
+  /* 放大预览 */
+  const items = [...document.querySelectorAll(".item")];
+  const leave = () => {
+    items.forEach(i => i.classList.remove("solo"));
+    document.body.classList.remove("soloing");
+  };
+  items.forEach(item => item.addEventListener("click", () => {
+    const on = item.classList.contains("solo");
+    leave();
+    if (!on) { item.classList.add("solo"); document.body.classList.add("soloing"); }
+  }));
+  addEventListener("keydown", e => { if (e.key === "Escape") leave(); });
+
+  /* 一条 rAF 驱动全部 5 个画布 */
+  let last = performance.now();
+  function tick(now) {
+    const dt = Math.min(.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+    for (const ld of loaders) {
+      if (!ld.w || !ld.h) continue;
+      ld.frame(t, dt);
+      ld.draw(t);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+
+</body>
+</html>
