@@ -1324,61 +1324,24 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** turn/end（或本地流收完）时进来：先按"待确认"，1.2 秒后看会话还在不在跑。 */
+    /**
+     * turn/end（或本地流收完）时进来：**立刻**认定这段回复是最终回复。
+     *
+     * 为什么不再去查 running（2026-11-08 用户连着两次实测后的口径）：
+     *   「回话停止了才算最终回复」——回话（这段输出）停止的那一刻就是它；
+     *   而 DSH 的 session running 在收尾阶段还会挂一会儿，用它当判据的结果就是
+     *   球永远停在过程中回复、Siri 波一次都不出。
+     * 后面**真的**还有动作（tool/call、job、新 step、新的一轮）→ noteReplyActivity()
+     * 会把状态退回过程中回复。所以这里是"先当最终，有活再退"，不是一锤定音。
+     */
     private void markReplySettled() {
-        replySettledPending = true;
-        replyFinal = false;
-        finalCheckAttempt = 0;
         cancelFinalConfirm();
-        finalConfirm = new Runnable() {
-            @Override public void run() { runFinalCheck(); }
-        };
-        main.postDelayed(finalConfirm, FINAL_CONFIRM_MS);
-    }
-
-    /** 判一次「这条会话是不是停了」；查不到就再等一轮（最多 3 轮），绝不拿查询失败当"停了"。 */
-    private void runFinalCheck() {
-        finalConfirm = null;
-        if (!replySettledPending) return;
-        // ★ 必须查「这段回复所属的会话」的 running：镜像跟的可能是别的会话（用户正在网页端聊的那条），
-        //   拿它当判据会把球自己的最终回复永远判成"还在跑"（用户实测：一直不切 Siri 波）。
-        String sid = replySessionId;
-        if (sid == null || sid.isEmpty()) sid = asstSessionId;
-        final String sidF = sid;
-        final int attempt = ++finalCheckAttempt;
-        new Thread(new Runnable() {
-            @Override public void run() {
-                final Boolean running = sessionRunning(sidF);
-                main.post(new Runnable() {
-                    @Override public void run() {
-                        if (!replySettledPending) return;
-                        // ★ 用户口径：**绝大多数任务只有一条最终回复**，过程中回复是极少数。
-                        //   所以「还在跑」不代表它永远不是最终回复 —— 只要这条会话一旦停下来，
-                        //   这段话就该升级成最终回复。这里继续追（最多 ~18 秒），直到它停。
-                        if ((running == null || running) && attempt < FINAL_CHECK_MAX) {
-                            Log.i("FloatingBall", (running == null ? "会话状态查不到" : "会话还在跑")
-                                    + " → " + (FINAL_CONFIRM_MS * 1.25 / 1000) + "s 后再判（第 "
-                                    + attempt + " 次）");
-                            finalConfirm = new Runnable() {
-                                @Override public void run() { runFinalCheck(); }
-                            };
-                            main.postDelayed(finalConfirm, (long) (FINAL_CONFIRM_MS * 1.25));
-                            return;
-                        }
-                        replySettledPending = false;
-                        replyFinal = Boolean.FALSE.equals(running);
-                        sceneDirty = true;
-                        refreshScene(true);
-                        refreshFinalWave();     // 球底那道"沉进玻璃的波"只给最终回复
-                        Log.i("FloatingBall", replyFinal
-                                ? "回复后会话已停 → 最终回复"
-                                : (running == null
-                                    ? "会话状态一直查不到 → 暂按过程中回复"
-                                    : "回复后会话还在跑 → 过程中回复（不切最终回复）"));
-                    }
-                });
-            }
-        }, "reply-final-check").start();
+        replySettledPending = false;
+        replyFinal = true;
+        sceneDirty = true;
+        refreshScene(true);
+        refreshFinalWave();
+        Log.i("FloatingBall", "回话停止 → 最终回复（后面若再来工具会自动退回过程中回复）");
     }
 
     private void cancelFinalConfirm() {
