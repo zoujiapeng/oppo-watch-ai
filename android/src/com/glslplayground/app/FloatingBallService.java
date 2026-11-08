@@ -884,6 +884,9 @@ public class FloatingBallService extends Service {
      */
     private void applyAssistantState(String state) {
         if (renderer == null) return;
+        // 回合收尾时把「执行中」清掉：tool/result 万一丢了（断线、取消），
+        // 球不能永远停在那圈执行动画上。
+        if ("IDLE".equals(state) || "OFF".equals(state)) asstToolRunning = false;
         orbWanted = 0f;
         stateEnteredAt = android.os.SystemClock.uptimeMillis();
         sceneDirty = true;
@@ -915,14 +918,13 @@ public class FloatingBallService extends Service {
     }
 
     private String sceneSlot = AnimScene.SLOT_IDLE;   // 当前生效的槽
+    private boolean sceneTextLast = false;            // 上一次「球里有没有字」（摆位跟着它变）
     private String sceneAnim = "";                    // 当前生效的动画 id
     private String previewSlot = null;                // 设置页「预览」钉住的槽
     private volatile boolean asstToolRunning = false; // 执行中（工具调用）的显式标记
     private boolean sceneDirty = false;               // 参数/绑定变了，要重推
     private Runnable sceneCommit = null;              // 幅度淡到 0 时执行的形态切换
     private long sceneLastCheck = 0;
-    /** 思考超过这么久还没出字 → 当作「执行中」（DSH 在跑工具/长命令）。 */
-    private static final long EXEC_AFTER_MS = 2500;
 
     /** 麦克风正在用（按住说话 / 输入法语音 / 旧的开麦路径）—— 这几个都算「刚开始用麦克风」。 */
     private boolean micActive() {
@@ -937,14 +939,19 @@ public class FloatingBallService extends Service {
         if (zonesActive) return AnimScene.SLOT_ZONES;
         if (approvalShown) return AnimScene.SLOT_APPROVAL;
         if ("THINKING".equals(stateNow)) {
-            boolean exec = asstToolRunning
-                    || (stateEnteredAt > 0 && !hasBallText()
-                        && android.os.SystemClock.uptimeMillis() - stateEnteredAt > EXEC_AFTER_MS);
-            return exec ? AnimScene.SLOT_EXEC : AnimScene.SLOT_THINK;
+            // ★ 2026-11-08：这里原来还有一条「思考超过 2.5s 没出字 = 在执行」的猜测，
+            //   模型正常想 5~20 秒很常见 →「思考中」的动画只亮 2.5 秒就被「执行中」顶掉，
+            //   用户看到的就是「思考中的动画和设置对不上」。现在只认真信号：
+            //   镜像流里的 tool/call ↔ tool/result（见 DshHttpTransport.dispatchMirror）。
+            return asstToolRunning ? AnimScene.SLOT_EXEC : AnimScene.SLOT_THINK;
         }
         if ("ANSWERING".equals(stateNow)) {
             return turnEnded ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
         }
+        // ★ 2026-11-08：回合已经结束（turn/end 或本地流收完），但**最终回答的字还在球上**
+        //   —— 打字机还在弹、或者用户还没看完。这一段必须算「最终回复」。
+        //   以前这里直接落到 idle，所以整段回复期间球显示的是待机动画（用户报的就是这个）。
+        if (turnEnded && hasBallText()) return AnimScene.SLOT_FINAL;
         return AnimScene.SLOT_IDLE;
     }
 
@@ -1126,12 +1133,18 @@ public class FloatingBallService extends Service {
             float wantNy = Math.min(0.85f, (siriAnimBand * 0.5f) / depthPerNy);
             orbOffsetTarget = Math.max(0.05f, wantNy);
             renderer.loaderDyPx = 0f;
+            renderer.loaderBandPx = 0f;
         } else if (text && cap) {
+            // ★ 有字：点阵改成「只在文字下面那条动效带里」布点。
+            //   以前只把整团点阵往下挪 45% 带高，方形态里照样铺满整块玻璃、压在字上
+            //   —— 那就是用户说的「回复时动画在方形玻璃里根本不像设置里选的那个」。
             orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
-            renderer.loaderDyPx = Math.max(0f, siriAnimBand * 0.45f);
+            renderer.loaderDyPx = 0f;
+            renderer.loaderBandPx = Math.max(0f, siriAnimBand);
         } else {
             orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
             renderer.loaderDyPx = 0f;
+            renderer.loaderBandPx = 0f;
         }
     }
 
@@ -1147,7 +1160,69 @@ public class FloatingBallService extends Service {
         String slot = resolveSlot();
         String anim = AnimScene.master(animPrefs())
                 ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
-        if (sceneDirty || !slot.equals(sceneSlot) || !anim.equals(sceneAnim)) refreshScene(false);
+        // ★ 2026-11-08：除了「槽/动画号变了」，还要看**渲染器有没有被别人改回去**。
+        //   以前只在槽号变化时才推一次，于是任何一处老代码（文字清空、旧 think_loader、
+        //   启动时那几行）把 waveMode/loaderMode 写回去之后，球就**一直**停在那个画面上，
+        //   状态再变也不会重推 —— 用户看到的就是「不管什么状态都是同一个动画」。
+        boolean textNow = hasBallText();
+        if (textNow != sceneTextLast) {
+            // 字出现 / 消失 → 动画该在球心还是球底那条带子里，是两套摆法（见 placeAnimForText）
+            sceneTextLast = textNow;
+            placeAnimForText(sceneAnim, textNow);
+            Log.i("FloatingBall", "有字=" + textNow + " → 动画重新摆位（槽=" + sceneSlot
+                    + " 动画=" + sceneAnim + " 带=" + renderer.loaderBandPx + "px）");
+        }
+        if (sceneDirty || !slot.equals(sceneSlot) || !anim.equals(sceneAnim)
+                || (!previewingScene() && !specialSurfaceActive() && animDrifted(anim))) {
+            if (!sceneDirty && !previewingScene() && !specialSurfaceActive() && animDrifted(anim)) {
+                Log.i("FloatingBall", "动画被旁路改掉 → 按槽重推（槽=" + slot + " 动画=" + anim
+                        + " 实际 loader=" + renderer.loaderMode + " waveMode=" + renderer.waveMode
+                        + " waveOn=" + renderer.waveOn + "）");
+            }
+            refreshScene(false);
+        }
+    }
+
+    /** 正在预览（钉住某个槽）时不做漂移自检：预览就是要盖住真实状态。 */
+    private boolean previewingScene() {
+        return previewSlot != null;
+    }
+
+    /**
+     * 这些界面由自己的玻璃层接管绘制（审批卡片 / 搜索胶囊 / 六区 / 菜单面板全屏），
+     * 它们会**有意**关掉波、改几何，不能拿球槽的期望值去纠它。
+     */
+    private boolean specialSurfaceActive() {
+        return approvalShown || searchActive || zonesActive || glassFullscreen;
+    }
+
+    /**
+     * 渲染器当前画的东西，和「这个槽该给的动画」对不对得上。
+     *
+     * 只在**没有正在进行的淡出切换**时判定（sceneCommit / waveModePending 挂起时，
+     * 老形态还留在屏幕上是对的，那是包络过渡，不是漂移）。
+     */
+    private boolean animDrifted(String anim) {
+        if (renderer == null) return false;
+        if (sceneCommit != null || waveModePending >= 0) return false;
+        if (AnimScene.isCap(anim)) {
+            return renderer.loaderMode != AnimScene.capIndex(anim)
+                    || !renderer.suppressWave || !renderer.waveOn;
+        }
+        if (AnimScene.A_OFF.equals(anim)) return renderer.waveOn || renderer.loaderMode != 0;
+        if (AnimScene.A_WAVE.equals(anim)) {
+            return renderer.waveMode != 1 || !renderer.waveOn || renderer.suppressWave
+                    || renderer.loaderMode != 0;
+        }
+        if (AnimScene.A_DOTS.equals(anim)) {
+            return renderer.waveMode != 2 || !renderer.waveOn || renderer.suppressWave
+                    || renderer.loaderMode != 0 || orbMixTarget < 0.99f;
+        }
+        if (AnimScene.A_FLUID.equals(anim)) {
+            return renderer.waveMode != 3 || !renderer.waveOn || renderer.suppressWave
+                    || renderer.loaderMode != 0 || orbMixTarget < 0.99f;
+        }
+        return false;
     }
 
     /** 设置页改了绑定/参数：立刻重推（悬浮球没开就只是存着，下次启动生效）。 */
@@ -1162,7 +1237,17 @@ public class FloatingBallService extends Service {
         });
     }
 
-    /** 设置页「预览」：把球钉在某个槽上（空字符串 = 结束预览）。 */
+    /**
+     * 设置页「预览」：把球钉在某个槽上（空字符串 = 结束预览）。
+     *
+     * ★ 2026-11-08 修「不管什么状态都只显示同一个动画」：
+     *   预览原来是**永久**生效的 —— 只有点 ■ 才解除。而设置页里「给某个状态挑动画」
+     *   每挑一次就顺手 preview(那个槽)，于是最后一个动过的槽（多半是「空闲 / 待机」）
+     *   就永远钉在球上；resolveSlot() 第一行 `if (previewSlot != null) return previewSlot;`
+     *   直接把真实状态短路掉 → 思考 / 回复 / 最终回复全是待机那一套。
+     *   现在预览是**限时**的：PREVIEW_TTL_MS 之后自己解除，回到真实状态；
+     *   再点一次预览 / 再改一个绑定会重新计时。
+     */
     public static void setScenePreview(String slot) {
         FloatingBallService s = INSTANCE;
         if (s == null) return;
@@ -1172,9 +1257,43 @@ public class FloatingBallService extends Service {
                 s.previewSlot = v;
                 s.sceneDirty = true;
                 s.refreshScene(true);
-                Log.i("FloatingBall", "预览槽 → " + (v == null ? "结束" : v));
+                if (v == null) {
+                    s.cancelPreviewExpire();
+                    Log.i("FloatingBall", "预览槽 → 结束（回到真实状态 " + s.resolveSlot() + "）");
+                } else {
+                    s.armPreviewExpire();
+                    Log.i("FloatingBall", "预览槽 → " + v + "（" + (PREVIEW_TTL_MS / 1000)
+                            + "s 后自动结束）");
+                }
             }
         });
+    }
+
+    private static final long PREVIEW_TTL_MS = 20000;
+    private Runnable previewExpire;
+
+    private void armPreviewExpire() {
+        cancelPreviewExpire();
+        previewExpire = new Runnable() {
+            @Override public void run() {
+                previewExpire = null;
+                if (previewSlot == null) return;
+                final String was = previewSlot;
+                previewSlot = null;          // 先松钉，再算真实状态（否则日志里还是预览那个）
+                Log.i("FloatingBall", "预览到点 → 自动结束（槽 " + was
+                        + "），回到真实状态 " + resolveSlot());
+                sceneDirty = true;
+                refreshScene(true);
+            }
+        };
+        main.postDelayed(previewExpire, PREVIEW_TTL_MS);
+    }
+
+    private void cancelPreviewExpire() {
+        if (previewExpire != null) {
+            main.removeCallbacks(previewExpire);
+            previewExpire = null;
+        }
     }
 
     /** 给设置页/日志看：现在到底在跑哪个槽、哪个动画。 */
@@ -5095,11 +5214,21 @@ public class FloatingBallService extends Service {
         if (siriText == null) return;
         boolean hadText = siriTextShown;
         siriTextShown = false;
-        // 「文字消失 → 波出来」的接续点：本轮已经结束（IDLE 且沉降到点）时才恢复 Siri 波。
-        // 处理中（THINKING/ANSWERING）不恢复 —— 那时要保持连续的处理中动画。
+        // 「文字消失 → 动画怎么接」的接续点。
+        //
+        // ★ 2026-11-08 改写：原来这里写死「处理中 → 切 Siri 波 / 结束 → 交还用户的 Siri 波」，
+        //   等于绕开动画总控直接改 waveMode。用户把「思考中 / 过程中回复」绑成胶囊加载后，
+        //   只要一段文字被清掉（多段生成、工具调用之间都会），球立刻被掰回 Siri 波 ——
+        //   表现就是「状态明明变了，球还是待机那一套」。总控开着时只做一件事：按槽重推。
         if (hadText && renderer != null) {
             boolean processing = "THINKING".equals(stateNow) || "ANSWERING".equals(stateNow);
-            if (processing) {
+            if (AnimScene.master(animPrefs())) {
+                // 动画由「槽 → 绑定」决定；文字没了只影响摆放位置，不影响是哪个动画
+                sceneDirty = true;
+                refreshScene(true);
+                Log.i("FloatingBall", "文字消失 → 按槽重推动画（state=" + stateNow
+                        + " 槽=" + sceneSlot + " 动画=" + sceneAnim + "）");
+            } else if (processing) {
                 // 处理中：续上"处理中"动画（形态只在这一刻切一次，之后不再变 → 连续不闪）
                 renderer.waveOn = true;
                 setWaveForm(1);              // 先淡出到 0（此刻本来就没有内容）再切形态
@@ -10854,7 +10983,11 @@ public class FloatingBallService extends Service {
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
         applyFluidPrefs();                       // 思考中流体发光的颜色/密度/刺眼程度
-        renderer.suppressWave = prefs().getInt("think_loader", 0) > 0;
+        // ★ 2026-11-08：这三行是旧「思考中动画」三套开关的残留。总控开着时必须全让位，
+        //   否则球一启动就是「旧版：隐藏 Siri 波 + 用 think_loader 那个号」，
+        //   而槽要的动画要等下一次状态变化才盖上来 —— 期间看到的就是旧版动画。
+        boolean sceneMaster = AnimScene.master(animPrefs());
+        renderer.suppressWave = !sceneMaster && prefs().getInt("think_loader", 0) > 0;
         renderer.loaderSpeed = prefs().getFloat("think_loader_speed", 1f);
         renderer.loaderScale = prefs().getFloat("think_loader_scale", 1f);
         renderer.loaderDot = prefs().getFloat("think_loader_dot", 1f);

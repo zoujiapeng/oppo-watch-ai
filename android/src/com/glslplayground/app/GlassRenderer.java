@@ -223,6 +223,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile float animSpeed = 1f;
     /** 胶囊加载点阵的竖直偏移（窗口像素，正值向下）：球里有字时沉到球底动效带。 */
     public volatile float loaderDyPx = 0f;
+    /**
+     * 有字时给胶囊加载留的「底部动效带」高度（窗口像素，0 = 整颗球）。
+     *
+     * ★ 2026-11-08 用户：「回复时动画是在聊天页面的方形玻璃里的」——
+     *   以前胶囊加载永远按**整颗球**布点，方形态一出现，点阵就铺满整块玻璃、压在字上，
+     *   看起来既不像设置里选的动画、字也没法读。现在服务把文字区底部那条带子
+     *   （siriAnimBand）报给渲染器，点阵只在那条带子里生成、按带子的中心摆。
+     */
+    public volatile float loaderBandPx = 0f;
     // ── 搜索胶囊 / 六区这类「界面自绘」的层 ────────────────────────────────
     // 这两层各自用自己的玻璃着色器画整块界面，球那一趟合成根本不会跑，
     // 所以胶囊加载动画改走**屏幕空间叠加**：同一套点阵，直接点在窗口画布上。
@@ -1368,9 +1377,15 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         long now = System.nanoTime();
         float dt = loaderLastNs == 0 ? 0f : (now - loaderLastNs) / 1e9f;
         loaderLastNs = now;
+        // 有字 → 点阵只在「底部动效带」里布点（带高 = 服务给的 siriAnimBand）
+        float bandFrac = 0f;
+        if (loaderBandPx > 4f && bh > 8f) {
+            bandFrac = Math.max(.10f, Math.min(.70f, loaderBandPx / bh));
+        }
+        float engineH = bandFrac > 0f ? bh * bandFrac : bh;
         loaderEngine.setMode(loaderMode);
         loaderEngine.setSpeed(loaderSpeed * Math.max(.1f, Math.min(4f, animSpeed)));
-        loaderEngine.setSize(bw, bh);
+        loaderEngine.setSize(bw, engineH);
         loaderEngine.step(dt);
         int n = Math.min(loaderEngine.count(), 512);
         if (n <= 0) return 0;
@@ -1380,12 +1395,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         fb.clear();
         float sc = Math.max(.2f, Math.min(8f, loaderScale));
         float dot = Math.max(.2f, Math.min(6f, loaderDot));
-        float ccx = bw / 2f, ccy = bh / 2f;
+        float ccx = bw / 2f, ccy = engineH / 2f;
+        // 带子里布点时，整团点阵的中心要落到「球底那条带子」的中心
+        float engineCy = bandFrac > 0f ? (bh - engineH * 0.5f) : bh * 0.5f;
         float k = (sx + sy) * 0.5f;
         for (int i = 0; i < n; i++) {
             int q = i * 4;
             fb.put((ccx + (p[q] - ccx) * sc) * sx + ox);
-            fb.put((ccy + (p[q + 1] - ccy) * sc + loaderDyPx) * sy + oy);
+            fb.put((engineCy + (p[q + 1] - ccy) * sc + loaderDyPx) * sy + oy);
             fb.put(Math.max(2f, p[q + 2] * sc * dot * 10.4f * k));
             fb.put(p[q + 3] * waveGate);
         }

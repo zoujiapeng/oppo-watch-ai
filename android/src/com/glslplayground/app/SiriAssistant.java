@@ -37,6 +37,16 @@ public final class SiriAssistant {
         void onFinal(String text);
         void onTurnEnd();
         void onStatus(String note);
+
+        /**
+         * 工具真的在跑 / 跑完了（DSH 的 `tool/call` ↔ `tool/result`）。
+         *
+         * 为什么要这条：球上「执行中」这个状态以前是**猜**的 —— 思考超过 2.5 秒没出字
+         * 就当 DSH 在跑工具。可模型正常思考 5~20 秒很常见，于是「思考中」的动画
+         * 只亮了 2.5 秒就被「执行中」顶掉，用户看到的当然和设置对不上。
+         * 镜像流里本来就有 tool/call、tool/result，直接用真信号。
+         */
+        default void onTool(boolean running) { }
     }
 
     /** DSH 侧能力：问答（会话的挑选由实现负责）。 */
@@ -188,6 +198,8 @@ public final class SiriAssistant {
                         // 新一轮开始 → 方形态的「出波闸门」先关上（只有整轮结束才重新打开）
                         FloatingBallService.setAssistantTurnEnded(false);
                         // 模型开始生成了 —— 这一刻才算「思考中」
+                        // 上一轮的工具可能没回 result（取消/断线）→ 这一轮不能接着算「执行中」
+                        FloatingBallService.setAssistantToolRunning(false);
                         setState(State.THINKING);
                     }
                 });
@@ -231,6 +243,17 @@ public final class SiriAssistant {
                         FloatingBallService.setAssistantTurnEnded(true);
                     }
                 });
+            }
+
+            @Override public void onTool(final boolean running) {
+                // 真·工具在跑 → 球切「执行中」槽；工具回来 → 回到「思考中」
+                //
+                // ⚠️ 球自己那条提问流（askInFlight）在跑时，镜像**必须让路**：
+                //    镜像跟的是「当前会话」，而球可能正问另一个会话；两边混着来，
+                //    别人会话里的 tool/call 就把这一轮的「思考中」顶成「执行中」——
+                //    实测就是「回复中显示的是执行中的动画」。
+                if (askInFlight) return;
+                FloatingBallService.setAssistantToolRunning(running);
             }
 
             @Override public void onStatus(final String note) {
@@ -309,6 +332,8 @@ public final class SiriAssistant {
     public void ask(final String text) {
         if (transport == null) { toast("DSH 未连接"); return; }
         FloatingBallService.setAssistantPinned(false);   // 新一轮开始：解除文字钉住
+        FloatingBallService.setAssistantToolRunning(false);   // 上一轮的「执行中」不许漏到这一轮
+        FloatingBallService.setAssistantTurnEnded(false);     // 新一轮：先离开「最终回复」
         setState(State.THINKING);
         // 球里不显示这句提问：球内只允许出现 AI 的回答，
         // 别的字（思考中…、提问原文、状态词）一律不写。
@@ -330,6 +355,10 @@ public final class SiriAssistant {
                         String answer = full == null ? "" : full;
                         if (!answer.isEmpty()) sayTyped(answer);   // 交给打字机把剩下的字弹完
                         turnSettled = true;          // 这条流自己收完了 → 算最终回复
+                        // ★ 2026-11-08：这里原来**没有**告诉球「整轮结束」，
+                        //   于是打字机还在往球里弹字的时候，槽已经落回 idle ——
+                        //   用户看到的就是「回复过程中显示的是待机动画」。
+                        FloatingBallService.setAssistantTurnEnded(true);
                         setState(State.IDLE);
                     }
                 });
@@ -371,6 +400,8 @@ public final class SiriAssistant {
         if (transport == null) { toast("DSH 未连接"); return; }
         if (sessionId == null || sessionId.isEmpty()) { toast("没有目标会话"); return; }
         FloatingBallService.setAssistantPinned(false);
+        FloatingBallService.setAssistantToolRunning(false);   // 新的一轮：工具状态清零
+        FloatingBallService.setAssistantTurnEnded(false);     // 新一轮：先离开「最终回复」
         setState(State.THINKING);
         askInFlight = true;
         transport.askContent(sessionId, text, receipts, mode, new Stream() {
@@ -390,6 +421,7 @@ public final class SiriAssistant {
                         String answer = full == null ? "" : full;
                         if (!answer.isEmpty()) sayTyped(answer);
                         turnSettled = true;
+                        FloatingBallService.setAssistantTurnEnded(true);   // 最终回复：字还在球上就是 reply_final
                         setState(State.IDLE);
                     }
                 });

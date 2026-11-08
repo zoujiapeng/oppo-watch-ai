@@ -428,7 +428,15 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 String body = textOf(ev);
                 if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
             } else if ("turn/end".equals(type)) {
+                cb.onTool(false);
                 cb.onTurnEnd();
+            } else if ("tool/call".equals(type)) {
+                // 真·工具开始跑 → 「执行中」槽（不再靠"思考超过 2.5s"猜）
+                cb.onTool(true);
+            } else if ("tool/result".equals(type)) {
+                cb.onTool(false);
+            } else if ("user/message".equals(type)) {
+                cb.onTool(false);        // 新一轮：工具状态清零
             }
         } catch (Throwable ignored) {}
     }

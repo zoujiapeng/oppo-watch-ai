@@ -103,6 +103,7 @@
     <div class="ph"><em>动画总控</em><span>每状态一套</span>
       <span class="sp"></span><i class="sw on" id="swMaster"></i></div>
     <div class="slots" id="slots"></div>
+    <div class="row"><label>球现在</label><span id="sceneNow" style="flex:1;text-align:right;opacity:.85">—</span></div>
     <div class="row">
       <label>动画库</label><select id="animSel"></select>
       <button class="sm" id="btnPrev" style="flex:none">▶ 预览</button>
@@ -119,6 +120,7 @@
         <div class="btns" id="scaleBtns"><button data-scale="1">1/1</button><button data-scale="2">1/2</button><button data-scale="4">1/4</button></div>
         <div class="row"><label>低延迟</label><span style="flex:1"></span><i class="sw" id="swLowLat"></i></div>
         <div class="row"><label>Siri 形变</label><span style="flex:1"></span><i class="sw" id="swSiri"></i></div>
+        <div class="row"><label>跟随对话（镜像）</label><span style="flex:1"></span><i class="sw" id="swMirror"></i></div>
       </section>
       <section class="p"><div class="ph"><em>屏幕</em></div><div id="screenRows" class="rows"></div>
         <div class="btns"><button class="sm" id="btnLock">锁定</button><button class="sm" id="btnUnlock">解锁</button></div>
@@ -316,7 +318,28 @@
   function preview(slotId) {
     pvSlot = slotId;
     try { W.animPreview(slotId); } catch (e) {}
+    try { W.toast('预览 ' + (slotDef(slotId) || {}).name + '：20 秒后自动结束'); } catch (e) {}
     renderSlots();
+    sceneSync();
+  }
+
+  /**
+   * 球此刻到底在跑哪个槽 / 哪个动画。
+   *
+   * ★ 2026-11-08：这一行是给「设置对不上球」这类问题当场定位用的 ——
+   *   以前设置页只能看到自己存了什么（bind.*），看不到球真的在跑什么；
+   *   于是预览槽还钉在「空闲」上时，改动任何绑定都没反应，只能靠猜。
+   */
+  function sceneSync() {
+    if (!W) return;
+    var s = safe(function () { return JSON.parse(W.animState() || '{}'); }, null);
+    var line = $('sceneNow');
+    if (!s || !line) return;
+    if (!s.running) { line.textContent = '悬浮球没开'; return; }
+    var pv = s.preview ? ('预览钉住「' + animName(s.preview) + '」') : '';
+    line.textContent = (slotDef(s.slot) ? slotDef(s.slot).name : s.slot)
+      + ' → ' + animName(s.anim) + (pv ? ' · ' + pv : '')
+      + (s.master ? '' : ' · 总控已关（旧逻辑）');
   }
 
   $('pickClose').addEventListener('click', function () { $('pick').classList.remove('on'); });
@@ -391,6 +414,7 @@
     $('swFloat').classList.toggle('on', !!safe(function () { return W.isFloating(); }, false));
     $('swLowLat').classList.toggle('on', !!safe(function () { return W.getFloatLowLat(); }, false));
     $('swSiri').classList.toggle('on', !!safe(function () { return W.getSiriEnabled(); }, false));
+    $('swMirror').classList.toggle('on', !!safe(function () { return W.getMirrorEnabled(); }, false));
     var src = safe(function () { return W.getFloatCaptureSrc(); }, 0);
     var sc = safe(function () { return W.getFloatCapScale(); }, 2);
     each('[data-src]', function (b) { b.classList.toggle('on', +b.dataset.src === src); });
@@ -411,6 +435,15 @@
     var on = !this.classList.contains('on');
     this.classList.toggle('on', on);
     try { W.setSiriEnabled(on); } catch (e) {}
+  });
+  // 跟随对话（镜像）：球的状态（思考中/过程中回复/最终回复）就是从这条流里来的。
+  // 关掉它 = 球只认得「自己提问」那一轮，你在 DSH 页面里问的话它一概不知道，
+  // 表现就是「不管问什么，球一直是待机动画」。
+  $('swMirror').addEventListener('click', function () {
+    var on = !this.classList.contains('on');
+    this.classList.toggle('on', on);
+    try { W.setMirrorEnabled(on); } catch (e) {}
+    setTimeout(floatSync, 700);
   });
   each('[data-src]', function (b) {
     b.addEventListener('click', function () {
@@ -490,6 +523,8 @@
     screenRender();
     floatSync();
     vmSync();
+    sceneSync();
+    setInterval(sceneSync, 1000);
     setInterval(floatSync, 2500);
     setInterval(topbar, 15000);
   } else {
