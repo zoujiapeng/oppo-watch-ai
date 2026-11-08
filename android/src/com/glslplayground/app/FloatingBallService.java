@@ -887,7 +887,7 @@ public class FloatingBallService extends Service {
         // ⚠️ 这里**不能**在 IDLE 时清「执行中」：实测 turn/end 比命令结束早 10 秒以上，
         //    一清，整段命令执行就掉回待机动画。清它只认三件事：tool/result、
         //    新一轮提问/新的 assistant attempt、以及 10 分钟超时兜底（见 toolRunningNow）。
-        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; }
+        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; asstToolName = null; }
         orbWanted = 0f;
         stateEnteredAt = android.os.SystemClock.uptimeMillis();
         sceneDirty = true;
@@ -923,7 +923,8 @@ public class FloatingBallService extends Service {
     private int sceneBandLast = 0;                    // 上一次摆位时的动效带高度（变高/变矮要重摆）
     private String sceneAnim = "";                    // 当前生效的动画 id
     private String previewSlot = null;                // 设置页「预览」钉住的槽
-    private volatile boolean asstToolRunning = false; // 执行中（工具调用）的显式标记
+    private volatile boolean asstToolRunning = false; // 工具在跑的显式标记（命令 / 其它工具共用）
+    private volatile String asstToolName = null;      // 当前跑的工具名（bash / read / edit …）
     private boolean sceneDirty = false;               // 参数/绑定变了，要重推
     private Runnable sceneCommit = null;              // 幅度淡到 0 时执行的形态切换
     private long sceneLastCheck = 0;
@@ -945,7 +946,11 @@ public class FloatingBallService extends Service {
         //   → 1~2 秒后 turn/end 先到 → 3.5 秒沉降把 stateNow 刷成 IDLE
         //   —— 命令还在跑（tool/result 要十几秒后才来），球却已经回待机。
         //   以前 EXEC 只写在 THINKING 分支里，所以整段命令执行显示的是待机动画。
-        if (toolRunningNow()) return AnimScene.SLOT_EXEC;
+        //   命令（bash / 终端）走「执行中」，其它工具（读/改/搜索/子代理…）走「调用工具」——
+        //   两档各绑一套动画，用户要求「调用工具时也要能单独设置」。
+        if (toolRunningNow()) {
+            return toolIsCommand() ? AnimScene.SLOT_EXEC : AnimScene.SLOT_TOOL;
+        }
         if ("THINKING".equals(stateNow)) {
             // ★ 2026-11-08：这里原来还有一条「思考超过 2.5s 没出字 = 在执行」的猜测，
             //   模型正常想 5~20 秒很常见 →「思考中」的动画只亮 2.5 秒就被「执行中」顶掉，
@@ -1195,6 +1200,20 @@ public class FloatingBallService extends Service {
         }
     }
 
+    /**
+     * 这次跑的是不是「命令」。
+     *
+     * DSH 的 tool/call 载荷里带 `data.name`（实测：bash / read / edit / grep …）。
+     * 名字缺失时按命令算 —— 那是这条链路以前的行为，不能因为解析不到就换槽。
+     */
+    private boolean toolIsCommand() {
+        String n = asstToolName;
+        if (n == null || n.isEmpty()) return true;
+        n = n.toLowerCase(java.util.Locale.US);
+        return n.equals("bash") || n.equals("shell") || n.equals("sh") || n.equals("exec")
+                || n.equals("run") || n.equals("terminal") || n.equals("command");
+    }
+
     /** 工具真的在跑（带 10 分钟兜底：result 丢了也不会永远卡在「执行中」）。 */
     private boolean toolRunningNow() {
         if (!asstToolRunning) return false;
@@ -1338,16 +1357,33 @@ public class FloatingBallService extends Service {
 
     /** 外部（DSH 实际发来工具事件时）可以显式标「执行中」。 */
     public static void setAssistantToolRunning(boolean running) {
+        setAssistantToolRunning(running, null);
+    }
+
+    /**
+     * @param toolName DSH 的 `tool/call.data.name`（bash / read / edit …）；null = 沿用上一次的名字。
+     */
+    public static void setAssistantToolRunning(boolean running, final String toolName) {
         FloatingBallService s = INSTANCE;
         if (s == null) return;
         s.main.post(new Runnable() {
             @Override public void run() {
-                if (s.asstToolRunning != running) {
+                boolean nameChanged = toolName != null && !toolName.isEmpty()
+                        && !toolName.equals(s.asstToolName);
+                if (s.asstToolRunning != running || nameChanged) {
                     s.asstToolRunning = running;
-                    s.toolSinceMs = running ? android.os.SystemClock.uptimeMillis() : 0;
+                    if (running) {
+                        if (toolName != null && !toolName.isEmpty()) s.asstToolName = toolName;
+                        s.toolSinceMs = android.os.SystemClock.uptimeMillis();
+                    } else {
+                        s.asstToolName = null;
+                        s.toolSinceMs = 0;
+                    }
                     s.sceneDirty = true;
                     s.refreshScene(true);
-                    Log.i("FloatingBall", "执行中=" + running + " → 槽 " + s.resolveSlot());
+                    Log.i("FloatingBall", "工具在跑=" + running
+                            + (running ? "（" + s.asstToolName + "）" : "")
+                            + " → 槽 " + s.resolveSlot());
                 }
             }
         });

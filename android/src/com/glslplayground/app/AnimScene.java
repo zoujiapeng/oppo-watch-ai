@@ -19,8 +19,8 @@ import java.util.Locale;
  *
  *   ① 动画库（animations）：每一个动画都是一条独立记录，参数是**每个动画自己的**，
  *      互不干扰。目前 12 条：关闭 / Siri 波 / 流体圆点 dots / 连续流体发光 / 胶囊加载 ×9。
- *   ② 状态槽（slots）：每一个状态（空闲、麦克风刚开、思考、执行、过程回复、最终回复、
- *      审批卡片、搜索胶囊、六区）各自绑一个动画 id。状态一变，服务就按槽里绑的动画去渲染。
+ *   ② 状态槽（slots）：每一个状态（空闲、麦克风刚开、思考、执行命令、调用工具、过程回复、
+ *      最终回复、审批卡片、搜索胶囊、六区）各自绑一个动画 id。状态一变，服务就按槽里绑的动画去渲染。
  *
  * 存储（SharedPreferences "anim_scene"）：
  *   master               统一调度总开关（关掉 = 退回旧行为）
@@ -39,6 +39,8 @@ public final class AnimScene {
     public static final String SLOT_LISTEN = "listen";
     public static final String SLOT_THINK = "thinking";
     public static final String SLOT_EXEC = "executing";
+    /** 调用工具（读文件 / 改文件 / 搜索 / 子代理…）—— 和「执行中（跑命令）」分开绑。 */
+    public static final String SLOT_TOOL = "tool";
     public static final String SLOT_STREAM = "reply_stream";
     public static final String SLOT_FINAL = "reply_final";
     public static final String SLOT_APPROVAL = "approval";
@@ -182,8 +184,11 @@ public final class AnimScene {
                     ""));
             out.put(slot(SLOT_THINK, "思考中", "模型在生成、球里还没有字", A_DOTS, false,
                     ""));
-            out.put(slot(SLOT_EXEC, "执行中", "DSH 在跑命令 / 工具调用（球里通常没字）", A_DOTS, false,
+            out.put(slot(SLOT_EXEC, "执行中", "DSH 在 shell 里跑命令（bash / 终端；球里通常没字）", A_DOTS, false,
                     ""));
+            out.put(slot(SLOT_TOOL, "调用工具", "DSH 调用了非命令类工具：读文件 / 改文件 / 搜索 / 子代理 …",
+                    A_DOTS, false,
+                    "命令走「执行中」那一档；这里管的是其它工具调用（两边可以各绑各的动画）"));
             out.put(slot(SLOT_STREAM, "过程中回复", "流式出字、这一轮还没结束", A_WAVE, false,
                     ""));
             out.put(slot(SLOT_FINAL, "最终回复", "任务完成、这一轮收尾", A_WAVE, false,
@@ -426,9 +431,10 @@ public final class AnimScene {
 
     /** 调试/日志用：一行摘要。 */
     public static String summary(SharedPreferences sp) {
-        return String.format(Locale.US, "master=%s idle=%s listen=%s think=%s exec=%s stream=%s final=%s approval=%s",
+        return String.format(Locale.US,
+                "master=%s idle=%s listen=%s think=%s exec=%s tool=%s stream=%s final=%s approval=%s",
                 master(sp), binding(sp, SLOT_IDLE), binding(sp, SLOT_LISTEN), binding(sp, SLOT_THINK),
-                binding(sp, SLOT_EXEC), binding(sp, SLOT_STREAM), binding(sp, SLOT_FINAL),
-                binding(sp, SLOT_APPROVAL));
+                binding(sp, SLOT_EXEC), binding(sp, SLOT_TOOL), binding(sp, SLOT_STREAM),
+                binding(sp, SLOT_FINAL), binding(sp, SLOT_APPROVAL));
     }
 }

@@ -433,17 +433,21 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 //    整段「运行命令」期间球显示的是待机动画 —— 用户报的就是这个。
                 cb.onTurnEnd();
             } else if ("tool/call".equals(type)) {
-                // 真·工具开始跑 → 「执行中」槽（不再靠"思考超过 2.5s"猜）
-                cb.onTool(true);
+                // 真·工具开始跑 → 「执行中 / 调用工具」槽（不再靠"思考超过 2.5s"猜）。
+                // 工具名在 `data.name`（实测 bash / read / edit / grep …），球按它分流：
+                // 命令走「执行中」，其它工具走「调用工具」——两档各绑一套动画。
+                JSONObject data = ev.optJSONObject("data");
+                String toolName = data == null ? null : data.optString("name", null);
+                cb.onTool(true, toolName);
             } else if ("tool/result".equals(type)) {
-                cb.onTool(false);
+                cb.onTool(false, null);
             } else if ("job/registered".equals(type)) {
                 // 后台任务：tool/result 会先回来（只代表「已登记」），活儿还在跑
-                cb.onTool(true);
+                cb.onTool(true, null);
             } else if ("job/settled".equals(type)) {
-                cb.onTool(false);
+                cb.onTool(false, null);
             } else if ("user/message".equals(type)) {
-                cb.onTool(false);        // 新一轮用户消息：工具状态清零
+                cb.onTool(false, null);        // 新一轮用户消息：工具状态清零
             }
         } catch (Throwable ignored) {}
     }
