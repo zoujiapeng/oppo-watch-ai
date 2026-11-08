@@ -1258,6 +1258,8 @@ public class FloatingBallService extends Service {
     private Runnable finalConfirm;
     private int finalCheckAttempt = 0;
     private volatile String asstSessionId = null;
+    /** 当前球里这段回复是**哪条会话**产的（最终回复要查的是它，不是镜像随手跟的那条）。 */
+    private volatile String replySessionId = null;
 
     /** 球现在跟的是哪条会话（问 running 用）。提问 / 镜像跟随时都会更新。 */
     public static void setAssistantSession(String sid) {
@@ -1285,6 +1287,13 @@ public class FloatingBallService extends Service {
                 }
             });
         }
+    }
+
+    /** 这段回复来自哪条会话（提问流 / 镜像的文字与 turn/end 都会登记）。 */
+    public static void setAssistantReplySession(String sid) {
+        FloatingBallService s = INSTANCE;
+        if (s == null || sid == null || sid.isEmpty()) return;
+        s.replySessionId = sid;
     }
 
     /** 这条会话的回复还在"待确认最终"或任务还没跑完 → 镜分别急着切走。 */
@@ -1331,11 +1340,15 @@ public class FloatingBallService extends Service {
     private void runFinalCheck() {
         finalConfirm = null;
         if (!replySettledPending) return;
-        final String sid = asstSessionId;
+        // ★ 必须查「这段回复所属的会话」的 running：镜像跟的可能是别的会话（用户正在网页端聊的那条），
+        //   拿它当判据会把球自己的最终回复永远判成"还在跑"（用户实测：一直不切 Siri 波）。
+        String sid = replySessionId;
+        if (sid == null || sid.isEmpty()) sid = asstSessionId;
+        final String sidF = sid;
         final int attempt = ++finalCheckAttempt;
         new Thread(new Runnable() {
             @Override public void run() {
-                final Boolean running = sessionRunning(sid);
+                final Boolean running = sessionRunning(sidF);
                 main.post(new Runnable() {
                     @Override public void run() {
                         if (!replySettledPending) return;

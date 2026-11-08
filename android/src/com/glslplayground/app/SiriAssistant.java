@@ -34,8 +34,8 @@ public final class SiriAssistant {
     public interface Mirror {
         void onAttemptStart();
         void onText(String soFar);
-        void onFinal(String text);
-        void onTurnEnd();
+        void onFinal(String text, String sessionId);
+        void onTurnEnd(String sessionId);
         void onStatus(String note);
 
         /**
@@ -218,10 +218,11 @@ public final class SiriAssistant {
                 });
             }
 
-            @Override public void onFinal(final String text) {
+            @Override public void onFinal(final String text, final String sid) {
                 if (askInFlight) return;
                 main.post(new Runnable() {
                     @Override public void run() {
+                        FloatingBallService.setAssistantReplySession(sid);
                         if (askInFlight) return;
                         mirrorBuf.setLength(0);
                         mirrorBuf.append(DshHttpTransport.clip(text, 1200));
@@ -231,9 +232,10 @@ public final class SiriAssistant {
                 });
             }
 
-            @Override public void onTurnEnd() {
+            @Override public void onTurnEnd(final String sid) {
                 main.post(new Runnable() {
                     @Override public void run() {
+                    FloatingBallService.setAssistantReplySession(sid);
                         if (!askInFlight && (state == State.THINKING || state == State.ANSWERING)) {
                             setState(State.IDLE);
                         }

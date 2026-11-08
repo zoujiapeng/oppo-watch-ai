@@ -168,7 +168,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         } catch (Throwable t) {
             return false;
         }
-        FloatingBallService.setAssistantSession(sessionId);   // 后面查「还在不在跑」要用
+        FloatingBallService.setAssistantSession(sessionId);        // 球现在显示哪条会话
+        FloatingBallService.setAssistantReplySession(sessionId);    // 这段回复属于哪条会话
         final String host = uri.getHost() == null ? "127.0.0.1" : uri.getHost();
         final int port = uri.getPort() > 0 ? uri.getPort() : 80;
 
@@ -473,14 +474,14 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
             String type = ev.optString("type");
             if ("assistant/message".equals(type)) {
                 String body = textOf(ev);
-                if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
+                if (body != null && !body.trim().isEmpty()) cb.onFinal(body, mirrorSession);
             } else if ("turn/end".equals(type)) {
                 // 这一轮结束了：马上重新挑「正在活动的会话」（别的会话可能正在跑）
                 mirrorRecheck = true;
                 // ⚠️ 这里**不要**清「执行中」：DSH 的 turn/end 比命令真正结束早得多
                 //    （实测 turn/end 到 tool/result 隔着十几秒）。清掉的话，
                 //    整段「运行命令」期间球显示的是待机动画 —— 用户报的就是这个。
-                cb.onTurnEnd();
+                cb.onTurnEnd(mirrorSession);
             } else if ("tool/call".equals(type)) {
                 // 真·工具开始跑 → 「执行中 / 调用工具」槽（不再靠"思考超过 2.5s"猜）。
                 // 工具名在 `data.name`（实测 bash / read / edit / grep …），球按它分流：
