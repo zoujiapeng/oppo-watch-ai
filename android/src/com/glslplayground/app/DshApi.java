@@ -235,100 +235,203 @@ final class DshApi {
         return true;
     }
 
-    /** 会话最后一条助手回答（"进入这个对话"时要把它显示在方形球里）。 */
-    String lastAnswer(String sessionId) throws Exception {
-        long cursor = 0;
+    // ── 会话内容：进对话卡要看到什么 ────────────────────────────────────
+
+    /** 会话当前的持久游标（`projections.asOfSeq`）；拿不到就是 0。 */
+    private long cursorOf(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return 0;
         try {
             JSONObject listArgs = new JSONObject();
             listArgs.put("_request", new JSONObject());
             JSONObject value = call("session/list", listArgs);
             JSONArray items = value == null ? null : value.optJSONArray("items");
-            if (items != null) {
-                for (int i = 0; i < items.length(); i++) {
-                    JSONObject it = items.optJSONObject(i);
-                    if (it == null || !sessionId.equals(it.optString("sessionId"))) continue;
-                    JSONObject proj = it.optJSONObject("projections");
-                    if (proj != null) cursor = proj.optLong("asOfSeq", 0);
-                }
+            if (items == null) return 0;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject it = items.optJSONObject(i);
+                if (it == null || !sessionId.equals(it.optString("sessionId"))) continue;
+                JSONObject proj = it.optJSONObject("projections");
+                if (proj != null) return proj.optLong("asOfSeq", 0);
             }
-        } catch (Throwable ignored) { }
-        if (cursor <= 0) return "";
+        } catch (Throwable t) {
+            Log.w(TAG, "会话游标读取失败：" + t);
+        }
+        return 0;
+    }
+
+    /** `session/page` 的 records（最近 maxMessages 条事件，时间正序）；会话是空的就返回 null。 */
+    private JSONArray recordsOf(String sessionId, int maxMessages) throws Exception {
+        long cursor = cursorOf(sessionId);
+        if (cursor <= 0) return null;
         JSONObject req = new JSONObject();
         JSONObject addr = new JSONObject();
         addr.put("kind", "session");
         addr.put("sessionId", sessionId);
         req.put("address", addr);
         req.put("throughSeq", cursor);
-        req.put("maxMessages", 30);
+        req.put("maxMessages", maxMessages);
         JSONObject page = call("session/page", argsOf(req));
-        JSONArray records = page == null ? null : page.optJSONArray("records");
+        return page == null ? null : page.optJSONArray("records");
+    }
+
+    /**
+     * 一条 `user/message` / `assistant/message` 的正文块。
+     *
+     * ⚠️ 两个事件的字段位置**不一样**（2026-11-09 对着真机 DSH 一条条核过）：
+     *   · `user/message`      → `data.content[]`
+     *   · `assistant/message` → `data.message.content[]`
+     * 以前统一只读 `data.message.content`，于是**用户说的话一条都读不出来**
+     * （对话卡里永远没有「你：…」），只剩最后一条 assistant 文本。
+     */
+    private static JSONArray contentOf(JSONObject ev) {
+        JSONObject data = ev == null ? null : ev.optJSONObject("data");
+        if (data == null) return null;
+        JSONArray c = data.optJSONArray("content");            // user/message
+        if (c != null) return c;
+        JSONObject msg = data.optJSONObject("message");        // assistant/message
+        return msg == null ? null : msg.optJSONArray("content");
+    }
+
+    /** 正文（只要 text 块；图片/文件折成一行标记，不渲染）。 */
+    private static String textOf(JSONArray content) {
+        if (content == null || content.length() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        int files = 0;
+        for (int k = 0; k < content.length(); k++) {
+            JSONObject b = content.optJSONObject(k);
+            if (b == null) continue;
+            String type = b.optString("type");
+            if ("text".equals(type)) {
+                String t = b.optString("text", "");
+                if (t != null && !t.isEmpty()) {
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(t);
+                }
+            } else if ("image".equals(type) || "file".equals(type) || "attachment".equals(type)) {
+                files++;
+            }
+        }
+        if (files > 0) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append("［附件 ×").append(files).append("］");
+        }
+        return sb.toString().trim();
+    }
+
+    /**
+     * DSH 每一拍都会往会话里塞一条注入上下文（`Current runtime context…` / `[pj-snapshot …]`）。
+     * 那是给模型看的，不是"我说的话" —— 对话卡里显示出来就是一大段噪音，跳过。
+     */
+    private static boolean isInjectedContext(String text) {
+        if (text == null) return false;
+        String t = text.trim();
+        return t.startsWith("Current runtime context")
+                || t.startsWith("[pj-snapshot")
+                || t.startsWith("[operator · pj");
+    }
+
+    /** 会话最后一条助手回答（"进入这个对话"时的兜底）。 */
+    String lastAnswer(String sessionId) throws Exception {
+        JSONArray records = recordsOf(sessionId, 30);
         if (records == null) return "";
         String text = "";
         for (int i = 0; i < records.length(); i++) {
             JSONObject rec = records.optJSONObject(i);
             JSONObject ev = rec == null ? null : rec.optJSONObject("event");
-            if (ev == null) continue;
-            if (!"assistant/message".equals(ev.optString("type"))) continue;
-            JSONObject data = ev.optJSONObject("data");
-            JSONObject msg = data == null ? null : data.optJSONObject("message");
-            JSONArray content = msg == null ? null : msg.optJSONArray("content");
-            if (content == null) continue;
-            StringBuilder sb = new StringBuilder();
-            for (int k = 0; k < content.length(); k++) {
-                JSONObject b = content.optJSONObject(k);
-                if (b != null && "text".equals(b.optString("type"))) sb.append(b.optString("text", ""));
-            }
-            if (sb.length() > 0) text = sb.toString();
+            if (ev == null || !"assistant/message".equals(ev.optString("type"))) continue;
+            String t = textOf(contentOf(ev));
+            if (!t.isEmpty()) text = t;
         }
         return text;
     }
 
     /** 会话最后一条**用户**消息（"我发过什么"）。 */
     String lastUserMessage(String sessionId) throws Exception {
-        long cursor = 0;
-        try {
-            JSONObject listArgs = new JSONObject();
-            listArgs.put("_request", new JSONObject());
-            JSONObject value = call("session/list", listArgs);
-            JSONArray items = value == null ? null : value.optJSONArray("items");
-            if (items != null) {
-                for (int i = 0; i < items.length(); i++) {
-                    JSONObject it = items.optJSONObject(i);
-                    if (it == null || !sessionId.equals(it.optString("sessionId"))) continue;
-                    JSONObject proj = it.optJSONObject("projections");
-                    if (proj != null) cursor = proj.optLong("asOfSeq", 0);
-                }
-            }
-        } catch (Throwable ignored) { }
-        if (cursor <= 0) return "";
-        JSONObject req = new JSONObject();
-        JSONObject addr = new JSONObject();
-        addr.put("kind", "session");
-        addr.put("sessionId", sessionId);
-        req.put("address", addr);
-        req.put("throughSeq", cursor);
-        req.put("maxMessages", 30);
-        JSONObject page = call("session/page", argsOf(req));
-        JSONArray records = page == null ? null : page.optJSONArray("records");
+        JSONArray records = recordsOf(sessionId, 30);
         if (records == null) return "";
         String text = "";
         for (int i = 0; i < records.length(); i++) {
             JSONObject rec = records.optJSONObject(i);
             JSONObject ev = rec == null ? null : rec.optJSONObject("event");
-            if (ev == null) continue;
-            if (!"user/message".equals(ev.optString("type"))) continue;
-            JSONObject data = ev.optJSONObject("data");
-            JSONObject msg = data == null ? null : data.optJSONObject("message");
-            JSONArray content = msg == null ? null : msg.optJSONArray("content");
-            if (content == null) continue;
-            StringBuilder sb = new StringBuilder();
-            for (int k = 0; k < content.length(); k++) {
-                JSONObject b = content.optJSONObject(k);
-                if (b != null && "text".equals(b.optString("type"))) sb.append(b.optString("text", ""));
-            }
-            if (sb.length() > 0) text = sb.toString();
+            if (ev == null || !"user/message".equals(ev.optString("type"))) continue;
+            String t = textOf(contentOf(ev));
+            if (isInjectedContext(t)) continue;          // 注入的上下文不算"我说的话"
+            if (!t.isEmpty()) text = t;
         }
         return text;
+    }
+
+    /**
+     * 「打开这个会话」时要显示的东西：最近几轮的**完整对话**（原始 markdown）。
+     *
+     * 用户口径（2026-11-09）：「回话显示有两种，一种纯文字，一种有格式的能显示表格 ——
+     * 我倾向能显示表格的」。球内文字层本来就是 {@link BallMarkdownView}（标题 / 列表 /
+     * 表格 / 代码块全支持），所以这里只负责把原始 markdown 拼回去，**一个字都不 strip**，
+     * 表格就自己排好了。
+     *
+     * 结构（整段拼，太长就从**最老的**整段丢，结论永远在最后）：
+     * <pre>
+     * **你**
+     *
+     * 我发的那句
+     *
+     * **AI**
+     *
+     * 回答（原始 markdown，表格照排）
+     * </pre>
+     */
+    String sessionTranscript(String sessionId, int maxMessages) throws Exception {
+        JSONArray records = recordsOf(sessionId, Math.max(8, maxMessages));
+        if (records == null) return "";
+        List<String> blocks = new ArrayList<>();          // 排版好的整段，时间正序
+        String pendingUser = null;
+        StringBuilder answer = new StringBuilder();
+        for (int i = 0; i < records.length(); i++) {
+            JSONObject rec = records.optJSONObject(i);
+            JSONObject ev = rec == null ? null : rec.optJSONObject("event");
+            if (ev == null) continue;
+            String type = ev.optString("type");
+            boolean isUser = "user/message".equals(type);
+            if (!isUser && !"assistant/message".equals(type)) continue;
+            String text = textOf(contentOf(ev));
+            if (text.isEmpty()) continue;
+            if (isUser && isInjectedContext(text)) continue;
+            if (isUser) {
+                flushTurn(blocks, pendingUser, answer);
+                pendingUser = text;
+            } else {
+                if (answer.length() > 0) answer.append("\n\n");
+                answer.append(text);
+            }
+        }
+        flushTurn(blocks, pendingUser, answer);
+        // 从后往前保留：总长超了就把最老的整段扔掉（BallMarkdownView 还有自己的上限）
+        int budget = 5600;
+        int from = blocks.size();
+        int used = 0;
+        while (from > 0 && used + blocks.get(from - 1).length() <= budget) {
+            from--;
+            used += blocks.get(from).length();
+        }
+        StringBuilder out = new StringBuilder();
+        for (int i = from; i < blocks.size(); i++) {
+            if (out.length() > 0) out.append("\n\n");
+            out.append(blocks.get(i));
+        }
+        return out.toString();
+    }
+
+    /** 把「这一轮我说了什么 + AI 答了什么」拼成一段；answer 用掉后清空。 */
+    private static void flushTurn(List<String> blocks, String user, StringBuilder answer) {
+        boolean hasUser = user != null && !user.isEmpty();
+        if (!hasUser && answer.length() == 0) return;
+        StringBuilder sb = new StringBuilder();
+        if (hasUser) sb.append("**你**\n\n").append(user);
+        if (answer.length() > 0) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("**AI**\n\n").append(answer.toString().trim());
+        }
+        answer.setLength(0);
+        blocks.add(sb.toString());
     }
 
     /** 新建会话（预设在这里落库：`session/create` 的 agentPreset 只在首轮之前生效）。 */

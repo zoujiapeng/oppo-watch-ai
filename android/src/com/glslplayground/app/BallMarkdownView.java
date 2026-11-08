@@ -59,6 +59,14 @@ final class BallMarkdownView {
     static final int MAX_CHARS = 2500;
 
     static Result build(Context ctx, String markdown, Style st) {
+        return build(ctx, markdown, st, MAX_CHARS);
+    }
+
+    /**
+     * 同上，但上限可给：**对话卡**要看的是整段会话（几轮问答 + 表格），2500 字不够；
+     * 球内"当前这句话"（实时回复）仍然走 {@link #MAX_CHARS}。
+     */
+    static Result build(Context ctx, String markdown, Style st, int maxChars) {
         Result r = new Result();
         LinearLayout col = new LinearLayout(ctx);
         col.setOrientation(LinearLayout.VERTICAL);
@@ -68,8 +76,9 @@ final class BallMarkdownView {
         col.setPadding(st.padH, st.padTop, st.padH, st.padBottom);
 
         String md = markdown == null ? "" : markdown;
-        if (md.length() > MAX_CHARS) {          // 超长只留最后一段（结论通常在最后）
-            md = "…" + md.substring(md.length() - MAX_CHARS);
+        int cap = Math.max(MAX_CHARS, maxChars);
+        if (md.length() > cap) {                // 超长只留最后一段（结论通常在最后）
+            md = "…" + md.substring(md.length() - cap);
             r.truncated = true;
         }
         r.view = col;
@@ -333,49 +342,57 @@ final class BallMarkdownView {
      *
      * 刻意保持"简单且绝不抛异常"：解析失败就原样显示（球里显示错一点远好过崩掉）。
      */
+    /**
+     * 行内标记：**粗** / *斜* / `代码`，外加把 markdown 链接压成它的文字。
+     *
+     * 2026-11-09 重写：老实现是"先按原串算下标、再从后往前删字符"，一旦一行里同时有
+     * 粗体和行内代码，删完后面的标记前面的下标就错位 —— 实测屏幕上直接把 `**` 和反引号
+     * 原样摊出来（对话卡里那段「**没推到 GitHub**：… `tools/push-github.sh` …」）。
+     * 现在改成**一次扫描、边扫边拼**，下标天然不会错位。
+     */
     private static CharSequence inline(String s, float sizePx, Style st) {
-        if (s == null || s.indexOf('*') < 0 && s.indexOf('`') < 0) return s;
+        if (s == null || s.isEmpty()) return s;
+        if (s.indexOf('*') < 0 && s.indexOf('`') < 0 && s.indexOf('[') < 0) return s;
         try {
-            android.text.SpannableString sp = new android.text.SpannableString(s);
+            // ① 链接：[文字](url) → 文字（球里点不了，别把原始语法写在屏上）
+            String t = s.replaceAll("\\[([^\\]]+)\\]\\([^)]*\\)", "$1");
+            android.text.SpannableStringBuilder sp = new android.text.SpannableStringBuilder();
             java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("\\*\\*([^*]+)\\*\\*|\\*([^*]+)\\*|`([^`]+)`").matcher(s);
-            List<int[]> spans = new ArrayList<>();   // {start, end, kind}
+                    .compile("\\*\\*([^*]+)\\*\\*|`([^`]+)`|\\*([^*]+)\\*").matcher(t);
+            int last = 0;
             while (m.find()) {
-                if (m.group(1) != null) spans.add(new int[]{m.start(), m.end(), 0});
-                else if (m.group(2) != null) spans.add(new int[]{m.start(), m.end(), 1});
-                else spans.add(new int[]{m.start(), m.end(), 2});
-            }
-            // 从后往前替换（免得下标错位）：先把标记符去掉，再套 span
-            StringBuilder sb = new StringBuilder(s);
-            List<int[]> out = new ArrayList<>();
-            for (int k = spans.size() - 1; k >= 0; k--) {
-                int[] sp1 = spans.get(k);
-                int a = sp1[0], b = sp1[1], kind = sp1[2];
-                int innerA = kind == 0 ? a + 2 : a + 1;
-                int innerB = kind == 0 ? b - 2 : (kind == 1 ? b - 1 : b - 1);
-                if (innerA < 0 || innerB > sb.length() || innerA >= innerB) continue;
-                sb.delete(b - (kind == 0 ? 2 : 1), b);                 // 去掉尾部标记
-                sb.delete(a, a + (kind == 0 ? 2 : 1));                 // 去掉头部标记
-                out.add(new int[]{a, b - (kind == 0 ? 4 : 2), kind});
-            }
-            sp = new android.text.SpannableString(sb.toString());
-            for (int[] o : out) {
-                int a = Math.max(0, Math.min(o[0], sp.length()));
-                int b = Math.max(a, Math.min(o[1], sp.length()));
-                if (a >= b) continue;
-                if (o[2] == 0) sp.setSpan(new android.text.style.StyleSpan(Typeface.BOLD),
-                        a, b, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                else if (o[2] == 1) sp.setSpan(new android.text.style.StyleSpan(Typeface.ITALIC),
-                        a, b, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                else {
-                    sp.setSpan(new android.text.style.TypefaceSpan("monospace"),
-                            a, b, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                    sp.setSpan(new android.text.style.BackgroundColorSpan(st.codeBg),
-                            a, b, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sp.append(t, last, m.start());
+                int a = sp.length();
+                int kind;                                  // 0=粗 1=斜 2=行内代码
+                String inner;
+                if (m.group(1) != null) { inner = m.group(1); kind = 0; }
+                else if (m.group(2) != null) { inner = m.group(2); kind = 2; }
+                else { inner = m.group(3); kind = 1; }
+                sp.append(inner);
+                int b = sp.length();
+                if (b > a) {
+                    if (kind == 0) {
+                        sp.setSpan(new android.text.style.StyleSpan(Typeface.BOLD), a, b,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    } else if (kind == 1) {
+                        sp.setSpan(new android.text.style.StyleSpan(Typeface.ITALIC), a, b,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    } else {
+                        sp.setSpan(new android.text.style.TypefaceSpan("monospace"), a, b,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        // ⚠️ st 可能是 null：正文段落是 `addText(...)` → `makeText(..., null)`，
+                        //    老代码在这里直接读 st.codeBg → NPE → 被 catch 吞掉 → **整行原样输出**，
+                        //    屏上就是 `**粗体**`、反引号、`[文字](链接)` 全裸着（2026-11-09 实拍）。
+                        int codeBg = st == null ? 0x26FFFFFF : st.codeBg;
+                        sp.setSpan(new android.text.style.BackgroundColorSpan(codeBg), a, b,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    }
                 }
+                last = m.end();
             }
+            sp.append(t, last, t.length());
             return sp;
-        } catch (Throwable t) {
+        } catch (Throwable th) {
             return s;   // 解析出错就原样显示，绝不因为排版把球搞崩
         }
     }

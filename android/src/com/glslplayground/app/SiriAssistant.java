@@ -645,6 +645,8 @@ public final class SiriAssistant {
 
     /** 立刻替换球内文字（状态提示用）。 */
     private void sayNow(String text) {
+        // 会话卡开着：球里那层字归"会话记录"（卡自己轮询），镜像这条通道一律让路
+        if (FloatingBallService.conversationCardOwnsText()) return;
         String t = text == null ? "" : text;
         stopTyping();
         targetText = t;
@@ -656,6 +658,7 @@ public final class SiriAssistant {
 
     /** 逐字揭示（回答用）；target 可以在揭示过程中不断变长。 */
     private void sayTyped(String text) {
+        if (FloatingBallService.conversationCardOwnsText()) return;   // 同上：卡占着字
         String t = clipToBall(text);
         if (!t.startsWith(shownText)) {         // 换了一轮回答 → 从头弹
             shownText = "";

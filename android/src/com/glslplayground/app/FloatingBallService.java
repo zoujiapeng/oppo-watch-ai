@@ -987,9 +987,14 @@ public class FloatingBallService extends Service {
         return zonesActive || menuShown;
     }
 
-    /** 这一屏不该出现 AI 回复的字吗（菜单 / 搜索胶囊 / 输入胶囊）。 */
+    /** 这一屏不该出现 AI 回复的字吗（菜单 / 搜索胶囊）。 */
     private boolean replyTextShouldHide() {
-        return menuHideReply && (menuSurfaceOpen() || searchActive || convoOpen);
+        // ★ 2026-11-09 修（用户报的"菜单进工作目录再进回话，回话内容不显示"）：
+        //   这里以前还带着 `|| convoOpen` —— 可是**会话卡的内容就是这一层字**
+        //   （siriStr 由 setSiriText 灌进来），于是卡一开，字就被每 100ms 一次的巡检
+        //   收走，屏幕上只剩一块空玻璃 + 一条输入行：正是用户截图那个样子。
+        //   进菜单时旧回复的字会被"正在读取对话…"顶掉（见 openConversation），不需要靠这条挡。
+        return menuHideReply && (menuSurfaceOpen() || searchActive);
     }
 
     /** 每 1 秒看一眼两个免重编的文件口子。 */
@@ -1066,6 +1071,7 @@ public class FloatingBallService extends Service {
             measureSiriTargets(siriStr);
         }
         showSiriTextNow();                          // ③ 露字
+        if (convoOpen) scrollConvoToEnd();          // 会话卡：回来还停在最新那一头
         boolean up = siriText != null && siriText.getVisibility() == View.VISIBLE;
         Log.i("FloatingBall", "离开菜单/胶囊 → AI 回复的字放回来（" + siriStr.length() + " 字，内容块="
                 + (mdColumn == null ? -1 : mdColumn.getChildCount()) + "，"
@@ -1412,6 +1418,18 @@ public class FloatingBallService extends Service {
     private Runnable finalConfirm;
     private int finalCheckAttempt = 0;
     private volatile String asstSessionId = null;
+    /**
+     * 会话卡是不是正占着球内文字。
+     *
+     * 卡里显示的是**整段会话记录**（你 / AI 一段段排），而镜像那条路是"逐字把当前回答打进球里"——
+     * 两者同时写就是：字刚排好一段又被逐字覆盖、记录跳来跳去。卡开着就让卡自己轮询，
+     * 镜像这条通道让路（球的动画/状态完全不受影响，SiriAssistant 只是不写字）。
+     */
+    public static boolean conversationCardOwnsText() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.convoOpen && !s.convoStashed;
+    }
+
     /** 当前球里这段回复是**哪条会话**产的（最终回复要查的是它，不是镜像随手跟的那条）。 */
     private volatile String replySessionId = null;
 
@@ -3336,6 +3354,10 @@ public class FloatingBallService extends Service {
         if (!debugShowGlass) {
             try { skipScreenshotOf(glView.getSurfaceControl(), "glass", false); } catch (Throwable ignored) { }
         }
+        // ①′ 文字层同样撤掉排除：玻璃 + 字一起拍下来才判得了「字到底显示没显示」
+        if (!debugShowGlass && siriText != null) {
+            try { applySkipScreenshotTo(siriText, "text", false); } catch (Throwable ignored) { }
+        }
         // ② 冻结采集：这一小段玻璃的输入不变 → 屏上那一帧就是"真样子"
         renderer.freezeCapture = true;
         // ③ 等两帧（~220ms）让 SurfaceFlinger 吃到新状态，再拍
@@ -3362,6 +3384,9 @@ public class FloatingBallService extends Service {
     /** 快门结束：解冻 + 把抓屏排除打回去（下一帧起球又"隐身"了）。 */
     private void witnessRestore() {
         if (renderer != null) renderer.freezeCapture = false;
+        if (!debugShowGlass && siriText != null && siriText.getVisibility() == View.VISIBLE) {
+            try { applyTextSkipScreenshot(); } catch (Throwable ignored) { }
+        }
         if (!debugShowGlass && glView != null) {
             try {
                 SurfaceControl sc = glView.getSurfaceControl();
@@ -4293,8 +4318,12 @@ public class FloatingBallService extends Service {
         if (siriTextPx <= 0) siriTextPx = dp(27);
         String src = displayTextOf(siriStr);
         int width = Math.max((int) dp(120), mdLayoutWidthPx());
+        // ★ 会话卡要显示整段会话（几轮问答 + 表格），上限放宽到 6000 字；
+        //   球里"当前这句回复"仍按 BallMarkdownView.MAX_CHARS 截断（球不是日志窗口）。
+        //   卡/回复两种口径写进指纹 —— 切换时必须重建，否则沿用了另一套上限。
+        final int mdCap = convoOpen ? 6000 : BallMarkdownView.MAX_CHARS;
         String key = src.length() + "|" + width + "|" + Math.round(siriTextPx)
-                + "|" + Math.round(mdFontRatio() * 1000);
+                + "|" + Math.round(mdFontRatio() * 1000) + "|" + mdCap;
         if (key.equals(mdBuiltFor)) return;
         mdBuiltFor = key;
 
@@ -4309,7 +4338,7 @@ public class FloatingBallService extends Service {
         st.gap = Math.round(st.bodyPx * 0.55f);
 
         mdColumn.removeAllViews();
-        BallMarkdownView.Result r = BallMarkdownView.build(this, src, st);
+        BallMarkdownView.Result r = BallMarkdownView.build(this, src, st, mdCap);
         mdColumn.addView(r.view, new android.widget.LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -5491,6 +5520,9 @@ public class FloatingBallService extends Service {
         }
         float b0 = winSize * 0.9f;
         updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+        // 双指手势 = "回初始圆球，清掉一切"：会话卡也一起收（否则留着一张空卡，
+        // 下次单击球还会走「退出对话卡」那条分支，用户会莫名其妙）
+        if (convoOpen) closeConversation("双指手势回初始形态");
     }
 
     /** 把球的窗口挪到目标位置（夹取规则与球自身拖动完全一致）。 */
@@ -5596,6 +5628,12 @@ public class FloatingBallService extends Service {
         s.main.post(new Runnable() {
             @Override public void run() {
                 if (s.isUserScrollingText()) {          // 正在翻阅 → 不收回
+                    s.lastTextAt = android.os.SystemClock.uptimeMillis();
+                    return;
+                }
+                // ★ 2026-11-09：会话卡开着 = 用户正在看这一页（和"一段转瞬即逝的回复"不同），
+                //   安静 30 秒的"最终回复收回"不许把卡收掉。关卡只有点球 / 双指 / 进菜单这几条路。
+                if (s.convoOpen) {
                     s.lastTextAt = android.os.SystemClock.uptimeMillis();
                     return;
                 }
@@ -5912,6 +5950,14 @@ public class FloatingBallService extends Service {
     /** 兜底：助手在一次流式输出中途被关掉时可能没有 IDLE 事件，久静则自动释放保持。 */
     private void pumpTextHoldSafety() {
         if (!textHold || lastTextAt == 0) return;
+        // ★ 2026-11-09（用户报「打开的空白回话页面自己退回胶囊状态」）：
+        //   会话卡是**一页在看的东西**，不是转瞬即逝的一段回复 —— 只要卡还开着就续命，
+        //   8 秒兜底不许把它收走（收走 = 用户正看着，屏幕上的对话突然没了、输入框悬着）。
+        //   关掉卡只有三条路：点球（单击退出卡）、双指手势、进菜单/搜索/拍照藏界面。
+        if (convoOpen) {
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            return;
+        }
         // 用户正在球里翻阅 → 一直保持方形态（并且不断续命），松手 1.5s 后才走正常收起
         if (isUserScrollingText()) {
             lastTextAt = android.os.SystemClock.uptimeMillis();
@@ -5947,6 +5993,7 @@ public class FloatingBallService extends Service {
 
     /** 释放保持，把球交还给「初始圆球」形态。 */
     private void releaseTextHold() {
+        boolean convoWasOpen = convoOpen;
         // ⚠️ 这里**不能**再 `if (!textHold) return;`：那样"没在保持"时直接返回，
         // 文字不会被隐藏，但形状照样收 —— 用户看到的正是「先变形、字还挂在球上」。
         // 现在无论是否在保持，都先把所有文字隐藏掉（顺序也是硬要求）。
@@ -5956,6 +6003,10 @@ public class FloatingBallService extends Service {
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             float bb = winSize * 0.9f;
             updateSiriWindow(bb * minHalfX, bb * minHalfY);
+            if (convoWasOpen) {                  // 会话卡跟着一起收（见方法末尾的注释）
+                Log.i("FloatingBall", "convo: 球回到初始形态 → 会话卡一起收起（未在保持）");
+                closeConversation("球回到初始形态");
+            }
             return;
         }
         textHold = false;
@@ -5983,6 +6034,13 @@ public class FloatingBallService extends Service {
         }
         float b0 = winSize * 0.9f;
         updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+        // ★ 2026-11-09：球自己收回胶囊 = 这一屏会话结束。
+        //   卡也要一起收（否则 siriStr 里那 73 字还在，任何一次 measure 都会把它重新放出来，
+        //   屏幕上就是"字自己诈尸"）。输入行由 syncComposerBar 同一拍收起。
+        if (convoWasOpen) {
+            Log.i("FloatingBall", "convo: 球回到初始形态 → 会话卡一起收起");
+            closeConversation("球回到初始形态");
+        }
     }
 
     /** 保持期间：不缩小，取「本轮量过的最大值」。 */
@@ -6086,13 +6144,21 @@ public class FloatingBallService extends Service {
         //     高度随文字往下涨的体积变化（不限字号）」。
         float hxpx = maxBallW / 2f;
         // 对话卡：底部多留一条"输入区"，输入框就落在玻璃里（而不是浮在玻璃外面）
-        float convoExtra = convoOpen ? (dp(40) + dp(8) + dp(6)) : 0f;
-        float hypx = Math.max(base * minHalfY0, th / 2f + padY + convoExtra / 2f);   // 原版球高：聊天卡的最小高度不变
+        // 会话面的输入行：底部多留一条"输入区"，输入框就落在玻璃里（而不是浮在玻璃外面）。
+        // ★ 2026-11-09：不再看 convoOpen —— 只要输入行**真的在屏上**（回复页也算），
+        //   玻璃就得给它留位置；否则最后几行字被输入行压住。
+        float convoExtra = composerReservePx();
+        // ★ 2026-11-09：玻璃高度必须**真的装得下**文字 + 底部那两条带子。
+        //   以前只按 `th/2 + padY` 算，可 updateSiriTextPos 还要再扣 顶部8dp + 底部14dp +
+        //   波头带40dp + 输入行一截 —— 结果文字视口比内容矮一大截，最后一行被切掉半行
+        //   （实拍：表格下面那句「结束了。」只剩上半截）。
+        float needH = th + dp(8) + dp(14) + dp(ANIM_BAND_DP) + convoExtra;
+        float hypx = Math.max(base * minHalfY0, Math.max(th / 2f + padY, needH / 2f));  // 原版球高：聊天卡的最小高度不变
         hypx = Math.min(hypx, maxBallH / 2f + convoExtra / 2f);       // 高 ≤ 屏高 50%（+输入区）
         // 本轮只增不减：文字块被清空后又来一小段（工具调用之间很常见）时，方框不缩回去。
         if (textHold) {
             hypx = Math.max(hypx, holdHalfY * base);
-            hypx = Math.min(hypx, maxBallH / 2f);
+            hypx = Math.min(hypx, maxBallH / 2f + convoExtra / 2f);   // 保持期也给输入行留位
             hxpx = maxBallW / 2f;                                    // 宽永远钉在这个值
         }
         {
@@ -6345,6 +6411,10 @@ public class FloatingBallService extends Service {
             } else if (!searchActive) {
                 updateSiriTextPos();
             }
+            // ★ 2026-11-09：输入行每帧跟一次"此刻玻璃的样子"。
+            //   这是问题 ② 的根治点：以前输入行只在 openConversation / 关搜索 / 关菜单
+            //   这三处显式摆位，球"自己缩回胶囊"这条路上没人收它 → 玻璃没了、输入框还挂着。
+            if (!approvalShown) syncComposerBar();
             heartbeatTick(now);
             main.postDelayed(this, 16);
         }
@@ -6523,7 +6593,10 @@ public class FloatingBallService extends Service {
         // 高度 = 球顶+留白 → 球底−留白（再减动效带），**同时**不能超出屏幕可用范围，
         // 也不能小于 0（球被摆得很高时空间会不够）。空间不足就变矮，由 ScrollView 滚。
         int availTop = Math.round(ballTop + topPad);
-        int availBottom = Math.round(Math.min(ballBottom - padBottomSafe - animBandPx,
+        // 输入行占掉的那条带子（在"波头带"**之上**）：有输入行时文字视口往上收一截，
+        // 否则最后两行字会被输入行压住（用户口径：文字必须整行落在玻璃里）。
+        int composerBand = composerReservePx();
+        int availBottom = Math.round(Math.min(ballBottom - padBottomSafe - animBandPx - composerBand,
                 screenH - (int) dp(8)));
         int th = Math.max((int) dp(40), availBottom - availTop);
         th = Math.min(th, Math.max((int) dp(40), Math.round(screenH - dp(12))));
@@ -6615,7 +6688,7 @@ public class FloatingBallService extends Service {
 
     /** 构建版本号（日志里认版本用，省得怀疑装错了包）。 */
     static final class BuildConfigVersion {
-        static final String V = "blackfix-1";
+        static final String V = "convo-unify-1";
     }
 
     /** 允许反射调用 @hide 的 SurfaceControl#setSkipScreenshot（抓屏排除本窗口）。
@@ -6773,6 +6846,11 @@ public class FloatingBallService extends Service {
      * 窗口刚 add 时 SurfaceControl 可能还没 native 对象，所以返回 false 让调用方稍后重试。
      */
     private boolean applySkipScreenshotTo(View v, String what) {
+        return applySkipScreenshotTo(v, what, true);
+    }
+
+    /** on=false = 临时撤掉标记（取证快门要拍到这一层的真样子）。 */
+    private boolean applySkipScreenshotTo(View v, String what, boolean on) {
         if (Build.VERSION.SDK_INT < 29 || v == null) return false;
         try {
             Object vr = android.view.View.class.getMethod("getViewRootImpl").invoke(v);
@@ -6783,7 +6861,7 @@ public class FloatingBallService extends Service {
                 Object valid = sc.getClass().getMethod("isValid").invoke(sc);
                 if (Boolean.FALSE.equals(valid)) return false;      // 还没画出来 → 下轮再来
             } catch (Throwable ignored) { }
-            return skipScreenshotOf((SurfaceControl) sc, what);
+            return skipScreenshotOf((SurfaceControl) sc, what, on);
         } catch (Throwable t) {
             Log.w("FloatingBall", what + " setSkipScreenshot failed: " + t);
             return false;
@@ -7139,10 +7217,10 @@ public class FloatingBallService extends Service {
             if (convoBar != null) convoBar.setVisibility(View.GONE);
         } else {
             if (glView != null) glView.setVisibility(View.VISIBLE);
-            if (convoOpen && convoBar != null) convoBar.setVisibility(View.VISIBLE);
             if (hasBallText()) showSiriTextNow();
             centerBallOnScreen();
             if (siriEnabled) measureSiriTargets(siriStr);
+            syncComposerBar();            // 输入行跟着"玻璃回来了没有"自己决定露不露
         }
         applyBallTouchability();          // 藏着的时候代理层也别吃触摸
     }
@@ -7584,8 +7662,8 @@ public class FloatingBallService extends Service {
                 String t = searchBar == null ? "" : searchBar.text();
                 return t == null ? "" : t.trim();
             }
-            // 对话卡下面那条输入框同样算「打好的字」。
-            if (convoOpen && convoBar != null && convoBar.isShown()) {
+            // 会话面上那条输入行（回话卡 / AI 回复页共用）同样算「打好的字」。
+            if (convoBar != null && convoBar.isShown()) {
                 String t = convoBar.text();
                 return t == null ? "" : t.trim();
             }
@@ -7622,7 +7700,7 @@ public class FloatingBallService extends Service {
     private void refreshComposerHasText() {
         boolean open = false, has = false;
         try {
-            open = searchActive || (convoOpen && convoBar != null && convoBar.isShown());
+            open = searchActive || (convoBar != null && convoBar.isShown());
             has = open && !powerHoldActive && !pendingComposerText().isEmpty();
         } catch (Throwable ignored) { }
         composerOpen = open;
@@ -7652,11 +7730,11 @@ public class FloatingBallService extends Service {
             }
             return;
         }
-        // ① 对话卡下面那条输入框：直接发到这张卡对应的会话（就是「上一次回话」）
-        if (!searchActive && convoOpen && convoSessionId != null && !convoSessionId.isEmpty()) {
-            Log.i("FloatingBall", "输入框发送（对话卡 " + convoSessionId + "）：「" + text + "」");
+        // ① 会话面那条输入行（回话卡 / AI 回复页共用）：发给它对着的那条会话
+        if (!searchActive && composerShown && convoBar != null) {
+            Log.i("FloatingBall", "输入框发送（会话面 " + composerTargetSession() + "）：「" + text + "」");
             try { if (convoBar != null) convoBar.setText(""); } catch (Throwable ignored) { }
-            convoSend(convoSessionId, text);
+            composerSubmit(text);
             return;
         }
         // ② 状态 2 胶囊：按 pk_send 决定「上一次回话 / 全新会话」
@@ -9474,11 +9552,24 @@ public class FloatingBallService extends Service {
         centerBallOnScreen();
     }
 
-    // ══════ 对话卡（状态 3 选完目录/会话、状态 2 的搜索选完都进这里）══════
+    // ══════ 会话卡（状态 3 选完目录/会话、状态 2 的搜索选完都进这里）══════
     // 用户 2026-10-23：「对话框没做出来，直接复用球最终恢复的那个大方形加个输入和侧栏按钮即可」。
     // 所以这里不新造界面：球的方形（Siri 文字态）+ 底部一条输入 + 左边一个侧栏按钮。
+    //
+    // ★ 2026-11-09（用户口径）：「自己手动打开的回话页面不应该是和 AI 回复的页面一样吗？
+    //   怎么像是两个不同的东西，一个有输入框一个没有」。⇒ **不新造第二种界面**：
+    //   · 输入行不再归 `convoOpen` 管，而是归"玻璃此刻真的画成了方形态、里面有字"管
+    //     （见 composerShouldShow()）——所以 AI 回复的那块玻璃底下也有这条输入行；
+    //   · 内容一律走**同一套 markdown 排版**（BallMarkdownView，表格照排）；
+    //   · 在回复页上打字发送 = 直接进这条会话的卡（不换界面，只把"这一轮"接上去）。
 
     private boolean convoOpen = false;
+    /** 每一次"开卡 / 发消息"自增：异步读会话的线程只在自己那一代还生效时回写。 */
+    private int convoGen = 0;
+    /** 输入行当前是不是摆在屏上（只在 composerShouldShow() 为真时为真）。 */
+    private boolean composerShown = false;
+    /** 输入行窗口的高度（px）—— 玻璃底部要给这条带子留位置。 */
+    private int composerH = 0;
     /**
      * 这一次 enterSearchMode 是「按住说话」那条语音路：输入框要拿焦点（Voicemap 往这儿塞字），
      * 但**不能弹键盘**。见 focusSearchInputForVoice()。
@@ -9500,171 +9591,291 @@ public class FloatingBallService extends Service {
     void openConversation(final String sid, final String title) {
         if (sid == null || sid.isEmpty()) return;
         convoOpen = true;
+        final int gen = ++convoGen;
         convoOpenedAt = android.os.SystemClock.uptimeMillis();
         convoHadText = false;
         convoSessionId = sid;
+        convoLastUser = "";
+        convoTranscriptCache = "";
         convoTitle = title == null || title.trim().isEmpty() || "null".equals(title) ? "对话" : title;
         targetSessionId = sid;
         targetSessionTitle = title;
         ensureSiriForAssistant();          // 让球进入方形文字态
+        // ★ 2026-11-09：开卡第一帧就把**旧的回复文字**换掉。
+        //   以前这里不清字，等异步读完会话才 setSiriText()；中间那半秒里球里挂的是
+        //   "上一条 AI 回复"——和这张卡的会话毫无关系。现在先摆一句占位。
+        applySiriText("· 正在读取对话…");
         main.postDelayed(new Runnable() {
             @Override public void run() { if (convoOpen) measureSiriTargets(siriStr); }
         }, 120);                            // 让"底部输入区"立刻算进方形高度
-        Log.i("FloatingBall", "convo: 进入对话「" + title + "」" + sid);
+        Log.i("FloatingBall", "convo: 进入对话「" + convoTitle + "」" + sid);
         final DshApi api = DshApi.get(this);
         new Thread(new Runnable() {
             @Override public void run() {
                 String text = "";
-                String lastUser = "";
-                try { text = api.lastAnswer(sid); }
-                catch (Throwable t) { Log.w("FloatingBall", "convo: 读最后回答失败 " + message(t)); }
-                try { lastUser = api.lastUserMessage(sid); }
-                catch (Throwable t) { Log.w("FloatingBall", "convo: 读最后提问失败 " + message(t)); }
-                final String tt = text;
-                final String lu = lastUser;
+                try { text = api.sessionTranscript(sid, 60); }
+                catch (Throwable t) { Log.w("FloatingBall", "convo: 读会话失败 " + message(t)); }
+                final String tt = text == null ? "" : text.trim();
                 main.post(new Runnable() {
                     @Override public void run() {
-                        if (!convoOpen || !sid.equals(convoSessionId)) return;
-                        convoLastUser = lu == null ? "" : lu.trim();
-                        StringBuilder sb = new StringBuilder();
-                        if (!convoLastUser.isEmpty()) sb.append("你：").append(convoLastUser).append("\n\n");
-                        if (tt != null && !tt.trim().isEmpty()) sb.append(tt);
-                        else sb.append("（这个对话还没有回复）");
-                        convoHadText = true;
-                        setSiriText(sb.toString());
+                        if (!convoOpen || gen != convoGen || !sid.equals(convoSessionId)) return;
+                        convoHadText = !tt.isEmpty();
+                        convoTranscriptCache = tt;
+                        Log.i("FloatingBall", "convo: 会话内容 " + tt.length() + " 字"
+                                + (tt.isEmpty() ? "（空会话/还没说话）" : ""));
+                        setSiriText(tt.isEmpty() ? "（这条会话还没有内容）" : tt);
+                        scrollConvoToEnd();
                         main.postDelayed(new Runnable() {
                             @Override public void run() {
+                                if (!convoOpen || gen != convoGen) return;
                                 measureSiriTargets(siriStr);   // 让方形的宽度/高度重新按文字收紧
-                                updateConvoChrome();
+                                syncComposerBar();
                             }
                         }, 350);
                     }
                 });
             }
         }, "convo-load").start();
-        showConvoChrome(convoTitle);
+        ensureComposerBar(convoTitle);
+        if (convoBar != null) convoBar.setHint(composerHint(convoTitle));
     }
 
-    private void showConvoChrome(final String title) {
-        if (wm == null) return;
-        if (convoBar == null) {
-            BallSearchBar bar = new BallSearchBar(this);
-            bar.setBackdrop(false);         // 输入行现在落在方形玻璃内部，不需要自带底
-            bar.setHint("发消息…");
-            bar.setListener(new BallSearchBar.Listener() {
-                @Override public void onSubmit(String text) {
-                    String t = text == null ? "" : text.trim();
-                    if (t.isEmpty() || convoSessionId == null) return;
-                    if (convoBar != null) {
-                        convoBar.setText("");
-                        convoBar.setHint("已发出 · 等待回复…");
-                    }
-                    Log.i("FloatingBall", "convo: 发送「" + t + "」");
-                    convoSend(convoSessionId, t);
-                }
-                @Override public void onLongPressAdd() { pickAttachment(); }
-                @Override public void onTwoFingerHold() { openSettingsMenu(); }
-                @Override public void onAttachmentTap() { clearAttachment(); }
+    // ── 输入行：**会话面**的那条输入框（回复页 / 会话卡共用同一条）──────────
 
-                @Override public void onTargetTap() { }
-                @Override public void onTapEdit() {
-                    if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
-                }
-                @Override public void onInputHeight(int px) { onConvoInputHeight(px); }
-            });
-            convoBarParams = overlayParams(2, 2,
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
-            convoBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
-            try { wm.addView(bar, convoBarParams); convoBar = bar; trackWindow(bar); }
-            catch (Throwable t) { Log.w("FloatingBall", "convo bar failed: " + t); }
+    /**
+     * 这一帧输入行该不该在屏上。
+     *
+     * 判据只有一条：**玻璃此刻真的是"里面装着字的方形态"**。
+     * 用户 2026-11-09 的两个口径都落在这条上：
+     *   · 「AI 回复的页面和手动打开的回话页面应该是一样的」→ 只要玻璃里是字，输入行就在
+     *     （不再区分 convoOpen，回复页也有）；
+     *   · 「空白回话页面自动退回胶囊状态时，输入框依然没消失，很难看」→ 球一缩回胶囊
+     *     （字没了 / 画出来是胶囊 / 进菜单 / 搜索胶囊 / 拍照藏界面），输入行同一拍收起。
+     */
+    private boolean composerShouldShow() {
+        if (!siriEnabled || uiHidden) return false;
+        if (glView == null || wm == null) return false;
+        if (searchActive || searchClosing || menuSurfaceOpen()) return false;
+        if (approvalShown || approvalClosing || glassFullscreen) return false;
+        if (convoStashed) return false;                       // 参数面板借走了这块玻璃
+        if (!siriTextShown) return false;                     // 字没露出来 → 输入行也不该在
+        if (siriStr == null || siriStr.trim().isEmpty()) return false;
+        if (squareDrawn01() < 0.5f) return false;             // 画出来还是胶囊 → 不许有输入行
+        return true;
+    }
+
+    /** 输入行占用的底部带子高度（px）：玻璃要给它在**波头带子之上**留出位置。 */
+    private int composerReservePx() {
+        if (!composerShown || convoBar == null) return 0;
+        return composerH + Math.round(dp(6)) + Math.round(dp(8));
+    }
+
+    /** 输入行贴着"玻璃底 − 波头带子"（Siri 波只露波头，输入行不许压住它）。 */
+    private int composerY(int h) {
+        int y = Math.round(screenH * 0.70f);
+        if (glView != null) {
+            int[] loc = new int[2];
+            glView.getLocationOnScreen(loc);
+            int glassBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
+            int band = Math.round(dp(ANIM_BAND_DP));                // 底部给波头留的那一截
+            y = glassBottom - band - Math.round(dp(6)) - h;
         }
-        // 宽度跟"大方形"同宽（玻璃宽度 = 2 × glassHalfW），不再固定 560dp
-        int glassW = Math.round(2f * glassHalfW()) - Math.round(dp(28));   // 比玻璃窄一点，左右图标都在玻璃内
+        return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
+    }
+
+    /**
+     * 建出那条输入行（**只负责建**，可见性/位置一律交给 {@link #syncComposerBar()}）。
+     *
+     * @return true = 窗口已就绪
+     */
+    private boolean ensureComposerBar(final String title) {
+        if (wm == null) return false;
+        if (convoBar != null) return true;
+        BallSearchBar bar = new BallSearchBar(this);
+        bar.setBackdrop(false);         // 输入行落在方形玻璃内部，不需要自带底
+        bar.setHint(composerHint(title));
+        bar.setListener(new BallSearchBar.Listener() {
+            @Override public void onSubmit(String text) {
+                composerSubmit(text);
+            }
+            @Override public void onLongPressAdd() { pickAttachment(); }
+            @Override public void onTwoFingerHold() { openSettingsMenu(); }
+            @Override public void onAttachmentTap() { clearAttachment(); }
+
+            @Override public void onTargetTap() { }
+            @Override public void onTapEdit() {
+                if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
+            }
+            @Override public void onInputHeight(int px) { onConvoInputHeight(px); }
+        });
+        convoBarParams = overlayParams(2, 2,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        convoBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+        convoBarParams.width = Math.max(Math.round(dp(160)), Math.round(screenW * 0.6f));
+        convoBarParams.height = composerH = Math.round(dp(40));
+        try { wm.addView(bar, convoBarParams); convoBar = bar; trackWindow(bar); }
+        catch (Throwable t) { Log.w("FloatingBall", "composer bar failed: " + t); return false; }
+        convoBar.setVisibility(View.GONE);
+        Log.i("FloatingBall", "composer: 输入行窗口已建好（默认收起）");
+        return true;
+    }
+
+    /** 输入行的提示语：带会话名时**截断**（长标题会把 40dp 那条输入行撑成两行、字被切掉）。 */
+    private static String composerHint(String title) {
+        String t = title == null ? "" : title.trim();
+        if (t.isEmpty() || "null".equals(t)) return "发消息…";
+        if (t.length() > 6) t = t.substring(0, 6) + "…";
+        return "回复「" + t + "」…";
+    }
+
+    /**
+     * 每帧（siriTick）跟一次：该在就摆好，不该在就收起。
+     *
+     * ★ 这是问题 ② 的根子：以前输入行只在 openConversation / 关搜索 / 关菜单这三处
+     *   显式摆位，球"自己缩回胶囊"（静了 8 秒兜底释放、最终回复 30 秒回收、双指手势、
+     *   进菜单、拍照藏界面……）这条路上没人管它 → 玻璃早没了，输入框还悬在桌面上。
+     */
+    private void syncComposerBar() {
+        if (wm == null) return;
+        boolean want = composerShouldShow();
+        if (!want) {
+            if (composerShown) {
+                composerShown = false;
+                if (convoBar != null && convoBar.getVisibility() != View.GONE) {
+                    convoBar.setVisibility(View.GONE);
+                    Log.i("FloatingBall", "composer: 玻璃不是方形态（胶囊/菜单/搜索/空）→ 输入行收起");
+                }
+                // ⚠️ 这里**绝对不能**再 measureSiriTargets()：siriStr 还在（兜底释放只藏内容），
+                //    量一遍就会按它重建内容 → 玻璃又长成方形态 → 输入行又摆上 → 8 秒后再收……
+                //    实测就是这样来回抖（兜底释放 → 重建 → text hold on → 再释放）。
+            }
+            return;
+        }
+        if (convoBar == null && !ensureComposerBar(convoOpen ? convoTitle : null)) return;
+        if (!convoOpen && convoBar != null && convoBarParams != null) {
+            convoBar.setHint(composerHint(null));      // 回复页：一条普通输入行
+        }
+        if (convoBar.getVisibility() != View.VISIBLE) {       // 重新露出来：走一次"凝聚"
+            composerShown = true;
+            convoBar.setVisibility(View.VISIBLE);
+            convoBar.resetMaterial();
+            convoBar.materialize(true, 0);
+            Log.i("FloatingBall", "composer: 方形态有字 → 输入行摆上（" + siriStr.length() + " 字）");
+            remeasureForComposer();                          // 玻璃要让出这条带子
+        }
+        int h = Math.max(Math.round(dp(40)), convoBarParams.height);
+        composerH = h;
+        // 宽度跟"大方形"同宽（玻璃宽度 − 一点边距），不再固定 560dp
+        int glassW = Math.round(2f * glassHalfW()) - Math.round(dp(28));
         int squareW = (siriText != null && siriText.getWidth() > dp(120))
                 ? siriText.getWidth()
                 : Math.round(screenW * SIRI_W_RATIO);
         int w = Math.max(Math.round(dp(160)),
                 Math.min(Math.min(screenW - Math.round(dp(48)), squareW), glassW));
-        int h = Math.round(dp(40));
-        int x = (screenW - w) / 2;                 // 输入框居中（侧栏按钮已删除）
-        int y = convoChromeY(h);
-        convoBarParams.width = w;
-        convoBarParams.height = h;
-        convoBarParams.x = x;
-        convoBarParams.y = y - Math.round(winY0());
-        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
-        convoBar.setVisibility(View.VISIBLE);
-        convoBar.resetMaterial();
-        convoBar.materialize(true, 0);      // 凝聚出现（构造时 alpha=0，不调这个就永远看不见）
+        int x = (screenW - w) / 2;
+        int y = composerY(h) - Math.round(winY0());
+        if (w != convoBarParams.width || h != convoBarParams.height
+                || x != convoBarParams.x || y != convoBarParams.y) {
+            convoBarParams.width = w;
+            convoBarParams.height = h;
+            convoBarParams.x = x;
+            convoBarParams.y = y;
+            try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 输入行"上/下"那一刻要重排一次玻璃高度（重入守卫：measure 里可能又走到这儿）。 */
+    private volatile boolean inComposerRemeasure = false;
+
+    private void remeasureForComposer() {
+        if (inComposerRemeasure) return;
+        inComposerRemeasure = true;
+        try { measureSiriTargets(siriStr); }
+        catch (Throwable ignored) { }
+        finally { inComposerRemeasure = false; }
     }
 
     /**
      * 对话卡里的输入行：字换行了就把这条小窗也拉高（底边不动，往上长）。
-     * 卡片本身的玻璃高度由 measureSiriTargets 的 convoExtra 兜着，所以最多给到 ~2 行。
+     * 卡片本身的玻璃高度由 measureSiriTargets 的 composerReservePx() 兜着。
      */
     private void onConvoInputHeight(int px) {
-        if (!convoOpen || convoBar == null || convoBarParams == null || wm == null) return;
+        if (convoBar == null || convoBarParams == null || wm == null) return;
         int minH = Math.round(dp(40));
         int maxH = Math.round(dp(40) * 2.2f);
         int want = (px <= 0) ? minH : Math.max(minH, Math.min(maxH, px));
         if (want == convoBarParams.height) return;
         convoBarParams.height = want;
-        convoBarParams.y = convoChromeY(want) - Math.round(winY0());
+        composerH = want;
+        convoBarParams.y = composerY(want) - Math.round(winY0());
         try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
         Log.i("FloatingBall", "convo: 输入行按行数拉到 " + want + "px");
     }
 
-    /** 输入行贴着方形球的下沿（球被上下拖动后也要跟着走）。 */
-    private int convoChromeY(int h) {        int y = Math.round(screenH * 0.70f);
-        if (glView != null) {
-            int[] loc = new int[2];
-            glView.getLocationOnScreen(loc);
-            int glassBottom = loc[1] + winH - Math.round(dp(24));   // 窗口含 24dp 留白
-            y = glassBottom - h - Math.round(dp(12));  // 玻璃内部、离底边 12dp（再抬高一点，图标不会顶出玻璃）
-        }
-        return Math.max(Math.round(dp(80)), Math.min(y, screenH - h - Math.round(dp(12))));
-    }
+    /** 兼容老调用点（拖动球以后要重新摆一下输入行）。 */
+    private void updateConvoChrome() { syncComposerBar(); }
 
-    private void updateConvoChrome() {
-        if (!convoOpen || convoBar == null || convoBarParams == null) return;
-        int h = convoBarParams.height;
-        int y = convoChromeY(h);
-        if (siriText != null && siriText.getWidth() > dp(120)) {
-            int w2 = Math.max(Math.round(dp(160)),
-                    Math.min(Math.min(screenW - Math.round(dp(48)), siriText.getWidth()),
-                            Math.round(2f * glassHalfW()) - Math.round(dp(28))));
-            if (Math.abs(w2 - convoBarParams.width) > 2) {
-                convoBarParams.width = w2;
-                convoBarParams.x = (screenW - w2) / 2;
-                try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
-            }
-        }
-        if (Math.abs(convoBarParams.y - (y - Math.round(winY0()))) < 2) return;
-        convoBarParams.y = y - Math.round(winY0());
-        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+    /** 这条输入行现在发给谁：卡里 = 卡的会话；回复页 = 刚回我话的那条；都没有 = 新会话。 */
+    private String composerTargetSession() {
+        if (convoOpen && convoSessionId != null && !convoSessionId.isEmpty()) return convoSessionId;
+        if (asstSessionId != null && !asstSessionId.isEmpty()) return asstSessionId;
+        if (replySessionId != null && !replySessionId.isEmpty()) return replySessionId;
+        return null;
     }
 
     /**
-     * 对话卡里发一条：自己发 + 轮询回答，球内始终显示「你：<这句> + 最新回复」。
+     * 输入行回车：**一个入口**（回复页 / 会话卡 / 新会话都从这儿走）。
+     *
+     * 在回复页上打字 = 接着这条会话说下一句 → 顺手把这条会话开成会话卡
+     * （用户要的"两个页面其实是同一个东西"：界面不换，只把这一轮接上去）。
+     */
+    private void composerSubmit(String text) {
+        String t = text == null ? "" : text.trim();
+        if (t.isEmpty()) return;
+        if (convoBar != null) {
+            convoBar.setText("");
+            convoBar.setHint("已发出 · 等待回复…");
+        }
+        String target = composerTargetSession();
+        if (target == null || target.isEmpty()) {
+            Log.i("FloatingBall", "composer: 没有目标会话 → 发到新会话「" + t + "」");
+            sendTextNewSession(t, null);
+            return;
+        }
+        if (!convoOpen || !target.equals(convoSessionId)) {
+            // 回复页（或球里还挂着别的会话的字）→ 先把这条会话开成卡
+            String title = target.equals(replySessionId) && convoTitle != null ? convoTitle : null;
+            Log.i("FloatingBall", "composer: 回复页发送 → 接进会话 " + target + " 的卡");
+            openConversation(target, title);
+        }
+        convoSend(target, t);
+    }
+
+    /**
+     * 会话卡里发一条：自己发 + 轮询会话内容。
      *
      * 为什么不用 SiriAssistant.askIn：它会把球内文字整体替换成助手回复，
-     * 于是"我刚发了什么"立刻消失（用户报的就是这个）。这里改成自己维护一段合成文本。
+     * 于是"我刚发了什么"立刻消失（用户报的就是这个）。
+     *
+     * ★ 2026-11-09：轮询回来的不再是"最后一句回答"，而是**整段会话的 markdown**
+     *   （`sessionTranscript`）—— 用户要的是"能显示表格的那种"回话显示，球内文字层
+     *   本来就是 BallMarkdownView，喂原始 markdown 就自动排出标题/列表/表格。
      */
     private void convoSend(final String sid, final String text) {
         final File attach = pendingAttach;
         final String attachName = pendingAttachName;
         convoLastUser = text;
         if (attach != null && attach.length() > 8L * 1024 * 1024) {
-            setSiriText("· 文件太大（" + (attach.length() / 1024 / 1024) + " MB），上限 8 MB，未发送");
+            setSiriText(convoView("· 文件太大（" + (attach.length() / 1024 / 1024) + " MB），上限 8 MB，未发送"));
             if (convoBar != null) convoBar.setHint("文件太大，未发送");
             clearAttachment();
             return;
         }
         convoHadText = true;
-        String echo = convoLastUserBlock();
-        if (attach != null) echo += "\n［附件］" + (attachName == null ? attach.getName() : attachName);
-        setSiriText(echo + "\n\n· 已发出，等待回复…");
+        final int gen = ++convoGen;
+        if (attach != null) convoLastUser = text + "\n［附件］" + (attachName == null ? attach.getName() : attachName);
+        setSiriText(convoView("· 已发出，等待回复…"));
         final DshApi api = DshApi.get(this);
         new Thread(new Runnable() {
             @Override public void run() {
@@ -9687,23 +9898,29 @@ public class FloatingBallService extends Service {
                     final String m = message(t);
                     main.post(new Runnable() {
                         @Override public void run() {
-                            setSiriText(convoLastUserBlock() + "\n\n· 发送失败：" + m);
+                            setSiriText(convoView("· 发送失败：" + m));
                             if (convoBar != null) convoBar.setHint("发送失败：" + m);
                         }
                     });
                     return;
                 }
-                String last = "";
+                String last = convoTranscriptCache == null ? "" : convoTranscriptCache;
                 for (int i = 0; i < 60; i++) {          // 最长等 ~72s
                     try { Thread.sleep(1200); } catch (InterruptedException e) { return; }
-                    if (!convoOpen || !sid.equals(convoSessionId)) return;
-                    String ans = "";
-                    try { ans = api.lastAnswer(sid); } catch (Throwable ignored) { }
-                    if (ans != null && !ans.trim().isEmpty() && !ans.equals(last)) {
-                        last = ans;
-                        final String shown = convoLastUserBlock() + "\n\n" + ans;
+                    if (gen != convoGen) return;
+                    if (convoOpen && !sid.equals(convoSessionId)) return;
+                    String tr = "";
+                    try { tr = api.sessionTranscript(sid, 60); } catch (Throwable ignored) { }
+                    if (tr != null && !tr.equals(last)) {
+                        last = tr;
+                        final String shown = tr;
                         main.post(new Runnable() {
-                            @Override public void run() { setSiriText(shown); }
+                            @Override public void run() {
+                                if (gen != convoGen) return;
+                                convoTranscriptCache = shown;
+                                setSiriText(convoView(null));
+                                scrollConvoToEnd();
+                            }
                         });
                     }
                 }
@@ -9711,7 +9928,47 @@ public class FloatingBallService extends Service {
         }, "convo-send").start();
     }
 
+    /**
+     * 会话卡滚到**最新**那一头（聊天习惯：新的话在下面）。
+     *
+     * 球内文字窗是 `ScrollView`，会话记录是"你 / AI"一段段往下排的；打开卡时如果停在顶部，
+     * 用户看到的就是这段会话**最早**那几句 —— 那不是他要的「回话内容」。
+     */
+    private void scrollConvoToEnd() {
+        if (!convoOpen || siriText == null) return;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!convoOpen || siriText == null) return;
+                try { siriText.fullScroll(View.FOCUS_DOWN); } catch (Throwable ignored) { }
+            }
+        }, 260);
+    }
+
+    /** 会话卡当前内容的缓存（markdown）：发消息时先把它和新发的那句拼起来立刻显示。 */
+    private volatile String convoTranscriptCache = "";
+
     private String convoLastUser = "";
+
+    /**
+     * 会话卡要显示的文字 = **已有记录** + （还没进记录里的）我刚发的那句 + 状态行。
+     *
+     * 记录里已经含这句（`sessionTranscript` 刷出来了）就不重复追加 —— 否则屏幕上会出现
+     * 两个「你」。
+     */
+    private String convoView(String status) {
+        StringBuilder sb = new StringBuilder(
+                convoTranscriptCache == null ? "" : convoTranscriptCache.trim());
+        String mine = convoLastUser == null ? "" : convoLastUser.trim();
+        if (!mine.isEmpty() && sb.indexOf(mine) < 0) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("**你**\n\n").append(mine);
+        }
+        if (status != null && !status.isEmpty()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append(status);
+        }
+        return sb.toString();
+    }
 
     private String convoLastUserBlock() {
         return convoLastUser == null || convoLastUser.trim().isEmpty()
@@ -9729,13 +9986,17 @@ public class FloatingBallService extends Service {
     private void closeConversation(String why) {
         if (!convoOpen) return;
         convoOpen = false;
+        convoGen++;                             // 还在路上的读会话/轮询一律作废
         convoBarHiddenBySearch = false;
         Log.i("FloatingBall", "convo: 退出对话（" + why + "）");
         try {
             if (convoBar != null && wm != null) wm.removeView(convoBar);
         } catch (Throwable ignored) { }
         convoBar = null;
+        composerShown = false;
         convoSessionId = null;
+        convoTranscriptCache = "";
+        convoLastUser = "";
         targetSessionId = null;                 // 关掉对话卡 = 回到"默认新会话"的语义
         targetSessionTitle = null;
         setSiriText("");
@@ -9959,8 +10220,9 @@ public class FloatingBallService extends Service {
             suppressConvoAutoClose = false;
             if (convoSessionId != null) {
                 setSiriText(convoStashText == null ? "" : convoStashText);
-                if (convoBar != null) convoBar.setVisibility(View.VISIBLE);
-                updateConvoChrome();
+                main.postDelayed(new Runnable() {
+                    @Override public void run() { syncComposerBar(); }
+                }, 80);
                 Log.i("FloatingBall", "convo: 参数面板关闭，恢复对话内容");
             }
         }
@@ -10687,12 +10949,14 @@ public class FloatingBallService extends Service {
         sqPhase = 1;
         final long gen = ++searchGen;
         forceHideAllText();                          // 球内文字先藏掉（siriStr 留着，出来还在）
-        // 对话卡开着的时候，卡片自己那条输入行是**另一个窗口**：不藏起来就会和胶囊
-        // 同时出现在屏幕上（用户 2026-11-06：「聊天界面里连按两下，输入框显示有问题」）。
-        if (convoOpen && convoBar != null && convoBar.getVisibility() == View.VISIBLE) {
+        // 会话面那条输入行是**另一个窗口**：不藏起来就会和搜索胶囊同时出现在屏幕上
+        // （用户 2026-11-06：「聊天界面里连按两下，输入框显示有问题」）。
+        // 现在可见性统一由 syncComposerBar() 判（searchActive 为真 → 一律收起）。
+        if (composerShown) {
             convoBarHiddenBySearch = true;
-            convoBar.setVisibility(View.GONE);
-            Log.i("FloatingBall", "search: 先藏起对话卡的输入行（避免两条输入框叠着）");
+            composerShown = false;
+            if (convoBar != null) convoBar.setVisibility(View.GONE);
+            Log.i("FloatingBall", "search: 先藏起会话面的输入行（避免两条输入框叠着）");
         }
         applyBallTouchability();                     // 搜索期间屏幕归搜索层
         // ── 记下球此刻的屏幕球心（小黑球从这儿出生）── 必须在窗口改尺寸之前算
@@ -10892,14 +11156,9 @@ public class FloatingBallService extends Service {
         if (gen != searchGen) return;
         Log.i("FloatingBall", "search: 收回到顶部黑边，交还给球");
         searchCapsH = SQ_CAP_H;                        // 下次进场从标准高度开始
-        if (convoBarHiddenBySearch) {                  // 对话卡的输入行放回来
+        if (convoBarHiddenBySearch) {                  // 输入行交还给 syncComposerBar 重新判
             convoBarHiddenBySearch = false;
-            if (convoOpen && convoBar != null) {
-                convoBar.setVisibility(View.VISIBLE);
-                convoBar.resetMaterial();
-                convoBar.materialize(true, 0);
-                Log.i("FloatingBall", "search: 收回 → 对话卡输入行回来");
-            }
+            Log.i("FloatingBall", "search: 收回 → 输入行交给 syncComposerBar 重新判");
         }
         searchActive = false;                          // 先交还几何通道，下面立刻把窗口收回球窗
         glassFullscreen = false;                       // ★ 面板标志不清，updateSiriWindow 会一直早退 → 球窗停在全屏、样式全变
@@ -11451,6 +11710,33 @@ public class FloatingBallService extends Service {
         }
         // convo-latest → 直接打开最近一条会话（验证"切回对话"那张卡的玻璃/排版用；
         // 真机上切回对话只能靠长按卡片选，纯脚本很难卡准）
+        // convo-open → 打开**指定**会话（文件内容 = sessionId 或标题里的一段；
+        // 也支持 `session-xxx` 前缀匹配）。给"要看某一条带表格的会话"取证用。
+        File fConvoOpen = new File(dir, "convo-open");
+        if (fConvoOpen.exists()) {
+            final String want = readSmallString(fConvoOpen, 200).trim();
+            fConvoOpen.delete();
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        DshApi api = DshApi.get(FloatingBallService.this);
+                        DshApi.SessionRow hit = null;
+                        for (DshApi.SessionRow r : api.sessions()) {
+                            if (r.id.equals(want) || r.id.startsWith(want)
+                                    || (r.title != null && r.title.contains(want))) { hit = r; break; }
+                        }
+                        if (hit == null) { Log.w("FloatingBall", "convo-open: 找不到 " + want); return; }
+                        final DshApi.SessionRow r = hit;
+                        main.post(new Runnable() {
+                            @Override public void run() { openConversation(r.id, r.title); }
+                        });
+                        Log.i("FloatingBall", "convo-open: 打开「" + r.title + "」" + r.id);
+                    } catch (Throwable t) {
+                        Log.w("FloatingBall", "convo-open 失败 " + message(t));
+                    }
+                }
+            }, "convo-open").start();
+        }
         File fConvoLatest = new File(dir, "convo-latest");
         if (fConvoLatest.exists()) {
             fConvoLatest.delete();

@@ -85,6 +85,8 @@
 | `bar-type` | 只把字填进状态 2 的输入框（不发送） |
 | `menu-dirs` / `menu-settings` / `menu-search` | 直接叫出对应玻璃菜单（`menu-search` 内容 = 关键词） |
 | `convo-latest` | 直接打开最近一条会话（切回对话卡，脚本里不用真去点列表） |
+| `convo-open` | 打开**指定**会话（内容 = sessionId 前缀 / 标题片段）—— 验「带表格的那条会话」用 |
+| `convo-send` | 往当前会话卡里发一条（内容 = 要发的字） |
 | `ballshot` | 让球/玻璃窗自己存一帧到 `files/ball-capture.png`（状态 3、菜单、对话卡都能拍） |
 | `show-glass` / `hide-glass` | 玻璃是否**留在系统抓屏里**（开着才能用 `screencap` 看合成效果；**平时必须关**，否则折射会自采样） |
 | `debug_show_glass_in_shot`（prefs） | true = 玻璃留在抓屏里，方便一次看清合成效果；**生产必须 false** |
