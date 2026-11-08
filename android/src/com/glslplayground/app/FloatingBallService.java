@@ -3119,7 +3119,7 @@ public class FloatingBallService extends Service {
     }
 
     private void applyFluidSize(int pct) {
-        pct = Math.max(30, Math.min(150, pct));
+        pct = Math.max(10, Math.min(400, pct));
         prefs().edit().putInt("float_fluid_size", pct).apply();
         if (renderer != null) renderer.fluidSize = pct / 100f;
     }
@@ -3167,7 +3167,7 @@ public class FloatingBallService extends Service {
     private void applyFluidPrefs() {
         if (renderer == null) return;
         renderer.fluidRibs  = Math.max(4, Math.min(24, prefs().getInt("float_fluid_ribs", 12)));
-        renderer.fluidSize  = Math.max(0.3f, Math.min(1.5f, prefs().getInt("float_fluid_size", 100) / 100f));
+        renderer.fluidSize  = Math.max(0.1f, Math.min(4.0f, prefs().getInt("float_fluid_size", 100) / 100f));
         renderer.fluidHot   = Math.max(0f, Math.min(2f, prefs().getInt("float_fluid_hot", 100) / 100f));
         renderer.fluidGain  = Math.max(0.2f, Math.min(3f, prefs().getInt("float_fluid_gain", 100) / 100f));
         renderer.fluidDash  = Math.max(0f, Math.min(24f, prefs().getInt("float_fluid_dash", 0) / 100f));

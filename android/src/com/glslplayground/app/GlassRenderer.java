@@ -463,10 +463,13 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 坐标：和 orbScenePx 同一套（环半径 = uOrbRadius 屏幕像素），
         //       所以球体大小/形状一变，这团光跟着一起缩，不会跑出去。
         "float fh11(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }\n" +
-        "float fn2(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n" +
+        "float fn2(vec2 p){ vec2 i=floor(p), f=fract(p);\n" +
+        "  f=f*f*f*(f*(f*6.0-15.0)+10.0);\n" +
         "  return mix(mix(fh11(i),fh11(i+vec2(1,0)),f.x), mix(fh11(i+vec2(0,1)),fh11(i+vec2(1,1)),f.x), f.y); }\n" +
-        "float ffbm3(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<3;i++){ s+=a*fn2(p); p=p*2.03+19.7; a*=0.5; } return s; }\n" +
-        "float ffbm2(vec2 p){ float s=0.0,a=0.55; for(int i=0;i<2;i++){ s+=a*fn2(p); p=p*2.11+7.3; a*=0.45; } return s; }\n" +
+        "float ffbm3(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<3;i++){ s+=a*fn2(p);\n" +
+        "  p = mat2(0.80,0.60,-0.60,0.80) * p * 2.03 + 19.7; a*=0.5; } return s; }\n" +
+        "float ffbm2(vec2 p){ float s=0.0,a=0.55; for(int i=0;i<2;i++){ s+=a*fn2(p);\n" +
+        "  p = mat2(0.80,0.60,-0.60,0.80) * p * 2.11 + 7.3; a*=0.45; } return s; }\n" +
         "vec3 hue2rgbF(float h){ h=fract(h);\n" +
         "  return vec3(clamp(abs(h*6.0-3.0)-1.0,0.0,1.0), clamp(2.0-abs(h*6.0-2.0),0.0,1.0), clamp(2.0-abs(h*6.0-4.0),0.0,1.0)); }\n" +
         "vec3 rotFY(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(c*v.x+s*v.z, v.y, -s*v.x+c*v.z); }\n" +
@@ -487,20 +490,21 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float lat = asin(clamp(v.y,-1.0,1.0)); float lon = atan(v.x, v.z);\n" +
         "  float wn  = ffbm3(vec2(cos(lon),sin(lon))*1.15 + vec2(lat*0.85, t*0.16));\n" +
         "  float wn2 = ffbm2(vec2(cos(lon),sin(lon))*2.4  - vec2(lat*0.70, t*0.11));\n" +
-        "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*4.6  + vec2(lat*2.3, t*0.27));\n" +
-        "  float foreshorten = 0.42 + 0.58*z;                 // 越靠轮廓线越密\n" +
+        "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*2.2  + vec2(lat*1.1, t*0.22));\n" +
+        "  float foreshorten = 0.85 + 0.15*z;                 // 只在最边上稍微收一点，别压成细直线\n" +
         "  float spacing = 3.14159265/max(dens, 3.0);\n" +
         "  float shear = 0.30*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
         // 摆动幅度调大、再叠一层碎噪声：丝线不再是"一圈一圈很规整"，而是被水流扯得乱晃
         // 每根丝线自己的 id/随机相位（必须在 f 之前定，后面颜色也用它）
         "  float band = floor((lat + shear)/spacing + 0.5);\n" +
         "  float hb = fh11(vec2(band, side*7.0));\n" +
-        "  float latWarp = (wn-0.5)*0.70 + (wn3-0.5)*0.35\n" +
-        "                + 0.22*sin(lon*2.0 + t*0.5 + hb*6.2831853);\n" +
+        "  float latWarp = (wn-0.5)*0.95 + (wn3-0.5)*0.12\n" +
+        "                + 0.20*sin(lon*2.0 + t*0.5 + hb*6.2831853)\n" +
+        "                + 0.07*sin(lon*5.0 - t*0.7 + lat*4.0);\n" +
         "  float f = (lat + latWarp + shear)/spacing;\n" +
         "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
 
-        "  float thick = 0.40 + 1.30*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
+        "  float thick = 0.72 + 0.55*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
         // 先算"这根丝线这一段有多亮/有多热"，再决定芯的粗细 —— 热点处芯会变粗、变白
         "  float segN = ffbm2(vec2(band*0.73, hb*4.0 + t*0.13));\n" +
         "  float hotN = ffbm2(vec2(lat*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
@@ -518,7 +522,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float dash = smoothstep(0.02, 0.10, dph) * (1.0 - smoothstep(duty, duty+0.12, dph));\n" +
         "  g *= mix(1.0, dash, dashOn);\n" +
         // 每根丝线自己的亮度权重 + 缓慢游走的"热点"：少数段落烧到白、其余偏柔
-        "  float wSeg = mix(0.12, 1.60, segN);\n" +
+        "  float wSeg = mix(0.55, 1.40, segN);\n" +
         "  vec3 base;\n" +
         "  if(uFluidColorMode < 0.5)      base = vec3(0.96, 0.98, 1.00);        // 纯白\n" +
         "  else if(uFluidColorMode < 1.5) base = uFluidColor;                    // 单色\n" +
@@ -530,13 +534,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float depth = (side > 0.0) ? 1.0 : 0.26;                   // 背面暗 → 有厚度\n" +
         // 芯 + 宽光晕：球很小，只有芯就像玻璃碴；加一层 exp 晕才是"发光"
         "  float core = g * (wSeg * (1.0 + hot*2.6) + hot*1.2);\n" +
-        "  float halo = 0.16 * exp(-sdN * 2.8);\n" +
-        "  return c * (core + halo) * (lit + rimL) * depth;\n" +
+        "  float halo = 0.10 * exp(-sdN * 3.0);\n" +
+        // 侧对着镜头的那圈丝线会被压成又细又直的"发丝"（用户嫌像被裁了一刀）——直接让它们淡出，
+        // 只留正面那几根幅度大、会发光的主线。
+        "  float facing = smoothstep(0.16, 0.58, z);\n" +
+        "  return c * (core + halo) * (lit + rimL) * depth * facing;\n" +
         "}\n" +
         "vec3 fluidScenePx(vec2 localPx, float hx, float hy, float t){\n" +
         // 半径按**形状**给（短半轴 × uFluidSize），不是按圆点环：
         // 胶囊/方卡里这团光都会正好铺在中间，不会因为 orbRadius 被 shapeK 放大而只看到中间几条。
-        "  float R = max(min(hx, hy) * 0.62 * max(uFluidSize, 0.2), 6.0);\n" +
+        "  float R = max(min(hx, hy) * 0.62 * max(uFluidSize, 0.05), 3.0);\n" +
         "  vec2 q = (localPx - vec2(0.0, -uOrbOffset*hy*0.5)) / R;\n" +
         // 呼吸：半径在收缩/扩散（用户要的"在水里"）
         "  float pulse = 0.10*sin(t*0.55) + 0.045*sin(t*1.27+2.1);\n" +
@@ -556,10 +563,12 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    float body = exp(-r*r*2.6) * smoothstep(1.05, 0.6, r);\n" +
         "    vec3 bc = (uFluidColorMode < 0.5) ? vec3(0.96,0.98,1.0)\n" +
         "            : ((uFluidColorMode < 1.5) ? uFluidColor : hue2rgbF(0.5));\n" +
-        "    col += bc * body * 0.16;\n" +
-        "    float edge = smoothstep(1.05, 0.85, r);\n" +
+        "    col += bc * body * 0.09;\n" +
+        "    float edge = smoothstep(1.02, 0.70, r);\n" +
         "    col += fluidShell(wq,  1.0, t, uFluidRibs) * edge;\n" +
-        "    col += fluidShell(wq, -1.0, t, uFluidRibs) * edge;\n" +
+        // 背面那半颗只在很暗的地方露出来，会变成"一根根不亮的线"、像建模的棱边 —— 直接不画。
+        // （要厚度感就靠球面透视 + 受光，不靠背面线框。）
+        "    // col += fluidShell(wq, -1.0, t, uFluidRibs) * edge;\n" +
         "  }\n" +
         "  return col * max(uFluidGain, 0.0);\n" +
         "}\n" +
@@ -694,6 +703,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    waveEff += wglow*(0.25 + 0.6*below);\n" +
         "    vec3 orbRaw = mix(orbScenePx(cw, uHalf.x, uHalf.y, iTime),\n" +
         "                      fluidScenePx(cw, uHalf.x, uHalf.y, iTime), clamp(uFluid,0.0,1.0));\n" +
+        // 体量调到很大时，丝线会顶到球形的平边、被"切一刀"——在球内缩 26px 就开始淡出，
+        // 于是再大也是柔和地消失在黑里，不会出现直边。
+        "    float shapeFade = smoothstep(0.0, -26.0*uScale, sd);\n" +
+        "    orbRaw *= mix(1.0, shapeFade, clamp(uFluid, 0.0, 1.0));\n" +
         "    vec3 orbEff = pow(max(orbRaw, 0.0), vec3(1.0/1.2)) * uOrbGain;\n" +
         // 边缘辉光必须跟着光效自己的亮度：Siri 波用波的颜色（很暗），圆点若用固定满值
         // (0.80,0.95,1.25)，球壳高光/赤道线/底缘会整体亮 5 倍 —— 「思考中球边缘太亮」的根源。
@@ -708,13 +721,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float mid=(b0+b1)*0.5;\n" +
         "  float eqLine = smoothstep(b0,mid,ny)*smoothstep(b1,mid,ny);\n" +
         "  float horiz = 1.0 - abs(c.x)/uHalf.x*0.3;\n" +
-        "  col += vec3(0.95,0.97,1.0)*eqLine*horiz*uEdgeBleed*(1.0 - uDropMode);\n" +
+        "  float fluidK = 1.0 - clamp(uFluid, 0.0, 1.0);\n" +                 // 流体模式：球面不要任何"模板线"
+        "  col += vec3(0.95,0.97,1.0)*eqLine*horiz*uEdgeBleed*(1.0 - uDropMode)*fluidK;\n" +
         "  float bottomRim = smoothstep(-14.*uScale,-2.*uScale,sd) * smoothstep(0.0,-0.6,-ny);\n" +
-        "  col += vec3(0.85,0.88,0.95) * bottomRim * uEdgeBleed * 0.5 * (1.0 - uDropMode);\n" +
+        "  col += vec3(0.85,0.88,0.95) * bottomRim * uEdgeBleed * 0.5 * (1.0 - uDropMode) * fluidK;\n" +
         "  col += wglow * uWaveAmp * (eqLine*horiz + bottomRim) * 0.9;\n" +
         "  float shell = smoothstep(3.0*uScale, 0.0, abs(sd + 2.5*uScale));\n" +
         "  float shellLit = 0.30 + 0.70*smoothstep(0.3, -0.9, ny);\n" +
-        "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit * (1.0 - 0.5*uDropMode);\n" +
+        "  col += (vec3(0.10,0.11,0.13) + wglow*uWaveAmp*1.2) * shell * shellLit * (1.0 - 0.5*uDropMode) * fluidK;\n" +
         "  float aa = smoothstep(1.5, -1.5, sd);\n" +
         "  aa *= mix(1.0, panelFade, blackMask*uTopDarken*tBlackK);\n" +   // 面板底半透明，玻璃照旧
 
