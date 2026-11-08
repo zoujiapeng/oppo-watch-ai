@@ -101,7 +101,7 @@ public final class AnimScene {
             out.put(anim(A_OFF, "none", "关闭", "这个状态不出动画（只留水晶球本身）", new JSONObject[0]));
 
             out.put(anim(A_WAVE, "wave", "Siri 波",
-                    "原版那道波：贴着球底 / 黑区起伏，最终回复时会沉进玻璃里被折射",
+                    "原版那道波：贴着球底 / 黑区起伏；默认和 Liquid Glass 页面同一条（不被镜片掰弯），想要旧版沉底就把「沉入玻璃」打开",
                     new JSONObject[]{
                             param("amp", "波动幅度", 20, 400, 5, 190, "pct"),
                             param("scale", "波长缩放", 30, 200, 5, 85, "pct"),
@@ -109,7 +109,7 @@ public final class AnimScene {
                             param("speed", "速度", 20, 300, 5, 100, "pct"),
                             // 0 = 和 Liquid Glass 页面那条波完全一样的画法（默认）；
                             // 1 = 旧版"最终回复"那种：整道波沉到球底下方、只露波顶一截
-                            param("inglass", "沉入玻璃 0普通 1沉底", 0, 1, 1, 0, "mode")
+                            param("inglass", "沉入玻璃（旧版）", 0, 1, 1, 0, "onoff")
                     }));
 
             out.put(anim(A_DOTS, "dots", "流体圆点 dots",

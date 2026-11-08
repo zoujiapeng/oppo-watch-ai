@@ -1365,6 +1365,7 @@
       case 'ny': return (v / 100).toFixed(2);
       case 'count': return String(Math.round(v));
       case 'mode': return ['纯白', '单色', '混色'][v] || String(v);
+      case 'onoff': return v ? '沉底' : '普通';
       default: return String(v);
     }
   }
