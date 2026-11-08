@@ -76,13 +76,13 @@ public class PowerBallReceiver extends BroadcastReceiver {
         if (FloatingBallService.running && FloatingBallService.isComposerOpen()) {
             Log.i(TAG, "输入框开着 → 长按电源键 = 发字（框里没字就开麦）");
             FloatingBallService.setUiHidden(false, "电源键发送");
-            tellService(app, "text", false, "last", "power_key");
+            tellService(app, "text", false, "auto", "power_key");
             return;
         }
         // ③ 球没开 / 开着但没在按住说话 → 呼出球并开始按住说话
         if (FloatingBallService.running) {
             Log.i(TAG, "球已开着 → 直接开始按住说话");
-            tellService(app, "start", true, "last", "power_key");
+            tellService(app, "start", true, "auto", "power_key");
             return;
         }
         if (!Settings.canDrawOverlays(app)) {
@@ -96,7 +96,7 @@ public class PowerBallReceiver extends BroadcastReceiver {
             return;
         }
         Log.i(TAG, "呼出球 + 开始按住说话");
-        tellService(app, "start", true, "last", "power_key");
+        tellService(app, "start", true, "auto", "power_key");
     }
 
     /**
@@ -114,15 +114,15 @@ public class PowerBallReceiver extends BroadcastReceiver {
             // ★ 2026-11-07：没在语音、但输入框开着 → 发到**全新会话**（框里没字就什么都不做）。
             //   判断交给服务主线程做，避免广播线程读到旧标志。
             if (FloatingBallService.isComposerOpen()) {
-                Log.i(TAG, "音量减：输入框开着 → 发送到全新会话");
-                tellService(app, "text", false, "new", "vol_key");
+                Log.i(TAG, "音量减：输入框开着 → 按「发送目标」发送");
+                tellService(app, "text", false, "auto", "vol_key");
                 return;
             }
             Log.i(TAG, "音量减：没在按住说话、输入框也没开 → 不做事");
             return;
         }
-        Log.i(TAG, "音量减 → 结束按住说话 → 发到全新会话");
-        tellService(app, "stop", false, "new", "vol_key");
+        Log.i(TAG, "音量减 → 结束按住说话 → 按「发送目标」发送");
+        tellService(app, "stop", false, "auto", "vol_key");
     }
 
     /**

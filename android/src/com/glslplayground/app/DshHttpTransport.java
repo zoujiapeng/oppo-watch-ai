@@ -386,7 +386,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         while (mirrorRunning) {
             try {
                 if (cookie == null) authenticate();
-                final String session = pickSession();
+                final String session = pickActiveSession();
                 mirrorSession = session;
                 DshWebSocket ws = new DshWebSocket();
                 mirrorSocket = ws;
@@ -409,18 +409,35 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         }
     }
 
-    /** 每 20 秒看一次当前会话有没有变（DSH 里切换对话 / 新建会话）。 */
+    /** 这条会话这一轮结束时置位：立刻重新挑一次「正在活动的会话」。 */
+    private volatile boolean mirrorRecheck = false;
+
+    /**
+     * 盯着「现在该跟哪条会话」。
+     *
+     * 以前 20 秒才看一次，而且只看"最近更新"—— 于是 A 会话那一轮结束了，
+     * 球还挂在 A 上回待机，明明 B 正在跑。现在：
+     *   · 0.5s 一跳，每 ~3s（或收到 turn/end 的强制标记时）重新挑；
+     *   · 挑的时候优先正在跑的会话（pickActiveSession）；
+     *   · 变了就关掉旧 WS，外层 mirrorLoop 会连到新的那条。
+     */
     private void mirrorWatch() {
+        int tick = 0;
         while (mirrorRunning) {
-            sleep(20000);
+            sleep(500);
             if (!mirrorRunning) return;
+            boolean force = mirrorRecheck;
+            if (!force && ++tick < 6) continue;
+            tick = 0;
+            mirrorRecheck = false;
             try {
-                String current = pickSession();
-                if (mirrorSession != null && !mirrorSession.equals(current)) {
+                String active = pickActiveSession();
+                if (mirrorSession != null && !mirrorSession.equals(active)) {
+                    Log.i(TAG, "镜像：切会话 " + mirrorSession + " → " + active);
                     DshWebSocket ws = mirrorSocket;
                     if (ws != null) ws.close();          // 关掉旧流，外层循环会连到新会话
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) { }
         }
     }
 
@@ -453,6 +470,8 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 String body = textOf(ev);
                 if (body != null && !body.trim().isEmpty()) cb.onFinal(body);
             } else if ("turn/end".equals(type)) {
+                // 这一轮结束了：马上重新挑「正在活动的会话」（别的会话可能正在跑）
+                mirrorRecheck = true;
                 // ⚠️ 这里**不要**清「执行中」：DSH 的 turn/end 比命令真正结束早得多
                 //    （实测 turn/end 到 tool/result 隔着十几秒）。清掉的话，
                 //    整段「运行命令」期间球显示的是待机动画 —— 用户报的就是这个。
@@ -549,6 +568,59 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
      * 刻意不记住上次用的会话：镜像要跟着「你正在聊的那条」，在浏览器里
      * 换了对话、或新开一条，球就跟着走；只有一条都没有时才新建。
      */
+    /**
+     * 镜像跟哪条会话。
+     *
+     * ★ 2026-11-08 用户要求：「对应的窗口结束没活动、回待机时，动画要自动对到正在活动的别的回话」。
+     *   所以先看有没有 **running=true** 的会话（DSH 正在跑这一轮），有就跟它；
+     *   都在闲着才退回"最近更新的那条"（原来的行为）。
+     */
+    private String pickActiveSession() throws Exception {
+        JSONObject value = rpc("session/list", listArgs());
+        JSONArray items = value == null ? null : value.optJSONArray("items");
+        String busiest = null;
+        long busiestAt = -1;
+        String newest = null;
+        long newestAt = -1;
+        boolean followingStillRunning = false;
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject it = items.getJSONObject(i);
+                if ("subagent".equals(it.optString("origin"))) continue;
+                String sid = it.optString("sessionId");
+                if (sid == null || sid.isEmpty()) continue;
+                long at = it.optLong("updatedAt", 0);
+                if (at > newestAt) { newestAt = at; newest = sid; }
+                boolean running = it.optBoolean("running", false);
+                if (running && sid.equals(mirrorSession)) followingStillRunning = true;
+                if (running && at > busiestAt) { busiestAt = at; busiest = sid; }
+            }
+        }
+        // ⚠ 正在跟的那条**还在跑**就别切走 —— 否则两条会话同时在跑时会每 3 秒来回跳。
+        //   只有「当前这条结束了 / 没了」才切到别的正在活动的会话上（用户要的正是这个）。
+        String best;
+        if (followingStillRunning && mirrorSession != null) {
+            best = mirrorSession;
+        } else {
+            best = busiest != null ? busiest : newest;
+            if (busiest != null && !busiest.equals(mirrorSession)) {
+                Log.i(TAG, "镜像：当前会话已停，切到正在活动的 " + busiest);
+            }
+        }
+        if (best != null && best.equals(mirrorSession)) return best;
+        if (best == null || best.isEmpty()) {
+            JSONObject args = new JSONObject();
+            JSONObject req = new JSONObject();
+            req.put("cwd", app.getFilesDir().getAbsolutePath());
+            args.put("request", req);
+            JSONObject created = rpc("session/create", args);
+            best = created == null ? null : created.optString("sessionId");
+        }
+        if (best == null || best.isEmpty()) throw new IOException("没有可用的 DSH 会话");
+        prefs.edit().putString("session_id", best).apply();
+        return best;
+    }
+
     private String pickSession() throws Exception {
         JSONObject value = rpc("session/list", listArgs());
         JSONArray items = value == null ? null : value.optJSONArray("items");

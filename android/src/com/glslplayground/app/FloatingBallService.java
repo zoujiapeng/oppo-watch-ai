@@ -6453,8 +6453,10 @@ public class FloatingBallService extends Service {
         //   start = 球出来 + 直接进「按住说话」；
         //   stop  = 收麦 → 转写 → 发送：默认发回「上一次回话」（pk_send=new 时发全新会话）。
         final String pkHold = intent == null ? null : intent.getStringExtra("pk_hold");
-        final boolean pkNewSession =
-                intent != null && "new".equals(intent.getStringExtra("pk_send"));
+        // pk_send: "new" = 全新会话 / "last" = 上一次回话 / 缺省或 "auto" = 跟「发送目标」设置走
+        final String pkSend = intent == null ? null : intent.getStringExtra("pk_send");
+        final boolean pkNewSession = (pkSend == null || "auto".equals(pkSend))
+                ? sendToNewSession() : "new".equals(pkSend);
         final boolean pkFromVolume =
                 intent != null && "vol_key".equals(intent.getStringExtra("pk_from"));
         if ("stop".equals(pkHold)) {
@@ -7277,16 +7279,16 @@ public class FloatingBallService extends Service {
         final String cwd = holdCwd();
         final String remembered = toNewSession ? "" : lastTalkSession();
         if (toNewSession) {
-            Log.i("FloatingBall", "音量减键：发到全新会话（cwd=" + cwd + "，插话模式）");
+            Log.i("FloatingBall", "发送目标=新会话（cwd=" + cwd + "，插话模式）");
             sendTextNewSessionTo(cwd, text, null, SiriAssistant.Transport.MODE_STEER);
             return;
         }
         if (remembered.isEmpty()) {
-            Log.i("FloatingBall", "电源键：还没有「上一次回话」→ 新建一条（cwd=" + cwd + "）");
+            Log.i("FloatingBall", "发送目标=上一个对话，但还没有记录 → 新建一条（cwd=" + cwd + "）");
             sendTextNewSessionTo(cwd, text, null, SiriAssistant.Transport.MODE_STEER);
             return;
         }
-        Log.i("FloatingBall", "电源键：回到上一次回话 " + remembered);
+        Log.i("FloatingBall", "发送目标=上一个对话 → " + remembered);
         final DshApi api = DshApi.get(this);
         new Thread(new Runnable() {
             @Override public void run() {
@@ -7397,15 +7399,34 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 状态 2 的发送目标：有选中会话就发给它，否则按"新会话 + 当前参数档"发。 */
+    /**
+     * 发送目标（一条设置，三处共用）：
+     *   false = 上一个对话（当前会话）  true = 新会话
+     * 共用方：① 胶囊输入框回车 ② 电源键 ③ 音量减键（见 pk_send="auto"）。
+     */
+    boolean sendToNewSession() { return prefs().getBoolean("send_new_session", false); }
+
+    void setSendNewSession(boolean v) {
+        prefs().edit().putBoolean("send_new_session", v).apply();
+        if (searchBar != null) searchBar.setTargetNewSession(v);
+        Log.i("FloatingBall", "发送目标 → " + (v ? "新会话" : "上一个对话（当前会话）"));
+    }
+
+    /** 状态 2 的发送目标：有选中会话就发给它，否则按「发送目标」设置发。 */
     private void sendFromBar(final String text, final File attach, final String attachName) {
         String t = text == null ? "" : text.trim();
         if (t.isEmpty() && attach == null) return;
         if (targetSessionId != null) {
+            // 三态里选过某条会话 → 就发给它（明确选择优先于默认设置）
             sendTextToSession(targetSessionId, t, attach, attachName);
-        } else {
-            sendTextNewSession(t, attach);
+            return;
         }
+        if (attach == null) {
+            // 和电源键同一条路：按「发送目标」发到上一个对话 / 新会话
+            sendTextToHoldSession(t, sendToNewSession());
+            return;
+        }
+        sendTextNewSession(t, attach);   // 带附件仍走新会话（hold 那条路不带附件）
     }
 
     private void sendTextNewSession(final String text, final File attach) {
@@ -9137,6 +9158,8 @@ public class FloatingBallService extends Service {
                 @Override public void onLongPressAdd() { pickAttachment(); }
                 @Override public void onTwoFingerHold() { openSettingsMenu(); }
                 @Override public void onAttachmentTap() { clearAttachment(); }
+
+                @Override public void onTargetTap() { }
                 @Override public void onTapEdit() {
                     if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
                 }
@@ -10560,8 +10583,16 @@ public class FloatingBallService extends Service {
                     toast("已移除附件");
                 }
 
+                @Override public void onTargetTap() {
+                    // 点「上个对话 / 新会话」小标签：存下来，电源键 / 音量减也跟着这个设置走
+                    boolean want = searchBar != null && searchBar.isTargetNewSession();
+                    setSendNewSession(want);
+                    toast(want ? "发送到：新会话（新建）" : "发送到：上一个对话（当前会话）");
+                }
+
                 @Override public void onInputHeight(int px) { onSearchInputHeight(px); }
             });
+            bar.setTargetNewSession(sendToNewSession());
             // 故意**不带** FLAG_NOT_FOCUSABLE：悬浮窗能拿焦点，EditText 才收得到输入法
             // （审批面板那三个坑同源，见 HANDOFF「自由输入」一节）。
             searchBarParams = overlayParams(2, 2,

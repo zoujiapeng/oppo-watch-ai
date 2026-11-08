@@ -51,6 +51,8 @@ public class BallSearchBar extends LinearLayout {
         void onTwoFingerHold();
         /** 点了附件小标签：把它去掉。 */
         void onAttachmentTap();
+        /** 点了「发送目标」小标签：在「上一个对话 / 新会话」之间切换。 */
+        void onTargetTap();
         /** 单击胶囊 / 输入框：进入编辑（状态 2 的"单击=编辑"）。 */
         void onTapEdit();
         /**
@@ -70,6 +72,9 @@ public class BallSearchBar extends LinearLayout {
     private final IconView iconSearch;
     private final EditText input;
     private final TextView attachChip;
+    /** 发送目标小标签：上个对话（当前会话）⇄ 新会话。和电源键/音量减共用一个设置。 */
+    private final TextView targetChip;
+    private boolean targetNewSession = false;
     private Listener listener;
 
     /** 凝聚动画：0 = 完全没出现（模糊+透明），1 = 落定。 */
@@ -122,6 +127,25 @@ public class BallSearchBar extends LinearLayout {
             @Override public void onClick(View v) { if (listener != null) listener.onAttachmentTap(); }
         });
 
+        targetChip = new TextView(c);
+        targetChip.setTextColor(0xE6FFFFFF);
+        targetChip.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(11));
+        targetChip.setSingleLine(true);
+        targetChip.setGravity(Gravity.CENTER);
+        targetChip.setPadding(Math.round(dp(7)), 0, Math.round(dp(7)), 0);
+        GradientDrawable tbg = new GradientDrawable();
+        tbg.setColor(0x26FFFFFF);
+        tbg.setCornerRadius(dp(10));
+        tbg.setStroke(Math.round(dp(0.8f)), 0x40FFFFFF);
+        targetChip.setBackground(tbg);
+        setTargetNewSession(false);
+        targetChip.setOnClickListener(new OnClickListener() {
+            @Override public void onClick(View v) {
+                setTargetNewSession(!targetNewSession);
+                if (listener != null) listener.onTargetTap();
+            }
+        });
+
         input = new EditText(c);
         input.setBackgroundColor(Color.TRANSPARENT);
         input.setTextColor(COL_TEXT);
@@ -165,6 +189,8 @@ public class BallSearchBar extends LinearLayout {
         // 左右各留 14px，胶囊内部看起来才对称。
         int side = Math.round(dp(14));
         addView(iconSearch, new LayoutParams(Math.round(dp(17)), Math.round(dp(17))));
+        addView(targetChip, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                Math.round(dp(22))));
         addView(attachChip, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 Math.round(dp(22))));
         ((LayoutParams) attachChip.getLayoutParams()).setMargins(Math.round(dp(6)), 0, 0, 0);
@@ -256,6 +282,15 @@ public class BallSearchBar extends LinearLayout {
     }
 
     public void setListener(Listener l) { this.listener = l; }
+
+    /** 发送目标：false = 上一个对话（当前会话），true = 新会话。 */
+    public void setTargetNewSession(boolean v) {
+        targetNewSession = v;
+        targetChip.setText(v ? "新建" : "当前");
+        targetChip.setTextColor(v ? 0xFF8FC7FF : 0xE6FFFFFF);
+    }
+
+    public boolean isTargetNewSession() { return targetNewSession; }
     public EditText input() { return input; }
 
     public String text() {
