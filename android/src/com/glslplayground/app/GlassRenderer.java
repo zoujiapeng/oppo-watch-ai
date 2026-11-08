@@ -493,14 +493,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*2.2  + vec2(lat*1.1, t*0.22));\n" +
         "  float foreshorten = 0.55 + 0.45*z;                 // 球面透视：越靠轮廓越密\n" +
         "  float spacing = 3.14159265/max(dens, 3.0);\n" +
-        "  float shear = 0.30*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
+        "  float shear = 0.18*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
         // 摆动幅度调大、再叠一层碎噪声：丝线不再是"一圈一圈很规整"，而是被水流扯得乱晃
         // 每根丝线自己的 id/随机相位（必须在 f 之前定，后面颜色也用它）
         "  float band = floor((lat + shear)/spacing + 0.5);\n" +
         "  float hb = fh11(vec2(band, side*7.0));\n" +
-        "  float latWarp = (wn-0.5)*0.95 + (wn3-0.5)*0.12\n" +
-        "                + 0.20*sin(lon*2.0 + t*0.5 + hb*6.2831853)\n" +
-        "                + 0.07*sin(lon*5.0 - t*0.7 + lat*4.0);\n" +
+        // ★ 摆动只跟**经度**有关、跟纬度无关 —— 这样所有纬线是"同一把梳子"上的齿：
+        //   一起摆、永远平行，不会互相交叉（交叉就是用户看到的"割裂/折痕"）。
+        "  float latWarp = 0.42*sin(lon*1.7 + t*0.42)\n" +
+        "                + 0.20*sin(lon*3.1 - t*0.31 + 1.3)\n" +
+        "                + 0.09*sin(lon*5.3 + t*0.17 + 2.1);\n" +
         "  float f = (lat + latWarp + shear)/spacing;\n" +
         "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
 
@@ -537,7 +539,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float halo = 0.10 * exp(-sdN * 3.0);\n" +
         // 侧对着镜头的那圈丝线会被压成又细又直的"发丝"（用户嫌像被裁了一刀）——直接让它们淡出，
         // 只留正面那几根幅度大、会发光的主线。
-        "  float facing = 1.0;\n" +
+        "  float facing = mix(1.0, smoothstep(0.05, 0.40, z), 0.90);   // 侧对镜头的丝线会被压成一道细锐的"折痕"，和宽光带交叉 → 看着像割裂\n" +
         "  return c * (core + halo) * (lit + rimL) * depth * facing;\n" +
         "}\n" +
         "vec3 fluidScenePx(vec2 localPx, float hx, float hy, float t){\n" +
@@ -551,10 +553,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 域扭曲：轮廓和丝线一起被水流拖着走
         "  vec2 flow = vec2(ffbm2(q*2.1 + vec2(0.0, t*0.33)) - 0.5,\n" +
         "                   ffbm2(q*2.1 + vec2(5.2, t*0.30) + 3.1) - 0.5);\n" +
-        "  vec2 wq = q + flow*0.16;\n" +
+        "  vec2 wq = q + flow*0.06;\n" +
         "  float ang = atan(wq.y, wq.x);\n" +
-        "  float bulge = 0.075*sin(2.0*ang + t*0.31) + 0.045*sin(3.0*ang - t*0.23)\n" +
-        "              + 0.030*sin(5.0*ang + t*0.17 + 1.7);\n" +
+        "  float bulge = 0.035*sin(2.0*ang + t*0.31) + 0.018*sin(3.0*ang - t*0.23)\n" +
+        "              + 0.010*sin(5.0*ang + t*0.17 + 1.7);\n" +
         "  wq /= (1.0 + bulge);\n" +
         "  float r = length(wq);\n" +
         "  vec3 col = vec3(0.0);\n" +
@@ -568,7 +570,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    col += fluidShell(wq,  1.0, t, uFluidRibs) * edge;\n" +
         // 背面那半颗只在很暗的地方露出来，会变成"一根根不亮的线"、像建模的棱边 —— 直接不画。
         // （要厚度感就靠球面透视 + 受光，不靠背面线框。）
-        "    col += fluidShell(wq, -1.0, t, uFluidRibs) * edge * 0.55;\n" +
+        // 背面那半颗不画：它的丝线会和正面的宽光带交叉成"一道细折痕"（用户圈出来的割裂）
+
         "  }\n" +
         "  return col * max(uFluidGain, 0.0);\n" +
         "}\n" +
@@ -637,6 +640,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float ny = -c.y / uHalf.y;\n" +
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
+        // 流体模式：黑区下沿往下压到 ny=0.55（球的下半也基本黑），
+        // 这样丝线整团都在黑底上 —— 桌面的行/线不会被玻璃折射进来糊在丝线上（那才是"割裂"的来源之一）
+        "  b1 = mix(b1, 0.55, clamp(uFluid, 0.0, 1.0));\n" +
         "  float blackMask = smoothstep(b0, b1, ny);\n" +
         // 流体发光模式：整颗球垫成纯黑（用户：背景不要东西，跟 dots 一样纯黑）。
         // 只改这一层的遮罩，玻璃的折射/边缘亮线照旧在外面叠。
