@@ -59,6 +59,12 @@
   触摸层也要求 `> 0.5` —— 球一缩回胶囊，字立刻淡没、也不再吃触摸。
 - `resolveSlot()` 的回复槽 / `refreshFinalWave()` 也加了 `squareDrawn01() > 0.05`：
   胶囊形态上永远不画回复波。
+- **最终回复的 Siri 波被「过程中回复」的胶囊加载盖住**（用户：最终回复怎么显示的是过程中回复的动画）：
+  根因在 `refreshFinalWave()` 的 `waveGateTarget = 1f`。`applyAnimToRenderer()` 换槽时会把
+  gate 目标压到 0、把「关 loader / 换 waveMode」存进 `sceneCommit`，等 gate 到 0 才执行；
+  `refreshFinalWave()` 紧接着把目标抬回 1 → commit 永远等不到 0 → `loaderMode` 一直停在 cap6，
+  盖住 Siri 波。现在只有 `sceneCommit == null` 时才抬 gate（有 commit 就让它先落地）。
+  实测：最终回复日志 `槽=reply_final 动画=wave` 后 loader 归 0、波正常出现。
 
 **验证**（真机、`files/witness` 合成截图 + 像素量）：短回复玻璃窗 974×579 与长回复
 969×968，波头可见高度都是 **76~77px**（同一 `uWaveHead`），位置都在玻璃底边；

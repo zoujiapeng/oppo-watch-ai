@@ -869,7 +869,12 @@ public class FloatingBallService extends Service {
             // 换完形态再淡回来；而这个函数每打一个字就会被调用一次（镜像打字机），
             // 一走淡出淡入就是用户看到的"LED 一闪一闪"。方形态固定用 Siri 波，直接钉住。
             if (renderer.waveMode != 1) { renderer.waveMode = 1; waveModePending = -1; }
-            waveGateTarget = 1f;
+            // ★ 2026-11-08（用户：最终回复显示的还是过程中回复的动画、Siri 波没了）：
+            //   applyAnimToRenderer() 换槽时会把 gate 目标压到 0，并把「关 loader / 换形态」
+            //   存进 sceneCommit，等 gate 到 0 才执行。这里要是无条件把 gate 目标抬回 1，
+            //   commit 永远等不到 0 → loaderMode 一直停在 cap6（过程中回复的胶囊加载），
+            //   Siri 波被盖住。所以只在「没有待执行的场景切换」时才抬 gate。
+            if (sceneCommit == null) waveGateTarget = 1f;
         } else if (!hasBallText() || !AnimScene.A_WAVE.equals(sceneAnim)) {
             renderer.waveInGlass = 0f;      // 没字 / 槽不是波（圆点、胶囊）→ 交还给球心那套
         }
