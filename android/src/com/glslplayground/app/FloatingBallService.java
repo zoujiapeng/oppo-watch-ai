@@ -939,6 +939,113 @@ public class FloatingBallService extends Service {
     private Runnable sceneCommit = null;              // 幅度淡到 0 时执行的形态切换
     private long sceneLastCheck = 0;
 
+    // ═══════════════ 菜单界面：动画先藏起来 + AI 回复的字别跑到菜单里（临时，用户口径） ═══════════════
+    /**
+     * ★ 2026-11-08（用户要求，**临时**）：
+     *
+     *   ① **长按球呼出的那个菜单界面不出动画。**
+     *      「菜单界面」= 长按球进入的状态 3（六区），以及菜单里的各级子界面：
+     *      按住滑出来的二级/三级卡片（工作目录 / 搜索会话 / 运行中的会话 / 参数 …）、
+     *      还有贴在被撑出来的玻璃面板上那几层（BallGlassMenu）—— 一律把动画压成 off。
+     *      **菜单自己那些字（面板标题 / 行名 / 说明）照常显示**，一个字都不动。
+     *
+     *   ② **AI 回复的那段字不要出现在这些地方**：菜单（六区 / 子界面 / 玻璃面板）、
+     *      搜索胶囊、输入胶囊。那里本来就不该挂一段 AI 回复。
+     *      球自己的回复文字照旧，离开这些界面就回来。
+     *
+     *   绑定和别处的显示都没动：`bind.zones` 还是用户原来那条（现在是 cap8）。想恢复：
+     *     · 重编：把下面两个常量改回 false；
+     *     · 不重编（1 秒内被探测到）：
+     *         su -c 'touch /data/data/com.glslplayground.app/files/menu-anim-on'   ← 菜单里恢复动画
+     *         su -c 'touch /data/data/com.glslplayground.app/files/menu-reply-on'  ← 这些界面里也允许 AI 回复的字
+     *       `rm` 掉对应文件就又藏起来。
+     */
+    private static final boolean MENU_ANIM_HIDDEN = true;
+    private static final boolean MENU_REPLY_TEXT_HIDDEN = true;
+    private long menuHideProbeAt = 0L;
+    private boolean menuHideAnim = MENU_ANIM_HIDDEN;
+    private boolean menuHideReply = MENU_REPLY_TEXT_HIDDEN;
+    /** AI 回复的字现在是因为"这些界面不该有它"被收掉的（关掉界面时据此还原）。 */
+    private boolean replyTextHiddenForUi = false;
+
+    /**
+     * 菜单那一屏开着吗（六区 / 菜单里任意一级子界面 / 玻璃面板）。
+     *
+     * 只认 zonesActive 和 menuShown：菜单里的二级/三级卡片本来就是挂在六区这一层上的
+     * （BallZonesView.cardMode），zonesActive 为真时它们一定也在。
+     * 别再拿 holdLevel 当判据 —— 音量加「藏界面」那条路把六区收掉时不会顺手清 holdLevel，
+     * 它会一直留着，于是离开菜单以后别的状态（麦克风 / 待机）也被误压成 off（实测踩到）。
+     */
+    private boolean menuSurfaceOpen() {
+        return zonesActive || menuShown;
+    }
+
+    /** 这一屏不该出现 AI 回复的字吗（菜单 / 搜索胶囊 / 输入胶囊）。 */
+    private boolean replyTextShouldHide() {
+        return menuHideReply && (menuSurfaceOpen() || searchActive || convoOpen);
+    }
+
+    /** 每 1 秒看一眼两个免重编的文件口子。 */
+    private void pumpMenuHideProbe() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - menuHideProbeAt < 1000L) return;
+        menuHideProbeAt = now;
+        File dir = getFilesDir();
+        menuHideAnim = MENU_ANIM_HIDDEN && !new File(dir, "menu-anim-on").exists();
+        menuHideReply = MENU_REPLY_TEXT_HIDDEN && !new File(dir, "menu-reply-on").exists();
+    }
+
+    /** 菜单界面要不要把动画藏掉（临时开关 + 免重编的文件口子）。 */
+    private boolean hideAnimInMenu() {
+        return menuHideAnim;
+    }
+
+    /** 槽 + 绑定到的动画 → 真正落地的动画 id（菜单界面统一压成 off）。 */
+    private String effectiveAnim(String slot, String anim) {
+        if (menuSurfaceOpen() && hideAnimInMenu()) return AnimScene.A_OFF;
+        return anim;
+    }
+
+    /**
+     * 每 100ms 跟一次「AI 回复的字该不该出现」。
+     *
+     * 只在**翻转的那一下**动文字层：进来收掉、出去还原，中途不碰 —— 免得和
+     * 「文字消失 → 按槽重推动画」那套逻辑打架（hideSiriTextNow 会顺手重推动画，这里不用它）。
+     */
+    private void pumpReplyTextHide() {
+        boolean hide = replyTextShouldHide();
+        if (hide) {
+            // 已经标记过、但文字层又被别的路径放出来了（比如菜单开着时来了一段新回复）→ 再收一次
+            if (!replyTextHiddenForUi
+                    || (siriText != null && siriText.getVisibility() == View.VISIBLE)) {
+                hideReplyTextForUi();
+            }
+            return;
+        }
+        if (replyTextHiddenForUi) restoreReplyTextAfterUi();
+    }
+
+    /** 把 AI 回复的文字层收掉（球里那段字），不动 siriStr、不动形态、不动动画。 */
+    private void hideReplyTextForUi() {
+        replyTextHiddenForUi = true;
+        if (siriText == null) return;
+        siriTextShown = false;
+        if (siriText.getVisibility() != View.GONE) {
+            siriText.setVisibility(View.GONE);
+            Log.i("FloatingBall", "AI 回复的字先收起来（菜单 / 搜索胶囊 / 输入胶囊里不该有它）");
+        }
+        syncSiriTouchLayerQuiet();
+    }
+
+    /** 回到能显示回复的界面：原来有字就再放出来。 */
+    private void restoreReplyTextAfterUi() {
+        replyTextHiddenForUi = false;
+        if (siriText == null || uiHidden) return;
+        if (siriStr == null || siriStr.trim().isEmpty()) return;
+        showSiriTextNow();
+        Log.i("FloatingBall", "离开菜单/胶囊 → AI 回复的字放回来（" + siriStr.length() + " 字）");
+    }
+
     /** 麦克风正在用（按住说话 / 输入法语音 / 旧的开麦路径）—— 这几个都算「刚开始用麦克风」。 */
     private boolean micActive() {
         return powerHoldActive || searchVoiceMode || (voice != null && voice.listening());
@@ -1007,12 +1114,17 @@ public class FloatingBallService extends Service {
         if (renderer == null) return;
         String slot = resolveSlot();
         boolean master = AnimScene.master(animPrefs());
-        String anim = master ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
+        String bound = master ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
+        String anim = effectiveAnim(slot, bound);   // ★ 菜单界面：动画暂时藏起来
         boolean changed = force || sceneDirty || !slot.equals(sceneSlot) || !anim.equals(sceneAnim);
         sceneSlot = slot;
         sceneAnim = anim;
         if (!changed) return;
         sceneDirty = false;
+        if (!anim.equals(bound)) {
+            Log.i("FloatingBall", "菜单界面：动画暂时藏起来（槽=" + slot
+                    + " 绑定的是 " + bound + " → 实际 off）");
+        }
         boolean text = hasBallText();
         applyAnimParams(anim);
         applyAnimToRenderer(anim);
@@ -1183,6 +1295,8 @@ public class FloatingBallService extends Service {
 
     /** 每帧（限频 100ms）看一次「槽 / 动画」有没有变。 */
     private void pumpScene() {
+        pumpMenuHideProbe();                        // ★ 菜单界面：动画藏不藏的临时开关
+        pumpReplyTextHide();                        // ★ AI 回复的字别出现在菜单 / 胶囊里
         if (renderer == null) {
             sceneLastCheck = android.os.SystemClock.uptimeMillis();
             return;
@@ -1193,6 +1307,7 @@ public class FloatingBallService extends Service {
         String slot = resolveSlot();
         String anim = AnimScene.master(animPrefs())
                 ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
+        anim = effectiveAnim(slot, anim);          // ★ 菜单界面：动画暂时藏起来
         // ★ 2026-11-08：除了「槽/动画号变了」，还要看**渲染器有没有被别人改回去**。
         //   以前只在槽号变化时才推一次，于是任何一处老代码（文字清空、旧 think_loader、
         //   启动时那几行）把 waveMode/loaderMode 写回去之后，球就**一直**停在那个画面上，
@@ -5525,6 +5640,12 @@ public class FloatingBallService extends Service {
     private void showSiriTextNow() {
         if (siriText == null) return;
         if (uiHidden) return;            // 被音量加藏起来了：文字层也不许自己冒出来（球玻璃是看不见的）
+        // ★ 2026-11-08（用户口径）：菜单 / 搜索胶囊 / 输入胶囊里**不许**冒出 AI 回复的字。
+        //   在"放出来"这一个总口子上直接拦掉 —— 靠 100ms 轮询补刀会先闪一帧。
+        if (replyTextShouldHide()) {
+            hideReplyTextForUi();
+            return;
+        }
         if (!squareFormActive()) {
             // 圆球态本该不显示内容 —— 但如果**球里确实有字**（比如刚被清空又来了新字、
             // 或用户点了文字导致几何重置），那就把方形态撑起来，而不是把内容藏掉。
@@ -11180,6 +11301,17 @@ public class FloatingBallService extends Service {
                     @Override public void run() { if (searchBar != null) searchBar.setText(t); }
                 }, 200);
             }
+        }
+        // 假回复：`echo 文字 > files/reply-text`（内容 = 要灌给球的那段字）——
+        // 验证「菜单 / 搜索胶囊 / 输入胶囊里不该出现 AI 回复的字」时用，不用等真的跑一轮对话。
+        File fReply = new File(dir, "reply-text");
+        if (fReply.exists()) {
+            String t = readSmallString(fReply, 4000);
+            fReply.delete();
+            if (t == null || t.trim().isEmpty()) t = "测试：AI 回复的文字（菜单里不该出现它）";
+            final String txt = t.trim();
+            Log.i("FloatingBall", "debug: 灌一段假回复字（" + txt.length() + " 字）");
+            main.post(new Runnable() { @Override public void run() { applySiriText(txt); } });
         }
         File fTap = new File(dir, "voice-tap");
         if (fTap.exists()) {

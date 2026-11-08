@@ -2537,3 +2537,39 @@ hb: zones=1 win=144,0,574x574 view=574x574 pixel=574x574   ← 三者一致
 
 ⚠️ 旁挂文件**不能**写 `/sdcard/glass-evidence`：本 App 没有 `WRITE_EXTERNAL_STORAGE`，
 直接写 /sdcard 根目录会 ENOENT（第一次就这么丢的 txt/log）；只有截图那张走 root 才能放 Pictures 下。
+
+## 2026-11-08（十八）：菜单界面先不出动画；AI 回复的字不许跑进菜单 / 胶囊
+
+用户两次纠正口径，最终定的是两条：
+
+1. **长按球呼出的那个菜单界面不出动画**（六区 + 菜单里的各级子界面 + 玻璃面板）。
+   只压动画，**不动菜单自己的字**（面板标题 / 行名 / 说明照常显示）。
+2. **AI 回复的那段字不许出现在这些界面**：菜单（六区 / 子界面 / 玻璃面板）、
+   搜索胶囊、输入胶囊 —— 那里本来就不该挂一段 AI 回复。球自己的回复照旧，离开这些界面就回来。
+
+实现（`FloatingBallService`，都带"临时"注释，方便整体回滚）：
+
+| 位置 | 干什么 |
+|---|---|
+| `menuSurfaceOpen()` | `zonesActive \|\| menuShown`（**别**再用 `holdLevel>0` 当判据：音量加「藏界面」把六区收掉时不清 holdLevel，会误压其它状态，实测踩到） |
+| `effectiveAnim(slot, anim)` | 菜单开着时一律返回 `off`；`refreshScene` / `pumpScene` 两处都过它 |
+| `showSiriTextNow()` | 开头拦一道：`replyTextShouldHide()` 为真就不放字（这是"放出来"的唯一总口子，靠轮询补刀会先闪一帧） |
+| `pumpReplyTextHide()` | 每 100ms 兜一次底：菜单/胶囊开着而文字层又被别的路径放出来 → 再收一次 |
+| `restoreReplyTextAfterUi()` | 离开这些界面 → `showSiriTextNow()` 把字放回来 |
+
+免重编的口子（`files/` 下，探测 1 秒一次，`rm` 掉就恢复原样）：
+
+```bash
+touch .../files/menu-anim-on     # 菜单里恢复动画
+touch .../files/menu-reply-on    # 这些界面里也允许显示 AI 回复的字
+```
+
+调试口子（本轮加的）：`echo 任意文字 > files/reply-text` —— 立刻往球里灌一段"假回复"，
+不用真跑一轮对话就能验"菜单里该不该出现这段字"。
+
+实测（本机 2026-11-08 23:20，root screencap，图在 `shots/menuhide/`）：
+
+* `final-2`：六区开着 → 只有图标，**没有 cap8 跳环动画**、没有回复文字；日志
+  `菜单界面：动画暂时藏起来（槽=zones 绑定的是 cap8 → 实际 off）`；
+* `final-3`：菜单开着时灌一段回复 → 画面**逐像素不变**（和 final-2 同 sha256），字被挡在门外；
+* `final-4`：关掉菜单 → 那段字自己回到球里（说明是真被"暂存"住，不是丢了）。
