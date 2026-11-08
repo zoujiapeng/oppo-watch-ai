@@ -143,6 +143,10 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
      * 中间那一瞬没有任何波/点在画，切换就看不出来了。
      */
     public volatile float waveGate = 1f;
+    /** 思考中胶囊加载模式：把 GL 里的 Siri 波 / 圆点 / 流体全部让位给 WebView 叠层 */
+    public volatile boolean suppressWave = false;
+    /** 球在窗口里的几何（窗口像素，y 向下），给叠层对齐用 */
+    public volatile float ballCxW, ballCyW, ballHxW, ballHyW;
 
     // ── 思考中（流体圆点）的成形参数：环半径按屏幕像素给，圆点在任何球里都是等大的圆 ──
     public volatile float orbRadius = 90f;    // 圆点环半径（屏幕像素）
@@ -1092,6 +1096,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
             }
         }
 
+        {
+            float kk = Math.max(k, 1e-3f);
+            float wpx = winPixelW > 0 ? winPixelW : winW;
+            float wpy = winPixelH > 0 ? winPixelH : winH;
+            ballCxW = cx / kk;
+            ballCyW = wpy - cy / kk;   // 抠图/合成用的是 y 向上，叠层视图是 y 向下
+            ballHxW = hx / kk;
+            ballHyW = hy / kk;
+        }
+
         if (captureSource == 1) {
             // root 直采：把原始帧上传进 full（行序已翻转），不经 MediaProjection
             uploadRootFrame();
@@ -1169,7 +1183,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         }
 
         // 波的幅度（含闸门）
-        float waveAmpEff = waveOn ? waveAmp * waveGate : 0f;
+        float waveAmpEff = (waveOn && !suppressWave) ? waveAmp * waveGate : 0f;
 
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
         buildBlur(bgTex);

@@ -474,6 +474,23 @@ public class WatchBridge {
         ui(new Runnable() { public void run() { FloatingBallService.previewIdle(); } });
     }
 
+    // ── 思考中动画：9 种胶囊加载（0 = 关，走原来的 dots / 流体）──
+    @JavascriptInterface
+    public int getThinkLoader() { return FloatingBallService.getThinkLoader(); }
+
+    @JavascriptInterface
+    public void setThinkLoader(final int v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setThinkLoader(v); } });
+    }
+
+    @JavascriptInterface
+    public float getThinkLoaderSpeed() { return FloatingBallService.getThinkLoaderSpeed(); }
+
+    @JavascriptInterface
+    public void setThinkLoaderSpeed(final float v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setThinkLoaderSpeed(v); } });
+    }
+
     /** 0 = 流体圆点（dots），1 = 连续发光流体。 */
     @JavascriptInterface
     public int getFluidStyle() { return FloatingBallService.getFluidStyle(); }

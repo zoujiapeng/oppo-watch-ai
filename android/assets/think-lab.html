@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>思考中动画 · 胶囊调试</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{color-scheme:dark}
+  html,body{min-height:100%}
+  body{
+    background:#000;color:#fff;
+    font-family:-apple-system,system-ui,"PingFang SC","Noto Sans SC",sans-serif;
+    display:flex;flex-direction:column;align-items:center;
+    padding:14px 16px calc(28px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;
+  }
+  .top{width:min(92vw,560px);display:flex;align-items:center;justify-content:space-between;
+    gap:12px;margin-bottom:14px}
+  .top a{color:#7d7d7d;text-decoration:none;font-size:13px}
+  .top .tt{font-size:14px;font-weight:600;letter-spacing:.02em}
+  .top .tt small{display:block;font-size:9px;color:#5a5a5a;letter-spacing:.14em;
+    font-weight:400;text-transform:uppercase;margin-top:3px}
+
+  /* 液态玻璃胶囊：黑底、玻璃边、顶沿高光、内侧暗角 */
+  .stage{
+    position:relative;width:min(92vw,560px);aspect-ratio:2.4/1;
+    border-radius:999px;overflow:hidden;isolation:isolate;
+    background:
+      radial-gradient(120% 170% at 18% -30%, rgba(255,255,255,.10), transparent 55%),
+      radial-gradient(90% 150% at 84% 130%, rgba(120,170,255,.055), transparent 62%),
+      linear-gradient(180deg, rgba(255,255,255,.030), rgba(255,255,255,.006));
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:
+      0 34px 90px -46px #000,
+      inset 0 1px 0 rgba(255,255,255,.30),
+      inset 0 0 70px rgba(0,0,0,.55);
+  }
+  .stage::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:2;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.095), transparent 15%),
+      radial-gradient(60% 110% at 50% 125%, rgba(255,255,255,.055), transparent 62%);
+    mix-blend-mode:screen;
+  }
+  .stage::after{
+    content:"";position:absolute;inset:1px;border-radius:inherit;pointer-events:none;z-index:3;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.045);
+  }
+  .stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+  .panel{width:min(92vw,560px);margin-top:18px}
+  .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .m{
+    appearance:none;border:1px solid rgba(255,255,255,.09);
+    background:rgba(255,255,255,.035);color:#b8b8b8;
+    border-radius:12px;padding:9px 6px;font:12px/1.2 inherit;
+    text-align:left;cursor:pointer;transition:.18s border-color,.18s background,.18s color;
+  }
+  .m b{display:block;font-size:9px;color:#565656;letter-spacing:.14em;font-weight:500;margin-bottom:4px}
+  .m.on{border-color:rgba(255,255,255,.38);background:rgba(255,255,255,.10);color:#fff}
+  .m.on b{color:#9a9a9a}
+  .row{display:flex;align-items:center;justify-content:space-between;margin:18px 0 6px;
+    font-size:12px;color:#8a8a8a;letter-spacing:.04em}
+  .row b{color:#fff;font-size:12px;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:#fff;height:22px}
+  .btns{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+  .btns button{
+    flex:1;min-width:104px;appearance:none;border-radius:12px;padding:11px 10px;
+    border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);
+    color:#e8e8e8;font:13px/1 inherit;cursor:pointer
+  }
+  .btns button.pri{background:#fff;color:#000;border-color:#fff;font-weight:600}
+  .hint{margin-top:12px;font-size:11px;line-height:1.65;color:#5c5c5c}
+  .hint b{color:#9a9a9a;font-weight:500}
+  .toast{position:fixed;left:50%;bottom:calc(22px + env(safe-area-inset-bottom));
+    transform:translateX(-50%) translateY(10px);opacity:0;pointer-events:none;
+    background:rgba(30,30,30,.92);border:1px solid rgba(255,255,255,.14);
+    color:#fff;font-size:12px;padding:9px 14px;border-radius:999px;
+    transition:.25s opacity,.25s transform;z-index:20}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <a href="settings.html">‹ 设置</a>
+  <div class="tt">思考中动画 · 胶囊加载<small>Capsule Loaders · Debug</small></div>
+  <span style="width:36px"></span>
+</div>
+
+<div class="stage"><canvas id="cv"></canvas></div>
+
+<div class="panel">
+  <div class="modes" id="modes"></div>
+  <div class="row"><span>速度</span><b id="vSpeed">1.00×</b></div>
+  <input type="range" id="speed" min="0.2" max="2.5" step="0.05" value="1">
+  <div class="btns">
+    <button id="btnApply" class="pri">应用到悬浮球</button>
+    <button id="btnPin">▶ 钉住思考态</button>
+    <button id="btnStop">■ 结束预览</button>
+  </div>
+  <div class="hint" id="hint"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="capsule-loader-engine.js"></script>
+<script>
+(function () {
+  var W = window.Watch || null;
+  var NAMES = [
+    ["pulse", "01", "脉冲"], ["chain", "02", "珠链"], ["helix", "03", "螺旋"],
+    ["orbit", "04", "环轨"], ["morph", "05", "星座"], ["comet", "06", "彗尾"],
+    ["magnet", "07", "磁吸"], ["hop", "08", "跳环"], ["ripple", "09", "涟漪"]
+  ];
+  var canvas = document.getElementById("cv");
+  var eng = new CapsuleEngine(canvas, { mode: "pulse", speed: 1, autoStart: true });
+  var mode = 1, speed = 1;
+  var modesEl = document.getElementById("modes");
+  var speedEl = document.getElementById("speed");
+  var vSpeedEl = document.getElementById("vSpeed");
+  var hintEl = document.getElementById("hint");
+  var toastEl = document.getElementById("toast");
+  var toastTimer = 0;
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove("on"); }, 1600);
+  }
+
+  function paintModes() {
+    var html = "";
+    for (var i = 0; i < NAMES.length; i++) {
+      var n = NAMES[i];
+      html += '<button class="m' + (mode === i + 1 ? " on" : "") + '" data-m="' + (i + 1) + '">' +
+        '<b>' + n[1] + '</b>' + n[2] + '</button>';
+    }
+    modesEl.innerHTML = html;
+    var btns = modesEl.querySelectorAll(".m");
+    for (var j = 0; j < btns.length; j++) {
+      btns[j].addEventListener("click", function () {
+        mode = +this.dataset.m;
+        eng.setMode(NAMES[mode - 1][0]);
+        paintModes();
+      });
+    }
+  }
+
+  function setSpeed(v, save) {
+    speed = Math.max(0.2, Math.min(2.5, +v || 1));
+    speedEl.value = speed;
+    vSpeedEl.textContent = speed.toFixed(2) + "×";
+    eng.setSpeed(speed);
+    if (save && W && W.setThinkLoaderSpeed) {
+      try { W.setThinkLoaderSpeed(speed); } catch (e) {}
+    }
+  }
+
+  function syncFromApp() {
+    if (W) {
+      try { var m = W.getThinkLoader(); if (m) mode = m; } catch (e) {}
+      try { var s = W.getThinkLoaderSpeed(); if (s) setSpeed(s, false); } catch (e) {}
+      if (mode < 1 || mode > 9) mode = 1;
+      eng.setMode(NAMES[mode - 1][0]);
+      hintEl.innerHTML = "当前：<b>" + NAMES[mode - 1][2] + "</b> · 速度 <b>" +
+        speed.toFixed(2) + "×</b>。点「应用到悬浮球」后，球在思考态会用这个动画；" +
+        "也可以点「钉住思考态」直接在球上预览。";
+    } else {
+      hintEl.innerHTML = "浏览器预览模式（没有 App 桥）：这里只能看和调，不会写进悬浮球。<br>" +
+        "在 App 的设置页里打开这一页，就能把动画和速度存到球上。";
+    }
+  }
+
+  modesEl && paintModes();
+  syncFromApp();
+  paintModes();
+  setSpeed(speed, false);
+
+  speedEl.addEventListener("input", function () { setSpeed(speedEl.value, true); });
+  speedEl.addEventListener("change", function () { setSpeed(speedEl.value, true); });
+
+  document.getElementById("btnApply").addEventListener("click", function () {
+    if (!W) { toast("浏览器里无法写入悬浮球"); return; }
+    try { W.setThinkLoader(mode); } catch (e) {}
+    try { W.setThinkLoaderSpeed(speed); } catch (e) {}
+    try { W.previewThinking(); } catch (e) {}
+    toast("已应用 · " + NAMES[mode - 1][2] + " · " + speed.toFixed(2) + "×");
+  });
+  document.getElementById("btnPin").addEventListener("click", function () {
+    if (!W) { toast("浏览器里没有悬浮球"); return; }
+    try { W.previewThinking(); toast("已钉住思考态"); } catch (e) { toast("预览失败"); }
+  });
+  document.getElementById("btnStop").addEventListener("click", function () {
+    try { W && W.previewIdle && W.previewIdle(); toast("已结束预览"); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

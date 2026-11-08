@@ -49,6 +49,12 @@
 <body>
   <div class="top"><a href="index.html">‹ 返回</a><h1>设置</h1></div>
 
+  <div class="grp">
+    <div class="gh">思考中动画 · 胶囊加载</div>
+    <div class="btns"><button id="btnThinkLabTop">🧪 打开调试页（9 种 · 可调速度）</button></div>
+    <div class="muted">在液态玻璃胶囊里预览、选择思考中的动画；速度会存到悬浮球，思考时球里直接跑这个动画。</div>
+  </div>
+
   <div class="grp" id="grpDevice" style="display:none">
     <div class="gh">设备</div>
     <div class="kv"><span>型号</span><b id="dModel">-</b></div>
@@ -404,6 +410,9 @@
 <script>
 (function () {
   var W = window.Watch;
+
+  var btnThinkLabTop = document.getElementById('btnThinkLabTop');
+  if (btnThinkLabTop) btnThinkLabTop.addEventListener('click', function () { location.href = 'think-lab.html'; });
   if (!W) return;
   document.getElementById('grpNone').style.display = 'none';
   ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',

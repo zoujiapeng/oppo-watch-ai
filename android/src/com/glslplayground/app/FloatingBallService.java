@@ -17,6 +17,10 @@ import android.hardware.display.VirtualDisplay;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.opengl.GLSurfaceView;
+import android.graphics.Color;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -104,6 +108,14 @@ public class FloatingBallService extends Service {
 
     private WindowManager wm;
     private GLSurfaceView glView;
+
+    // 思考中「胶囊加载」：透明 WebView 叠在玻璃球上面（同窗口位置/尺寸），只画白点。
+    private WebView thinkLoader;
+    private WindowManager.LayoutParams thinkLoaderParams;
+    private boolean thinkLoaderPageReady, thinkLoaderVisible;
+    private int thinkSentMode = -1;
+    private float thinkSentSpeed = -1f;
+    private float thinkLastNx = -9f, thinkLastNy = -9f, thinkLastNrx = -9f, thinkLastNry = -9f;
     private GlassRenderer renderer;
     private WindowManager.LayoutParams params;
 
@@ -2949,6 +2961,27 @@ public class FloatingBallService extends Service {
         if (renderer != null) renderer.orbGain = pct / 100f;
     }
 
+    // ── 思考中动画：9 种胶囊加载（0 = 关；1..9 = 脉冲/珠链/螺旋/环轨/星座/彗尾/磁吸/跳环/涟漪）──
+    public static void setThinkLoader(int v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyThinkLoader(v));
+    }
+
+    public static int getThinkLoader() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 0 : s.prefs().getInt("think_loader", 0);
+    }
+
+    public static void setThinkLoaderSpeed(float v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyThinkLoaderSpeed(v));
+    }
+
+    public static float getThinkLoaderSpeed() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 1f : s.prefs().getFloat("think_loader_speed", 1f);
+    }
+
     // ── 思考中动画：圆点 / 连续发光流体（Fluid Glow）──────────────────────────
     // 用户：现有两种动画（Siri 波、dots）之外，再要一个「和 dots 同一套光核的连续流体」，
     // 颜色可纯白/单色/混色，亮度不均（有的刺眼有的柔和），背景跟 dots 一样只有纯黑。
@@ -3070,8 +3103,9 @@ public class FloatingBallService extends Service {
         });
     }
 
-    /** 思考中动画该用哪个 waveMode：2 = dots，3 = 流体发光。 */
+    /** 思考中动画该用哪个 waveMode：2 = dots，3 = 流体发光；0 = 关（交给胶囊加载叠层）。 */
     private int thinkForm() {
+        if (prefs().getInt("think_loader", 0) > 0) return 0;
         return prefs().getInt("float_fluid_style", 0) == 1 ? 3 : 2;
     }
 
@@ -3088,6 +3122,27 @@ public class FloatingBallService extends Service {
             waveGateTarget = 1f;
         }
         Log.i("FloatingBall", "思考中动画 → " + (v == 1 ? "流体发光" : "流体圆点"));
+    }
+
+    private void applyThinkLoader(int v) {
+        v = Math.max(0, Math.min(9, v));
+        prefs().edit().putInt("think_loader", v).apply();
+        if (renderer != null) {
+            renderer.suppressWave = v > 0;
+            if ("THINKING".equals(stateNow)) {
+                renderer.waveOn = true;
+                setWaveForm(thinkForm());
+                waveGateTarget = 1f;
+            }
+        }
+        syncThinkLoader(true);
+        Log.i("FloatingBall", "思考中胶囊加载 → " + (v == 0 ? "关（dots/流体）" : String.valueOf(v)));
+    }
+
+    private void applyThinkLoaderSpeed(float v) {
+        v = Math.max(0.2f, Math.min(2.5f, v));
+        prefs().edit().putFloat("think_loader_speed", v).apply();
+        syncThinkLoader(true);
     }
 
     private void applyFluidColorMode(int v) {
@@ -10401,6 +10456,7 @@ public class FloatingBallService extends Service {
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
         applyFluidPrefs();                       // 思考中流体发光的颜色/密度/刺眼程度
+        renderer.suppressWave = prefs().getInt("think_loader", 0) > 0;
         renderer.orbOffsetDefault = renderer.orbOffset;   // 有字时会被临时改到"底带"，恢复用这个
         // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
         // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
@@ -10498,6 +10554,7 @@ public class FloatingBallService extends Service {
                 }
             }
             trackWindow(glView);
+            setupThinkLoader(params.type);
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
             homeCy = params.y + winH * 0.5f + winY0();
             // ★ 关键一格：实测挡注入的是 GLSurfaceView 自带的 SurfaceView 子 surface
@@ -10569,6 +10626,108 @@ public class FloatingBallService extends Service {
     private final Runnable winSyncLoop = new Runnable() {
         @Override public void run() { syncWinPos(); main.postDelayed(this, 500); }
     };
+
+    // ───────────────────────── 思考中胶囊加载（WebView 叠层）─────────────────────────
+    private final Runnable thinkLoaderTick = new Runnable() {
+        @Override public void run() {
+            syncThinkLoader(false);
+            main.removeCallbacks(this);
+            main.postDelayed(this, 66);
+        }
+    };
+
+    private void setupThinkLoader(int type) {
+        if (thinkLoader != null) return;
+        try {
+            thinkLoader = new WebView(this);
+            thinkLoader.setBackgroundColor(Color.TRANSPARENT);
+            WebSettings ws = thinkLoader.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setAllowFileAccess(true);
+            thinkLoader.setVerticalScrollBarEnabled(false);
+            thinkLoader.setHorizontalScrollBarEnabled(false);
+            thinkLoader.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            thinkLoader.setVisibility(View.INVISIBLE);
+            thinkLoader.setAlpha(0f);
+            thinkLoader.setWebViewClient(new WebViewClient() {
+                @Override public void onPageFinished(WebView v, String url) {
+                    thinkLoaderPageReady = true;
+                    syncThinkLoader(true);
+                }
+            });
+            thinkLoaderParams = new WindowManager.LayoutParams(
+                    winW, winH, type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            thinkLoaderParams.gravity = Gravity.TOP | Gravity.START;
+            thinkLoaderParams.x = params.x;
+            thinkLoaderParams.y = params.y;
+            wm.addView(thinkLoader, thinkLoaderParams);
+            trackWindow(thinkLoader);
+            thinkLoader.loadUrl("file:///android_asset/think-loader.html");
+            main.post(thinkLoaderTick);
+            Log.i("FloatingBall", "think loader overlay added " + winW + "x" + winH);
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "think loader setup failed: " + t);
+            thinkLoader = null;
+        }
+    }
+
+    private void jsThink(String js) {
+        if (thinkLoader == null) return;
+        try { thinkLoader.evaluateJavascript(js, null); } catch (Throwable ignored) { }
+    }
+
+    private void syncThinkLoader(boolean force) {
+        if (thinkLoader == null || glView == null || renderer == null) return;
+        int mode = prefs().getInt("think_loader", 0);
+        boolean want = mode > 0 && "THINKING".equals(stateNow)
+                && renderer.waveGate > 0.015f;
+        if (!want) {
+            if (thinkLoaderVisible) {
+                thinkLoaderVisible = false;
+                thinkLoader.setVisibility(View.INVISIBLE);
+                jsThink("window.pause&&window.pause()");
+            }
+            return;
+        }
+        int[] loc = new int[2];
+        glView.getLocationOnScreen(loc);
+        int w = glView.getWidth(), h = glView.getHeight();
+        if (w > 0 && h > 0 && (thinkLoaderParams.x != loc[0] || thinkLoaderParams.y != loc[1]
+                || thinkLoaderParams.width != w || thinkLoaderParams.height != h)) {
+            thinkLoaderParams.x = loc[0];
+            thinkLoaderParams.y = loc[1];
+            thinkLoaderParams.width = w;
+            thinkLoaderParams.height = h;
+            try { wm.updateViewLayout(thinkLoader, thinkLoaderParams); } catch (Throwable ignored) { }
+        }
+        if (!thinkLoaderPageReady) return;
+        float nx = renderer.ballCxW / Math.max(1f, w);
+        float ny = renderer.ballCyW / Math.max(1f, h);
+        float nrx = renderer.ballHxW / Math.max(1f, w);
+        float nry = renderer.ballHyW / Math.max(1f, h);
+        if (force || Math.abs(nx - thinkLastNx) > .002f || Math.abs(ny - thinkLastNy) > .002f
+                || Math.abs(nrx - thinkLastNrx) > .002f || Math.abs(nry - thinkLastNry) > .002f) {
+            jsThink("window.setBall(" + nx + "," + ny + "," + nrx + "," + nry + ")");
+            thinkLastNx = nx; thinkLastNy = ny; thinkLastNrx = nrx; thinkLastNry = nry;
+        }
+        float speed = prefs().getFloat("think_loader_speed", 1f);
+        if (force || mode != thinkSentMode || Math.abs(speed - thinkSentSpeed) > .001f) {
+            jsThink("window.setLoader(" + mode + "," + speed + ")");
+            thinkSentMode = mode;
+            thinkSentSpeed = speed;
+        }
+        thinkLoader.setAlpha(renderer.waveGate);
+        if (!thinkLoaderVisible) {
+            thinkLoaderVisible = true;
+            thinkLoader.setVisibility(View.VISIBLE);
+            jsThink("window.play&&window.play()");
+        }
+    }
 
     /** syncWinPos 里"后面那些与球几何相关"的部分：菜单面板态下也要跑。 */
     private void syncWinPosDone() {
