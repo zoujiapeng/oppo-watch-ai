@@ -189,10 +189,12 @@ public final class AnimScene {
             out.put(slot(SLOT_TOOL, "调用工具", "DSH 调用了非命令类工具：读文件 / 改文件 / 搜索 / 子代理 …",
                     A_DOTS, false,
                     "命令走「执行中」那一档；这里管的是其它工具调用（两边可以各绑各的动画）"));
-            out.put(slot(SLOT_STREAM, "过程中回复", "流式出字、这一轮还没结束", A_WAVE, false,
-                    ""));
-            out.put(slot(SLOT_FINAL, "最终回复", "任务完成、这一轮收尾", A_WAVE, false,
-                    "默认和 Liquid Glass 是同一条波；想要旧版「沉进球底只露一截」，在动画库的 Siri 波里把「沉入玻璃」调成 1"));
+            out.put(slot(SLOT_STREAM, "过程中回复", "这段回复之后**还有活要干**：后面还会思考 / 调工具 / 再回话",
+                    A_WAVE, false,
+                    "判据：回复出来后这条会话还在跑"));
+            out.put(slot(SLOT_FINAL, "最终回复", "这段回复之后会话就**停了**，没有后续动作",
+                    A_WAVE, false,
+                    "判据：回复出来后这条会话不再 running（会等 1.2 秒确认一次）。默认和 Liquid Glass 是同一条波；想要旧版「沉进球底只露一截」，在动画库的 Siri 波里把「沉入玻璃」调成 1"));
             out.put(slot(SLOT_APPROVAL, "审批 / 提问卡片", "DSH 要你点头时弹出来的卡片", A_OFF, false,
                     ""));
             out.put(slot(SLOT_SEARCH, "搜索胶囊", "双指长按打开的输入胶囊", A_OFF, true,

@@ -812,7 +812,8 @@ public class FloatingBallService extends Service {
         if (ended) {
             cancelWaveOffSettle();      // 又结束了 → 撤销"关闸门"的压后
             waveHold = true;
-            Log.i("FloatingBall", "turn ended=true（波闸门 开）");
+            markReplySettled();         // 1.2s 后确认：会话真停了才算最终回复
+            Log.i("FloatingBall", "turn ended=true（波闸门 开；等确认是否最终回复）");
             refreshFinalWave();
         } else {
             scheduleWaveOffSettle();    // 关闸门走压后，避免 turn/end 与 attempt-start 交替造成闪烁
@@ -859,7 +860,7 @@ public class FloatingBallService extends Service {
         //   所以默认**不再**把最终回复的波沉到球底（那是旧版另开的一支画法）；
         //   想要那种「只露波顶一截」的老效果，在动画库的 Siri 波里把「沉入玻璃」调成 1。
         boolean sunk = AnimScene.param(animPrefs(), AnimScene.A_WAVE, "inglass") >= 0.5f;
-        boolean show = siriEnabled && turnEnded && waveHold && hasBallText()
+        boolean show = siriEnabled && replyFinal && waveHold && hasBallText()
                 && AnimScene.A_WAVE.equals(finalAnim) && sunk;
         renderer.waveInGlass = show ? 1f : 0f;
         if (show) {
@@ -887,7 +888,14 @@ public class FloatingBallService extends Service {
         // ⚠️ 这里**不能**在 IDLE 时清「执行中」：实测 turn/end 比命令结束早 10 秒以上，
         //    一清，整段命令执行就掉回待机动画。清它只认三件事：tool/result、
         //    新一轮提问/新的 assistant attempt、以及 10 分钟超时兜底（见 toolRunningNow）。
-        if ("OFF".equals(state)) { asstToolRunning = false; toolSinceMs = 0; asstToolName = null; asstTaskActive = false; }
+        if ("OFF".equals(state)) {
+            asstToolRunning = false; toolSinceMs = 0; asstToolName = null; asstTaskActive = false;
+            replySettledPending = false; replyFinal = false; cancelFinalConfirm();
+        }
+        // 新一轮（思考/回答重新开始）→ 上一句不可能是最终回复
+        if ("THINKING".equals(state) || "ANSWERING".equals(state)) {
+            replySettledPending = false; replyFinal = false; cancelFinalConfirm();
+        }
         orbWanted = 0f;
         stateEnteredAt = android.os.SystemClock.uptimeMillis();
         sceneDirty = true;
@@ -960,13 +968,19 @@ public class FloatingBallService extends Service {
             //   镜像流里的 tool/call ↔ tool/result（见 DshHttpTransport.dispatchMirror）。
             return asstToolRunning ? AnimScene.SLOT_EXEC : AnimScene.SLOT_THINK;
         }
+        // ★ 2026-11-08（三修，用户口径）：
+        //   「过程中回复」= 这段回复**后面还有事要做**；
+        //   「最终回复」= 这段回复**之后会话就停了**。
+        //   以前只看 turn/end —— 可 DSH 每一步都会先 turn/end 再继续（工具是异步 job），
+        //   于是"还会接着干"的那些回复全被当成最终回复。现在 turn/end 只算"这段说完了"，
+        //   真正定性要等 1.2 秒后查一次这条会话还在不在跑（见 markReplySettled）。
         if ("ANSWERING".equals(stateNow)) {
-            return turnEnded ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
+            return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
         }
-        // ★ 2026-11-08：回合已经结束（turn/end 或本地流收完），但**最终回答的字还在球上**
-        //   —— 打字机还在弹、或者用户还没看完。这一段必须算「最终回复」。
-        //   以前这里直接落到 idle，所以整段回复期间球显示的是待机动画（用户报的就是这个）。
-        if (turnEnded && hasBallText()) return AnimScene.SLOT_FINAL;
+        // 字还在球上、但流已经收了：pending = 还没确认，先按过程中回复；确认停了才转最终回复
+        if (hasBallText() && (replyFinal || replySettledPending)) {
+            return replyFinal ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
+        }
         // ★ 球自己那一轮还在跑（工具之间模型在思考、球里没字）——这时不能显示待机：
         //   「帮我点个外卖」这类任务，工具一秒一个、间隙两三秒，
         //   以前每段间隙都落回 idle，用户看到的就是"大部分时候是待机动画"。
@@ -1230,6 +1244,106 @@ public class FloatingBallService extends Service {
     private static final long TOOL_STUCK_MS = 10 * 60 * 1000;
     private long toolSinceMs = 0;
 
+    // ── 「最终回复」的确认闸门 ─────────────────────────────────────────────
+    // 用户口径（2026-11-08）：
+    //   过程中回复 = 这段回复之后还有活要干；最终回复 = 回复之后会话就停了。
+    // DSH 每个 step 都会先发 turn/end 再接着干（tool 是异步 job），所以 turn/end 本身
+    // 区分不了「说完这句还要继续」和「说完了，收工」。这里等 FINAL_CONFIRM_MS 再查
+    // 一次 session/list 的 running：还在跑 → 过程中回复；停了 → 最终回复。
+    private static final long FINAL_CONFIRM_MS = 1200;
+    private volatile boolean replySettledPending = false;
+    private volatile boolean replyFinal = false;
+    private Runnable finalConfirm;
+    private int finalCheckAttempt = 0;
+    private volatile String asstSessionId = null;
+
+    /** 球现在跟的是哪条会话（问 running 用）。提问 / 镜像跟随时都会更新。 */
+    public static void setAssistantSession(String sid) {
+        FloatingBallService s = INSTANCE;
+        if (s == null || sid == null || sid.isEmpty()) return;
+        s.asstSessionId = sid;
+    }
+
+    /** null = 查不到（别拿「查不到」冒充「已经停了」，那会把过程中回复误判成最终回复）。 */
+    private Boolean sessionRunning(String sid) {
+        if (sid == null || sid.isEmpty()) return null;
+        try {
+            for (DshApi.SessionRow r : DshApi.get(this).sessions()) {
+                if (sid.equals(r.id)) return r.running;
+            }
+            return false;                      // 列表里没有这条 = 会话没了
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "查会话状态失败：" + message(t));
+            return null;
+        }
+    }
+
+    /** turn/end（或本地流收完）时进来：先按"待确认"，1.2 秒后看会话还在不在跑。 */
+    private void markReplySettled() {
+        replySettledPending = true;
+        replyFinal = false;
+        finalCheckAttempt = 0;
+        cancelFinalConfirm();
+        finalConfirm = new Runnable() {
+            @Override public void run() { runFinalCheck(); }
+        };
+        main.postDelayed(finalConfirm, FINAL_CONFIRM_MS);
+    }
+
+    /** 判一次「这条会话是不是停了」；查不到就再等一轮（最多 3 轮），绝不拿查询失败当"停了"。 */
+    private void runFinalCheck() {
+        finalConfirm = null;
+        if (!replySettledPending) return;
+        final String sid = asstSessionId;
+        final int attempt = ++finalCheckAttempt;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final Boolean running = sessionRunning(sid);
+                main.post(new Runnable() {
+                    @Override public void run() {
+                        if (!replySettledPending) return;
+                        if (running == null && attempt < 3) {
+                            Log.i("FloatingBall", "会话状态查不到 → 再等一轮（第 " + attempt + " 次）");
+                            finalConfirm = new Runnable() {
+                                @Override public void run() { runFinalCheck(); }
+                            };
+                            main.postDelayed(finalConfirm, FINAL_CONFIRM_MS);
+                            return;
+                        }
+                        replySettledPending = false;
+                        replyFinal = Boolean.FALSE.equals(running);
+                        sceneDirty = true;
+                        refreshScene(true);
+                        refreshFinalWave();     // 球底那道"沉进玻璃的波"只给最终回复
+                        Log.i("FloatingBall", replyFinal
+                                ? "回复后会话已停 → 最终回复"
+                                : (running == null
+                                    ? "会话状态一直查不到 → 暂按过程中回复"
+                                    : "回复后会话还在跑 → 过程中回复（不切最终回复）"));
+                    }
+                });
+            }
+        }, "reply-final-check").start();
+    }
+
+    private void cancelFinalConfirm() {
+        if (finalConfirm != null) {
+            main.removeCallbacks(finalConfirm);
+            finalConfirm = null;
+        }
+    }
+
+    /** 又来了新动静（新 step / 工具 / 新的一轮）→ 刚才那句就不是最终回复了。 */
+    private void noteReplyActivity(String why) {
+        if (!replySettledPending && !replyFinal) return;
+        replySettledPending = false;
+        replyFinal = false;
+        cancelFinalConfirm();
+        sceneDirty = true;
+        refreshScene(true);
+        Log.i("FloatingBall", "又有活动（" + why + "）→ 回到过程中回复");
+    }
+
     /** 正在预览（钉住某个槽）时不做漂移自检：预览就是要盖住真实状态。 */
     private boolean previewingScene() {
         return previewSlot != null;
@@ -1402,7 +1516,10 @@ public class FloatingBallService extends Service {
                     }
                     s.sceneDirty = true;
                     s.refreshScene(true);
-                    if (running) SiriAssistant.noteToolActivity();
+                    if (running) {
+                        s.noteReplyActivity("工具开始跑");
+                        SiriAssistant.noteToolActivity();
+                    }
                     Log.i("FloatingBall", "工具在跑=" + running
                             + (running ? "（" + s.asstToolName + "）" : "")
                             + " → 槽 " + s.resolveSlot());

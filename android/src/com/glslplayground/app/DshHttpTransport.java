@@ -168,6 +168,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
         } catch (Throwable t) {
             return false;
         }
+        FloatingBallService.setAssistantSession(sessionId);   // 后面查「还在不在跑」要用
         final String host = uri.getHost() == null ? "127.0.0.1" : uri.getHost();
         final int port = uri.getPort() > 0 ? uri.getPort() : 80;
 
@@ -388,6 +389,7 @@ public final class DshHttpTransport implements SiriAssistant.Transport {
                 if (cookie == null) authenticate();
                 final String session = pickActiveSession();
                 mirrorSession = session;
+                FloatingBallService.setAssistantSession(session);
                 DshWebSocket ws = new DshWebSocket();
                 mirrorSocket = ws;
                 ws.connect(hostOf(), portOf(), "/api/remote.mux", cookie, 6000, new DshWebSocket.Listener() {
