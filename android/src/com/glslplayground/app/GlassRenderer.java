@@ -168,7 +168,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     public volatile int fluidColorMode = 0;
     public volatile float fluidColorR = 0.55f, fluidColorG = 0.92f, fluidColorB = 1.0f;
     /** 总亮度倍数（和圆点的 uOrbGain 分开，流体自己一套）。 */
-    public volatile float fluidGain = 1.0f;
+    public volatile float fluidGain = 1.2f;
     /** 断线密度：0 = 连续的一整根；>0 = 沿丝线切成一段一段（单位≈每弧度的段数）。 */
     public volatile float fluidDash = 0f;
     public volatile float orbRim = 1.3f;      // 边缘辉光 = 圆点自身亮度 × 这个系数（跟波对齐，别把球边点亮）
@@ -475,108 +475,69 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "vec3 rotFY(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(c*v.x+s*v.z, v.y, -s*v.x+c*v.z); }\n" +
         "vec3 rotFX(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(v.x, c*v.y-s*v.z, s*v.y+c*v.z); }\n" +
         "vec3 rotFZ(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(c*v.x-s*v.y, s*v.x+c*v.y, v.z); }\n" +
-        // 半颗球壳：纬线 + 屏幕剪切 + 球面透视；亮暗按丝线段落走（有的刺眼、有的柔和）
+        // ── Fluid Glow（**照搬演示页 fluid-glow.html 的那一套**）─────────────────
+        // 用户：页面上的效果很自然。所以这里不再自创参数，直接把页面的几何/光核搬过来：
+        //   球壳纬线 + 0.38 的低频扭曲 + 0.30 的屏幕剪切 + 球面透视；
+        //   线 id 一律从画出来的 f 取（否则亮度会在丝线中间跳变）；
+        //   光核 = dots 同族：clamp(0.0032/sd^1.35) × (1 - smoothstep(0.02, 0.56, sd))。
+        // 唯一改动：半径按球体短半轴算（页面上是相对画布短边），并把背面壳压到 30%。
         "vec3 fluidShell(vec2 q, float side, float t, float dens){\n" +
         "  float r2 = dot(q,q); float z = sqrt(max(0.0, 1.0-r2));\n" +
         "  vec3 v = vec3(q, z*side);\n" +
-        // 球面受光：不是均匀发光，换边会暗下去
         "  vec3 ldir = normalize(vec3(-0.55,-0.42,0.72));\n" +
-        "  float lit = 0.12 + 0.88*max(dot(v, ldir), 0.0);\n" +
+        "  float lit = 0.14 + 0.86*max(dot(v, ldir), 0.0);\n" +
         "  float rimL = pow(1.0-z, 2.5)*0.55;\n" +
-        // 姿态照视频截图：极轴贴在屏幕平面内，丝线在右上角汇聚，不会出现正对镜头的同心圆
-        "  v = rotFY(v, t*0.30+0.85);\n" +
-        "  v = rotFZ(v, -0.80+0.06*sin(t*0.11));\n" +
-        "  v = rotFX(v, 0.10+0.05*sin(t*0.17));\n" +
+        "  v = rotFY(v, t*0.30 + 0.85);\n" +
+        "  v = rotFZ(v, -0.80 + 0.06*sin(t*0.11));\n" +
+        "  v = rotFX(v, 0.10 + 0.05*sin(t*0.17));\n" +
         "  float lat = asin(clamp(v.y,-1.0,1.0)); float lon = atan(v.x, v.z);\n" +
         "  float wn  = ffbm3(vec2(cos(lon),sin(lon))*1.15 + vec2(lat*0.85, t*0.16));\n" +
-        "  float wn2 = ffbm2(vec2(cos(lon),sin(lon))*2.4  - vec2(lat*0.70, t*0.11));\n" +
-        "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*2.2  + vec2(lat*1.1, t*0.22));\n" +
-        "  float foreshorten = 0.55 + 0.45*z;                 // 球面透视：越靠轮廓越密\n" +
+        "  float wn2 = ffbm2(vec2(cos(lon),sin(lon))*2.40 - vec2(lat*0.70, t*0.11));\n" +
+        "  float foreshorten = 0.42 + 0.58*z;\n" +
         "  float spacing = 3.14159265/max(dens, 3.0);\n" +
-        "  float shear = 0.18*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
-
-        // ★ 摆动只跟**经度**有关、跟纬度无关 —— 这样所有纬线是"同一把梳子"上的齿：
-        //   一起摆、永远平行，不会互相交叉（交叉就是用户看到的"割裂/折痕"）。
-        "  float latWarp = 0.42*sin(lon*1.7 + t*0.42)\n" +
-        "                + 0.20*sin(lon*3.1 - t*0.31 + 1.3)\n" +
-        "                + 0.09*sin(lon*5.3 + t*0.17 + 2.1);\n" +
-        "  float f = (lat + latWarp + shear)/spacing;\n" +
-        // ★★ 每根丝线的 id 必须从**画出来的这条线** f 取。
-        //    以前用的是 (lat+shear) 的 band —— 和 f 差了一个 latWarp，
-        //    于是同一根线走到 warp 的半格处，hash 会突然翻到另一根线：
-        //    亮度/粗细在丝线**中间**跳一下 → 用户看到的就是"割裂"。
-        "  float band = floor(f + 0.5);\n" +
+        "  float shear = 0.30*q.x*(1.0 + 0.15*sin(t*0.27));\n" +
+        "  float f = (lat + (wn-0.5)*0.38 + shear)/spacing;\n" +       // ← 页面原值
+        "  float band = floor(f + 0.5);\n" +                            // ← id 跟画出来的线走
         "  float hb = fh11(vec2(band, side*7.0));\n" +
-        "  float latEff = f * spacing;\n" +
-        "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
-
-        "  float thick = 0.85 + 0.70*pow(0.5+0.5*sin(latEff*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
-        // 先算"这根丝线这一段有多亮/有多热"，再决定芯的粗细 —— 热点处芯会变粗、变白
+        "  float latEff = f*spacing;\n" +
+        "  float sd = abs(fract(f+0.5)-0.5)*spacing*foreshorten;\n" +
+        "  float thick = 0.55 + 0.65*pow(0.5+0.5*sin(latEff*2.2 + t*0.9 + hb*6.2831853), 3.0);\n" +
+        "  float sdN = sd/max(thick, 0.32);\n" +
+        "  float g = clamp(0.0032/pow(max(sdN,1e-4), 1.35), 0.0, 1.0) * (1.0 - smoothstep(0.02, 0.56, sdN));\n" +
         "  float segN = ffbm2(vec2(band*0.73, hb*4.0 + t*0.13));\n" +
         "  float hotN = ffbm2(vec2(latEff*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
-        "  float hot  = smoothstep(0.42, 0.86, hotN) * clamp(uFluidHot, 0.0, 2.0);\n" +
-        "  float sdN = sdLat/max(thick * (1.0 + hot*0.9), 0.32);\n" +
-        "  float g = clamp(0.0055/pow(max(sdN,1e-4), 1.22), 0.0, 1.0) * (1.0-smoothstep(0.02,0.80,sdN));\n" +
-        // 把连续的丝线切成一段一段：沿经度切开，每根线自己的相位，
-        // 切口用 smoothstep 软化（硬切会出现锯齿）。uFluidDash 越大，段越短越碎。
-        "  float dashOn = step(0.5, uFluidDash);\n" +
-        "  float dashJit = (ffbm2(vec2(band*1.7, t*0.15)) - 0.5) * 2.4;\n" +   // 每段的起点/长度都不一样
-        "  float duty = 0.38 + 0.22 * ffbm2(vec2(band*2.3 + hb*3.0, t*0.10));\n" +
-        "  float dp = (lon + 0.30*sin(lat*3.0 + t*0.2)) * max(uFluidDash, 0.0)\n" +
-        "           + hb*9.0 + t*0.22 + dashJit;\n" +
-        "  float dph = fract(dp);\n" +
-        "  float dash = smoothstep(0.02, 0.10, dph) * (1.0 - smoothstep(duty, duty+0.12, dph));\n" +
-        "  g *= mix(1.0, dash, dashOn);\n" +
-        // 每根丝线自己的亮度权重 + 缓慢游走的"热点"：少数段落烧到白、其余偏柔
-        "  float wSeg = mix(0.45, 1.45, segN);\n" +
+        "  float hot  = smoothstep(0.55, 0.92, hotN) * clamp(uFluidHot, 0.0, 2.0);\n" +
+        "  float wSeg = mix(0.35, 1.45, segN);\n" +
         "  vec3 base;\n" +
-        "  if(uFluidColorMode < 0.5)      base = vec3(0.96, 0.98, 1.00);        // 纯白\n" +
-        "  else if(uFluidColorMode < 1.5) base = uFluidColor;                    // 单色\n" +
-        "  else {                                                                // 混色：按丝线走光谱\n" +
-        "    float hue = fract(0.478 + 0.09*sin(band*1.7 + t*0.21) + 0.05*(wn2-0.5));\n" +
-        "    base = hue2rgbF(hue);\n" +
-        "  }\n" +
-        "  vec3 c = mix(base, vec3(1.0), clamp(hot*0.9, 0.0, 1.0));   // 热点往白里烧\n" +
-        "  float depth = (side > 0.0) ? 1.0 : 0.26;                   // 背面暗 → 有厚度\n" +
-        // 芯 + 宽光晕：球很小，只有芯就像玻璃碴；加一层 exp 晕才是"发光"
-        "  float core = g * (wSeg * (1.0 + hot*2.6) + hot*1.2);\n" +
-        "  float halo = 0.15 * exp(-sdN * 2.8);\n" +
-        // 侧对着镜头的那圈丝线会被压成又细又直的"发丝"（用户嫌像被裁了一刀）——直接让它们淡出，
-        // 只留正面那几根幅度大、会发光的主线。
-        "  float facing = mix(1.0, smoothstep(0.05, 0.40, z), 0.90);   // 侧对镜头的丝线会被压成一道细锐的"折痕"，和宽光带交叉 → 看着像割裂\n" +
-        "  return c * (core + halo) * (lit + rimL) * depth * facing;\n" +
+        "  if(uFluidColorMode < 0.5)      base = vec3(0.96,0.98,1.00);\n" +
+        "  else if(uFluidColorMode < 1.5) base = uFluidColor;\n" +
+        "  else { float hue = fract(0.478 + 0.09*sin(band*1.7 + t*0.21) + 0.05*(wn2-0.5)); base = hue2rgbF(hue); }\n" +
+        "  vec3 c = mix(base, vec3(1.0), clamp(hot*0.85, 0.0, 1.0));\n" +
+        "  float depth = (side > 0.0) ? 1.0 : 0.30;\n" +
+        "  return c * (g*wSeg + hot*g*1.5) * (lit + rimL) * depth;\n" +
         "}\n" +
         "vec3 fluidScenePx(vec2 localPx, float hx, float hy, float t){\n" +
-        // 半径按**形状**给（短半轴 × uFluidSize），不是按圆点环：
-        // 胶囊/方卡里这团光都会正好铺在中间，不会因为 orbRadius 被 shapeK 放大而只看到中间几条。
         "  float R = max(min(hx, hy) * 0.62 * max(uFluidSize, 0.05), 3.0);\n" +
         "  vec2 q = (localPx - vec2(0.0, -uOrbOffset*hy*0.5)) / R;\n" +
-        // 呼吸：半径在收缩/扩散（用户要的"在水里"）
-        "  float pulse = 0.10*sin(t*0.55) + 0.045*sin(t*1.27+2.1);\n" +
-        "  q /= (1.0 + 0.9*pulse);\n" +
-        // 域扭曲：轮廓和丝线一起被水流拖着走
+        "  float pulse = 0.085*sin(t*0.55) + 0.040*sin(t*1.27 + 2.1);\n" +
+        "  q /= (1.0 + pulse);\n" +
         "  vec2 flow = vec2(ffbm2(q*2.1 + vec2(0.0, t*0.33)) - 0.5,\n" +
         "                   ffbm2(q*2.1 + vec2(5.2, t*0.30) + 3.1) - 0.5);\n" +
-        "  vec2 wq = q + flow*0.06;\n" +
+        "  vec2 wq = q + flow*0.11;\n" +
         "  float ang = atan(wq.y, wq.x);\n" +
-        "  float bulge = 0.035*sin(2.0*ang + t*0.31) + 0.018*sin(3.0*ang - t*0.23)\n" +
-        "              + 0.010*sin(5.0*ang + t*0.17 + 1.7);\n" +
+        "  float bulge = 0.060*sin(2.0*ang + t*0.31) + 0.030*sin(3.0*ang - t*0.23)\n" +
+        "              + 0.015*sin(5.0*ang + t*0.17 + 1.7);\n" +
         "  wq /= (1.0 + bulge);\n" +
         "  float r = length(wq);\n" +
         "  vec3 col = vec3(0.0);\n" +
-        // 体内柔光：让这团光有体积（不然只剩一堆线，像线框）
-        "  if(r < 1.05){\n" +
-        "    float body = exp(-r*r*2.6) * smoothstep(1.05, 0.6, r);\n" +
-        "    vec3 bc = (uFluidColorMode < 0.5) ? vec3(0.96,0.98,1.0)\n" +
-        "            : ((uFluidColorMode < 1.5) ? uFluidColor : hue2rgbF(0.5));\n" +
-        "    col += bc * body * 0.09;\n" +
-        "    float edge = smoothstep(1.06, 0.50, r);\n" +
+        "  if(r < 1.06){\n" +
+        "    float edge = smoothstep(1.06, 0.86, r);\n" +
         "    col += fluidShell(wq,  1.0, t, uFluidRibs) * edge;\n" +
-        // 背面那半颗只在很暗的地方露出来，会变成"一根根不亮的线"、像建模的棱边 —— 直接不画。
-        // （要厚度感就靠球面透视 + 受光，不靠背面线框。）
-        // 背面那半颗不画：它的丝线会和正面的宽光带交叉成"一道细折痕"（用户圈出来的割裂）
-
+        "    col += fluidShell(wq, -1.0, t, uFluidRibs) * edge;\n" +
         "  }\n" +
+        "  vec3 bc = (uFluidColorMode < 0.5) ? vec3(0.96,0.98,1.0)\n" +
+        "          : ((uFluidColorMode < 1.5) ? uFluidColor : hue2rgbF(0.50));\n" +
+        "  col += bc * 0.09 * exp(-r*r*2.4);\n" +                            // 体内柔光（页面同款）
         "  return col * max(uFluidGain, 0.0);\n" +
         "}\n" +
         "vec2 screenUv(vec2 fc){\n" +
