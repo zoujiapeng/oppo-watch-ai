@@ -494,22 +494,26 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float foreshorten = 0.55 + 0.45*z;                 // 球面透视：越靠轮廓越密\n" +
         "  float spacing = 3.14159265/max(dens, 3.0);\n" +
         "  float shear = 0.18*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
-        // 摆动幅度调大、再叠一层碎噪声：丝线不再是"一圈一圈很规整"，而是被水流扯得乱晃
-        // 每根丝线自己的 id/随机相位（必须在 f 之前定，后面颜色也用它）
-        "  float band = floor((lat + shear)/spacing + 0.5);\n" +
-        "  float hb = fh11(vec2(band, side*7.0));\n" +
+
         // ★ 摆动只跟**经度**有关、跟纬度无关 —— 这样所有纬线是"同一把梳子"上的齿：
         //   一起摆、永远平行，不会互相交叉（交叉就是用户看到的"割裂/折痕"）。
         "  float latWarp = 0.42*sin(lon*1.7 + t*0.42)\n" +
         "                + 0.20*sin(lon*3.1 - t*0.31 + 1.3)\n" +
         "                + 0.09*sin(lon*5.3 + t*0.17 + 2.1);\n" +
         "  float f = (lat + latWarp + shear)/spacing;\n" +
+        // ★★ 每根丝线的 id 必须从**画出来的这条线** f 取。
+        //    以前用的是 (lat+shear) 的 band —— 和 f 差了一个 latWarp，
+        //    于是同一根线走到 warp 的半格处，hash 会突然翻到另一根线：
+        //    亮度/粗细在丝线**中间**跳一下 → 用户看到的就是"割裂"。
+        "  float band = floor(f + 0.5);\n" +
+        "  float hb = fh11(vec2(band, side*7.0));\n" +
+        "  float latEff = f * spacing;\n" +
         "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
 
-        "  float thick = 0.85 + 0.70*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
+        "  float thick = 0.85 + 0.70*pow(0.5+0.5*sin(latEff*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
         // 先算"这根丝线这一段有多亮/有多热"，再决定芯的粗细 —— 热点处芯会变粗、变白
         "  float segN = ffbm2(vec2(band*0.73, hb*4.0 + t*0.13));\n" +
-        "  float hotN = ffbm2(vec2(lat*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
+        "  float hotN = ffbm2(vec2(latEff*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
         "  float hot  = smoothstep(0.42, 0.86, hotN) * clamp(uFluidHot, 0.0, 2.0);\n" +
         "  float sdN = sdLat/max(thick * (1.0 + hot*0.9), 0.32);\n" +
         "  float g = clamp(0.0055/pow(max(sdN,1e-4), 1.22), 0.0, 1.0) * (1.0-smoothstep(0.02,0.80,sdN));\n" +
