@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 
@@ -210,6 +211,37 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
 
     // ── GL 资源 ──
     private int capProg, blurProg, compProg, maskProg;
+    // 思考中胶囊加载：点精灵直接画进「背景内容」纹理，玻璃的折射/黑区/边缘一起处理
+    private int loaderProg, loaderBuf;
+    private Fbo loaderFbo;
+    private int loaderBlackTex = 0;
+    public int loaderMode = 0;
+    public float loaderSpeed = 1f;
+    public float loaderScale = 1f;
+    public float loaderDot = 1f;
+    /** 动画时钟倍率（每个动画自己的「速度」滑杆，由服务按状态槽推过来）。 */
+    public volatile float animSpeed = 1f;
+    /** 胶囊加载点阵的竖直偏移（窗口像素，正值向下）：球里有字时沉到球底动效带。 */
+    public volatile float loaderDyPx = 0f;
+    // ── 搜索胶囊 / 六区这类「界面自绘」的层 ────────────────────────────────
+    // 这两层各自用自己的玻璃着色器画整块界面，球那一趟合成根本不会跑，
+    // 所以胶囊加载动画改走**屏幕空间叠加**：同一套点阵，直接点在窗口画布上。
+    public volatile boolean overlayLoader = false;
+    public volatile float ovlCx = 0f, ovlCy = 0f, ovlHx = 0f, ovlHy = 0f;   // 窗口像素
+    private final CapsuleLoaderEngine loaderEngine = new CapsuleLoaderEngine();
+    private final float[] loaderVerts = new float[512 * 4];
+    private java.nio.FloatBuffer loaderVb;
+    private long loaderLastNs = 0L;
+    private static final String LOADER_VS =
+        "attribute vec2 aPos; attribute float aSize; attribute float aAlpha;\n" +
+        "uniform vec2 uRes; varying float vA;\n" +
+        "void main(){ vA=aAlpha; gl_PointSize=aSize;\n" +
+        "  gl_Position=vec4(aPos.x/uRes.x*2.0-1.0, 1.0-aPos.y/uRes.y*2.0, 0.0, 1.0); }";
+    private static final String LOADER_FS =
+        "precision mediump float; varying float vA;\n" +
+        "void main(){ vec2 p=gl_PointCoord*2.0-1.0; float d=length(p); if(d>1.0) discard;\n" +
+        "  float core=smoothstep(0.24,0.0,d); float halo=pow(max(1.0-d,0.0),2.4);\n" +
+        "  float a=(core*0.95+halo*0.55)*vA; gl_FragColor=vec4(a,a,a,a); }";
     private int quadBuf;
     private int oesTex = 0;
     /** 每次 surface 重建后打一行"第一帧画了多大"，用来验冷启动那颗球是不是直接就是常态尺寸。 */
@@ -276,6 +308,20 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     }
 
     private final long t0 = System.currentTimeMillis();
+    // ── 动画时钟 ──────────────────────────────────────────────────────────
+    // 以前直接传「开机到现在多少秒」，所以任何「速度」都只能靠改代码。
+    // 现在按 animSpeed 累积：调速度的那一刻相位是连续的（不会突然跳一下）。
+    private long animClockNs = 0L;
+    private float animClockSec = 0f;
+    private float animClock() {
+        long now = System.nanoTime();
+        if (animClockNs == 0L) animClockNs = now;
+        float dt = (now - animClockNs) / 1e9f;
+        animClockNs = now;
+        dt = Math.max(0f, Math.min(0.1f, dt));
+        animClockSec += dt * Math.max(.05f, Math.min(4f, animSpeed));
+        return animClockSec;
+    }
 
     private final FloatBuffer quad;
     private static final float[] TRI = { -1f, -1f, 3f, -1f, -1f, 3f };
@@ -348,6 +394,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
         "uniform float uFluid;          // 1 = 思考中画流体发光（否则画流体圆点）\n" +
         "uniform float uFluidRibs, uFluidSize, uFluidHot, uFluidColorMode, uFluidGain, uFluidDash;\n" +
+        "uniform sampler2D iLoader; uniform float uLoaderOn;\n" +
         "uniform vec3  uFluidColor;      // 单色模式的颜色（0..1）\n" +
         "uniform float uDropMode;   // 1 = 水珠模式（四区那四个圆）\n" +
         "uniform float uDropZoom;   // 水珠的缩小倍率（>1 = 缩小镜：把更大的范围压进圆里）\n" +
@@ -643,6 +690,17 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  }\n" +
         "  float blackMix = blackMask*uTopDarken*tBlackK;\n" +
         "  col = mix(col, blackCol, blackMix);\n" +
+        // 思考中胶囊加载：像 dots 一样画在玻璃内容层（黑区之上），但位置/形状严格贴球的 SDF，绝不会出胶囊
+        "  if(uLoaderOn > 0.001){\n" +
+        // ★ 2026-11-08 用户：「动画被玻璃折射了 —— Liquid Glass 页面里的画面是不变形的」。
+        //   所以动画**不进透镜位移场**：用球内的原始坐标取样/计算，圆点保持正圆、
+        //   位置不打弯；玻璃的折射只作用在背后的桌面上。
+        //   黑区仍按原公式小幅遮蔽（点阵要亮一点才看得清）。
+        "    vec2 luv = vec2(c.x/uHalf.x, -c.y/uHalf.y) * 0.5 + 0.5;\n" +
+        "    float lfade = smoothstep(0.0, -12.0*uScale, sd);\n" +
+        "    float lvis = mix(1.0 - blackMask*uTopDarken*0.55, 1.0, clamp(uFluid,0.0,1.0));\n" +
+        "    col += texture2D(iLoader, clamp(luv, 0.0, 1.0)).rgb * (uLoaderOn * lfade * lvis);\n" +
+        "  }\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         // 波照旧画（方形态收尾也画），**只挪竖直锚点**：
         //   圆球态 = 黑区下沿 b1（原来的观感，一点没动），坐标按球高归一化；
@@ -650,7 +708,8 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         //   85% 屏宽的一半）→ 球高怎么变，露出来的波顶都是同样多。
         // 用户原话：「Siri 出现在球的 y 轴往下，刚刚好能看到波的顶部一点点」。
         "  if(uWaveAmp > 0.001){\n" +
-        "    vec2 cw = (c + vec2(grad.x, -grad.y) * d * 0.5) / uZoom;\n" +
+        // 动画不打弯：直接用球内坐标（不叠加透镜位移、也不吃 zoom）。
+        "    vec2 cw = c;\n" +
         "    vec2 wp;\n" +
         "    if(uWaveInGlass > 0.5){\n" +
         "      float s = max(uHalf.x * max(uWaveScale, 0.1), 1.0);\n" +
@@ -956,7 +1015,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // program / buffer / texture 名字全部作废。这里不能 glDelete（那些名字在新上下文里
         // 可能已经是别人的），只能直接忘掉；FBO 尤其关键 —— 留着旧引用的话，抓屏/抠图会全部
         // 画到"在新上下文里根本没附件"的 FBO 上，球里就是一片黑（折射消失的另一条路）。
-        capProg = blurProg = compProg = searchProg = zoneProg = maskProg = 0;
+        capProg = blurProg = compProg = searchProg = zoneProg = maskProg = loaderProg = 0;
         quadBuf = 0; oesTex = 0;
         full = null; half = null; half2 = null; bg = null; bg2 = null;
         bgInit = false; gotFrames = 0; lastSnapMs = 0; frameAvailable = false;
@@ -967,10 +1026,16 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         searchProg = build(VS, SearchLayerShader.FRAG);   // metaball-search 那一层（原样移植）
         zoneProg = build(VS, ZoneLayerShader.FRAG);       // 状态 3：同一套材质、多个形状
         maskProg = build(VS, FS_MASK);
+        loaderProg = build(LOADER_VS, LOADER_FS);
 
         int[] b = new int[1];
         GLES20.glGenBuffers(1, b, 0);
         quadBuf = b[0];
+        int[] lb = new int[1];
+        GLES20.glGenBuffers(1, lb, 0);
+        loaderBuf = lb[0];
+        loaderVb = java.nio.ByteBuffer.allocateDirect(loaderVerts.length * 4)
+                .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer();
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, quadBuf);
         GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, TRI.length * 4, quad, GLES20.GL_STATIC_DRAW);
 
@@ -1185,6 +1250,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         // 波的幅度（含闸门）
         float waveAmpEff = (waveOn && !suppressWave) ? waveAmp * waveGate : 0f;
 
+        // 思考中胶囊加载：先画进背景内容（玻璃再折射它），位置/形状都由球的几何决定
+        drawCapsuleLoader();
+
         // Pass 2: 背景模糊（背景每帧在变，需每帧重算）
         buildBlur(bgTex);
 
@@ -1197,12 +1265,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         //   服务侧已经加了互斥（enterSearchMode 会先退状态 3），这里再兜一层。
         if (searchMode) {
             drawSearchLayer(bgTex);
+            drawLoaderOverlay();
             return;
         }
         if (zoneMode) {
             // ★ 2026-10-23：直接用**球 / 聊天卡片那颗 shader（FS_COMP）**画菜单与四区，
             //   每个形状单独一趟、预乘 alpha 混合叠上去（用户：「直接复用聊天界面那个方形」）。
             drawZoneLayerBall(bgTex);
+            drawLoaderOverlay();
             return;
         }
 
@@ -1246,7 +1316,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveInGlass"), waveInGlass);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPxToScreen"), invK);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveDrop"), waveDropPx * k);
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), (System.currentTimeMillis() - t0) / 1000f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "iTime"), animClock());
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveAmp"), waveAmpEff);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uWaveScale"), waveScale);
         // 思考中的流体圆点：uOrbRadius = 环半径(屏幕像素)，uOrbMix = 波↔圆点的交叉淡化进度
@@ -1269,6 +1339,11 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
                 Math.max(0f, Math.min(1f, fluidColorR)),
                 Math.max(0f, Math.min(1f, fluidColorG)),
                 Math.max(0f, Math.min(1f, fluidColorB)));
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, loaderFbo != null ? loaderFbo.tex : loaderBlackTex);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(compProg, "iLoader"), 3);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uLoaderOn"),
+                loaderFbo != null ? waveGate : 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panelMode);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropZoom"), 1f);
@@ -1277,6 +1352,105 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uZoom"), zoom);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
+
+    /**
+     * 推进点阵引擎一次并把点写进 loaderVb。
+     *
+     * @param bw,bh 球的局部像素尺寸（引擎坐标系）
+     * @param sx,sy 局部像素 → 目标画布的缩放
+     * @param ox,oy 目标画布偏移
+     * @return 点数
+     */
+    private int stepLoaderPoints(float bw, float bh, float sx, float sy, float ox, float oy) {
+        if (loaderMode <= 0 || loaderProg == 0 || loaderBuf == 0 || loaderVb == null) return 0;
+        if (!waveOn || waveGate <= .01f) return 0;
+        long now = System.nanoTime();
+        float dt = loaderLastNs == 0 ? 0f : (now - loaderLastNs) / 1e9f;
+        loaderLastNs = now;
+        loaderEngine.setMode(loaderMode);
+        loaderEngine.setSpeed(loaderSpeed * Math.max(.1f, Math.min(4f, animSpeed)));
+        loaderEngine.setSize(bw, bh);
+        loaderEngine.step(dt);
+        int n = Math.min(loaderEngine.count(), 512);
+        if (n <= 0) return 0;
+
+        float[] p = loaderEngine.data();
+        FloatBuffer fb = loaderVb;
+        fb.clear();
+        float sc = Math.max(.2f, Math.min(8f, loaderScale));
+        float dot = Math.max(.2f, Math.min(6f, loaderDot));
+        float ccx = bw / 2f, ccy = bh / 2f;
+        float k = (sx + sy) * 0.5f;
+        for (int i = 0; i < n; i++) {
+            int q = i * 4;
+            fb.put((ccx + (p[q] - ccx) * sc) * sx + ox);
+            fb.put((ccy + (p[q + 1] - ccy) * sc + loaderDyPx) * sy + oy);
+            fb.put(Math.max(2f, p[q + 2] * sc * dot * 10.4f * k));
+            fb.put(p[q + 3] * waveGate);
+        }
+        fb.position(0);
+        fb.limit(n * 4);
+        return n;
+    }
+
+    /** 把 loaderVb 里的点画到当前帧缓冲（调用方负责绑定/清屏/混合）。 */
+    private void drawLoaderPoints(int n, float resW, float resH) {
+        GLES20.glUseProgram(loaderProg);
+        int aPos = GLES20.glGetAttribLocation(loaderProg, "aPos");
+        int aSize = GLES20.glGetAttribLocation(loaderProg, "aSize");
+        int aAlpha = GLES20.glGetAttribLocation(loaderProg, "aAlpha");
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, loaderBuf);
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, n * 16, loaderVb, GLES20.GL_DYNAMIC_DRAW);
+        GLES20.glEnableVertexAttribArray(aPos);
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, 0);
+        GLES20.glEnableVertexAttribArray(aSize);
+        GLES20.glVertexAttribPointer(aSize, 1, GLES20.GL_FLOAT, false, 16, 8);
+        GLES20.glEnableVertexAttribArray(aAlpha);
+        GLES20.glVertexAttribPointer(aAlpha, 1, GLES20.GL_FLOAT, false, 16, 12);
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(loaderProg, "uRes"), resW, resH);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE);
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, n);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisableVertexAttribArray(aPos);
+        GLES20.glDisableVertexAttribArray(aSize);
+        GLES20.glDisableVertexAttribArray(aAlpha);
+    }
+
+    /** 球的胶囊加载：点精灵先画进一张球的局部贴图，合成 pass 再把它加在黑区之上、SDF 之内。 */
+    private void drawCapsuleLoader() {
+        if (overlayLoader) return;                    // 搜索/六区走屏幕空间那条
+        float bw = 2f * ballHxW, bh = 2f * ballHyW;
+        if (bw < 8f || bh < 8f) return;
+        int tw = 512;
+        int th = Math.max(64, Math.round(tw * bh / bw));
+        if (loaderFbo == null || loaderFbo.w != tw || loaderFbo.h != th) {
+            if (loaderFbo != null) loaderFbo.release();
+            loaderFbo = new Fbo(tw, th);
+        }
+        int n = stepLoaderPoints(bw, bh, tw / bw, th / bh, 0f, 0f);
+        if (n <= 0) return;
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, loaderFbo.fbo);
+        GLES20.glViewport(0, 0, tw, th);
+        GLES20.glClearColor(0f, 0f, 0f, 0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        drawLoaderPoints(n, tw, th);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
+
+    /**
+     * 搜索胶囊 / 六区的胶囊加载：这两层整块界面由自己的着色器画，球那趟合成不会跑，
+     * 所以在整屏画完之后把同一套点阵直接叠到窗口画布上（位置由服务按界面几何给）。
+     */
+    private void drawLoaderOverlay() {
+        if (!overlayLoader) return;
+        float bw = Math.max(8f, ovlHx * 2f), bh = Math.max(8f, ovlHy * 2f);
+        int n = stepLoaderPoints(bw, bh, 1f, 1f, ovlCx - ovlHx, ovlCy - ovlHy);
+        if (n <= 0) return;
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, winW, winH);
+        drawLoaderPoints(n, winW, winH);
     }
 
     // root 直采帧 → GL 2D 纹理
@@ -1303,6 +1477,7 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         if (half2 != null) { half2.release(); half2 = null; }
         if (bg != null) { bg.release(); bg = null; }
         if (bg2 != null) { bg2.release(); bg2 = null; }
+        if (loaderFbo != null) { loaderFbo.release(); loaderFbo = null; }
     }
 
     private void ensureFbos() {

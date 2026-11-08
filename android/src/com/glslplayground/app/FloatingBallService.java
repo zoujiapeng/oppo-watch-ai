@@ -416,11 +416,13 @@ public class FloatingBallService extends Service {
     private final Runnable renderTick = new Runnable() {
         @Override public void run() {
             if (glView == null || targetFps <= 0) return;
+            pumpScene();                  // 状态槽 → 动画（每个状态各绑一套，设置页可改）
             pumpOrbMix();                 // 波形交叉淡化按渲染节拍推进（状态切换时不再瞬间换脸）
             pumpWaveGate();               // 幅度包络：换形态前先淡出、换完再淡入
             pumpTextHoldSafety();         // 几何保持的兜底释放
             pumpShotRequest();            // 外部（调试脚本）请求一帧球体截图
             pumpStateRequest();           // 外部（调试脚本）喂一个助手状态，回归状态机用
+            pumpSceneFiles();             // 外部（调试脚本）预览槽 / 改绑定，回归动画总控用
             pumpApprovalDebug();          // 外部（调试脚本）喂一条假审批，把审批球叫出来
             pumpSearchRequest();          // 外部（调试脚本）开关搜索胶囊 / 喂一句要发的话
             pumpGestureRequest();         // 外部（调试脚本）驱动三态手势机的每一步
@@ -500,6 +502,57 @@ public class FloatingBallService extends Service {
             Log.i("FloatingBall", "state request (debug): " + name);
             setAssistantState(name);
             return;
+        }
+    }
+
+    // ── 动画总控的回归钩子（改动画状态机时用它，别删）──────────────────────
+    //   touch files/scene-<槽>       → 预览该槽（idle/listen/thinking/executing/
+    //                                  reply_stream/reply_final/approval/search/zones）
+    //   touch files/sceneend         → 结束预览
+    //   touch files/bind-<槽>=<动画> → 直接把某个槽绑到某个动画（wave/dots/fluid/cap1..9/off）
+    // 为什么要文件口子：状态只在一轮对话里出现，靠手点设置页很难卡在正确时刻；
+    // 有了它就能脚本化地「绑动画 → 触发状态 → 拍一帧 → 比对」。
+    private long nextSceneFileCheck = 0;
+
+    private void pumpSceneFiles() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now < nextSceneFileCheck) return;
+        nextSceneFileCheck = now + 250;
+        java.io.File dir = new java.io.File(STATE_REQ_PREFIX).getParentFile();
+        if (dir == null) return;
+        java.io.File[] fs = dir.listFiles();
+        if (fs == null) return;
+        for (java.io.File f : fs) {
+            String n = f.getName();
+            if ("sceneend".equals(n)) {
+                if (!f.delete()) return;
+                Log.i("FloatingBall", "scene debug: 结束预览");
+                setScenePreview("");
+                return;
+            }
+            if (n.startsWith("scene-")) {
+                if (!f.delete()) return;
+                String slot = n.substring(6);
+                Log.i("FloatingBall", "scene debug: 预览 " + slot);
+                setScenePreview(slot);
+                return;
+            }
+            if (n.startsWith("bind-")) {
+                int eq = n.indexOf('=', 5);
+                if (eq < 0) continue;
+                if (!f.delete()) return;
+                String slot = n.substring(5, eq);
+                String anim = n.substring(eq + 1);
+                Log.i("FloatingBall", "scene debug: 绑定 " + slot + " = " + anim);
+                if (AnimScene.A_OFF.equals(anim) || AnimScene.isCap(anim)
+                        || AnimScene.A_WAVE.equals(anim) || AnimScene.A_DOTS.equals(anim)
+                        || AnimScene.A_FLUID.equals(anim)) {
+                    animPrefs().edit().putString("bind." + slot, anim).apply();
+                }
+                sceneDirty = true;
+                refreshScene(true);
+                return;
+            }
         }
     }
 
@@ -606,12 +659,20 @@ public class FloatingBallService extends Service {
         float dt = waveGateLastMs == 0 ? 0.016f : Math.min(0.05f, (now - waveGateLastMs) / 1000f);
         waveGateLastMs = now;
         if (renderer.waveGate == waveGateTarget) {
-            if (waveModePending >= 0 && waveGateTarget == 0f) {
+            if (waveGateTarget == 0f && (waveModePending >= 0 || sceneCommit != null)) {
                 // 已经淡到 0（画面里没有波也没有点）→ 现在换形态，看不出跳变
-                renderer.waveMode = waveModePending;
-                waveModePending = -1;
-                waveGateTarget = 1f;
-                Log.i("FloatingBall", "wave mode -> " + renderer.waveMode + "（幅度为 0 时切换）");
+                if (waveModePending >= 0) {
+                    renderer.waveMode = waveModePending;
+                    waveModePending = -1;
+                    Log.i("FloatingBall", "wave mode -> " + renderer.waveMode + "（幅度为 0 时切换）");
+                }
+                if (sceneCommit != null) {
+                    Runnable c = sceneCommit;
+                    sceneCommit = null;
+                    c.run();                          // 状态槽要的形态（波/点/流体/胶囊加载）
+                }
+                // 关掉的动画（槽=关闭）淡到 0 就停在那儿
+                waveGateTarget = (renderer != null && renderer.waveOn) ? 1f : 0f;
             }
             return;
         }
@@ -782,18 +843,24 @@ public class FloatingBallService extends Service {
 
     /**
      * 方形态（球里有字）的出波闸门：**只有整轮结束**才出波，而且波走玻璃、贴球底。
-     * 其它情况（文字还在流、思考中）一律把闸门压到 0 —— 与老行为一致。
+     *
+     * ★ 2026-11-08：这道「沉进玻璃的波」现在是**最终回复这个槽绑了 Siri 波**才出现。
+     * 槽里绑的是 dots / 流体 / 胶囊加载时，最终回复照常在球里画那个动画，不沉底
+     * （以前是写死的，所以「最终回复换成别的动画」根本做不到）。
      */
     private void refreshFinalWave() {
         if (renderer == null) return;
-        // ⚠️⚠️ 这个布尔量是"圆点动画看不见"的**真凶**，改之前先读着色器：
+        // ⚠️ 这个布尔量是"圆点动画看不见"的**真凶**，改之前先读着色器：
         //   `if (uWaveInGlass > 0.5) { 只画球底那一截波 } else { 圆点/波在这里画 }`
         // 也就是说 waveInGlass=1 时，**整段流体圆点的绘制被跳过**。
-        // 老代码只要「球里有字」就把它设成 1 → 处理中（读取/运行命令/工具调用）时
-        // 无论怎么调 orbMix/orbOffset 都看不到圆点（用户报的"我还是没看到动画"）。
-        // 现在：**只有整轮结束**（waveHold，最终结果那一刻）才把波沉进玻璃；
-        // 处理中一律 0 → 圆点照常画（有字时沉到动效带、没字时铺在球心）。
-        boolean show = siriEnabled && waveHold && hasBallText();
+        String finalAnim = AnimScene.master(animPrefs())
+                ? AnimScene.binding(animPrefs(), AnimScene.SLOT_FINAL) : AnimScene.A_WAVE;
+        // ★ 2026-11-08 用户要求：「所有动画载入玻璃的方式都要和 Liquid Glass 里那个一样」。
+        //   所以默认**不再**把最终回复的波沉到球底（那是旧版另开的一支画法）；
+        //   想要那种「只露波顶一截」的老效果，在动画库的 Siri 波里把「沉入玻璃」调成 1。
+        boolean sunk = AnimScene.param(animPrefs(), AnimScene.A_WAVE, "inglass") >= 0.5f;
+        boolean show = siriEnabled && turnEnded && waveHold && hasBallText()
+                && AnimScene.A_WAVE.equals(finalAnim) && sunk;
         renderer.waveInGlass = show ? 1f : 0f;
         if (show) {
             renderer.waveOn = true;
@@ -805,88 +872,342 @@ public class FloatingBallService extends Service {
         }
     }
 
-    /** 把状态真正落到波形上（走包络，不硬切形态）。 */
+    /**
+     * 状态一变：重新解析「这个状态该用哪个动画」并落到渲染器上。
+     *
+     * ★ 2026-11-08 重写。老版本在这里写死了「THINKING 用圆点 / 其它用 Siri 波」，
+     * 所以加胶囊加载动画时只能靠三个互斥开关抢同一个位置，Siri 波和 dots 就被覆盖了。
+     * 现在这里只剩两件事：
+     *   ① 把状态翻译成「槽」（resolveSlot）；
+     *   ② 把槽里绑的动画落到渲染器（refreshScene）—— 动画本身去 AnimScene 查。
+     * 「有字 / 没字」不再决定出不出动画，只决定动画摆在球心还是球底动效带。
+     */
     private void applyAssistantState(String state) {
         if (renderer == null) return;
         orbWanted = 0f;
-        // ── 文字优先：球里有字就只显示字 ────────────────────────────────
-        // 用户要求「文字和 Siri 波不能同时出现」。所以：
-        //   · 有字 → 波/圆点一律不出（waveGate 压到 0），文字结束后再按状态恢复；
-        //   · THINKING（思考/操作/执行命令）→ 流体圆点（处理中）；
-        //   · ANSWERING/IDLE 没字 → 交还用户自己的 Siri 模式设定。
-        if (hasBallText()) {
-            renderer.waveOn = true;
-            if ("THINKING".equals(state) && renderer.waveInGlass <= 0.5f) {
-                // ★ 用户 2026-10-16 新要求：「方形里也要能看到处理中动画 —— 处理中的动画和那段
-                //   文字待在一起等下一个回复」。所以有字时**不再**把圆点压到 0：
-                //   把流体圆点沉到"底部动效带"里（文字区已经不占那条带，见 updateSiriTextPos）。
-                // 位置：球底往上 animBand/2（屏占比），并放大 uOrbOffset 让圆点真的落在那条带上。
-                setWaveForm(thinkForm());          // 圆点 or 流体发光（用户设置）
-                float halfH = winSize * 0.9f * Math.max(0.05f, tHalfY) * 0.5f;
-                float depthPerNy = Math.max(dp(40), halfH * 0.85f);
-                // 有字：圆点沉到"底部动效带"（不压字）。没字时会被下面各分支改回默认值。
-                float wantNy = Math.min(0.85f, (siriAnimBand * 0.5f) / depthPerNy);
-                orbOffsetTarget = Math.max(0.05f, wantNy);
-                setOrbMixTarget(1f);
-                waveGateTarget = 1f;
-                orbWanted = 1f;
-            } else {
-                // 其它状态（回答中/空闲）：文字 + Siri 波共存。
-                // 用户 2026-10-16 澄清：「圆点不等于波，当初没要求波不和字共存」——
-                // 所以这里**不再压到 0**，波照常放（球底那道波与文字可以同时出现）。
-                setWaveForm(1);
-                waveGateTarget = 1f;
-                orbWanted = 0f;
+        stateEnteredAt = android.os.SystemClock.uptimeMillis();
+        sceneDirty = true;
+        refreshScene(true);
+        refreshFinalWave();
+        final String st = state;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (renderer == null) return;
+                Log.i("FloatingBall", "动效收敛后[" + st + "]: 槽=" + sceneSlot + " 动画=" + sceneAnim
+                        + " orbMix=" + renderer.orbMix + " waveInGlass=" + renderer.waveInGlass
+                        + " waveGate=" + renderer.waveGate + " waveMode=" + renderer.waveMode
+                        + " loader=" + renderer.loaderMode);
             }
-            refreshFinalWave();
-            final String st = state;
-            main.postDelayed(new Runnable() {
-                @Override public void run() {
-                    if (renderer == null) return;
-                    Log.i("FloatingBall", "动效收敛后[" + st + "]: orbMix=" + renderer.orbMix
-                            + " waveInGlass=" + renderer.waveInGlass
-                            + " waveGate=" + renderer.waveGate
-                            + " orbOffset=" + renderer.orbOffset);
-                }
-            }, 420);
-            Log.i("FloatingBall", "有字 + 状态 " + state + " → 动效="
-                    + (orbWanted > 0.5f ? "底带流体圆点" : "Siri 波（与字共存）")
-                    + " [实测] waveInGlass=" + renderer.waveInGlass
-                    + " orbMix=" + renderer.orbMix + " waveGate=" + renderer.waveGate
-                    + " orbOffset=" + renderer.orbOffset
-                    + " (着色的分岔：waveInGlass>0.5 就只画球底那截波、圆点整段跳过)");
+        }, 420);
+        Log.i("FloatingBall", "assistant state=" + state + " → 槽 " + sceneSlot + " / 动画 " + sceneAnim
+                + (AnimScene.master(animPrefs()) ? "" : "（统一调度已关：按旧逻辑）"));
+    }
+
+    // ════════════════ 动画总控：状态槽 → 动画（AnimScene） ════════════════
+    // 用户 2026-11-08：「每个状态甚至界面都要能定制不同的动画，动画同一个级别汇总」。
+    // 这里只有一条链路：
+    //   resolveSlot() 决定现在是哪个槽 → AnimScene 查这个槽绑的动画 → 落到渲染器。
+    // 旧的 think_style / think_loader / float_fluid_style **不再参与判断**，
+    // 只在「统一调度」关掉时当作退回路径（legacyAnimFor），方便一键回到老行为。
+
+    private android.content.SharedPreferences animPrefs() {
+        return getSharedPreferences(AnimScene.PREFS, MODE_PRIVATE);
+    }
+
+    private String sceneSlot = AnimScene.SLOT_IDLE;   // 当前生效的槽
+    private String sceneAnim = "";                    // 当前生效的动画 id
+    private String previewSlot = null;                // 设置页「预览」钉住的槽
+    private volatile boolean asstToolRunning = false; // 执行中（工具调用）的显式标记
+    private boolean sceneDirty = false;               // 参数/绑定变了，要重推
+    private Runnable sceneCommit = null;              // 幅度淡到 0 时执行的形态切换
+    private long sceneLastCheck = 0;
+    /** 思考超过这么久还没出字 → 当作「执行中」（DSH 在跑工具/长命令）。 */
+    private static final long EXEC_AFTER_MS = 2500;
+
+    /** 麦克风正在用（按住说话 / 输入法语音 / 旧的开麦路径）—— 这几个都算「刚开始用麦克风」。 */
+    private boolean micActive() {
+        return powerHoldActive || searchVoiceMode || (voice != null && voice.listening());
+    }
+
+    /** 当前该用哪个槽。顺序 = 谁更"当下"。 */
+    private String resolveSlot() {
+        if (previewSlot != null) return previewSlot;
+        if (micActive()) return AnimScene.SLOT_LISTEN;       // 麦克风优先（按住说话时胶囊也是开着的）
+        if (searchActive) return AnimScene.SLOT_SEARCH;
+        if (zonesActive) return AnimScene.SLOT_ZONES;
+        if (approvalShown) return AnimScene.SLOT_APPROVAL;
+        if ("THINKING".equals(stateNow)) {
+            boolean exec = asstToolRunning
+                    || (stateEnteredAt > 0 && !hasBallText()
+                        && android.os.SystemClock.uptimeMillis() - stateEnteredAt > EXEC_AFTER_MS);
+            return exec ? AnimScene.SLOT_EXEC : AnimScene.SLOT_THINK;
+        }
+        if ("ANSWERING".equals(stateNow)) {
+            return turnEnded ? AnimScene.SLOT_FINAL : AnimScene.SLOT_STREAM;
+        }
+        return AnimScene.SLOT_IDLE;
+    }
+
+    /** 统一调度关掉时的旧映射（尽量还原老行为）。 */
+    private String legacyAnimFor(String slot) {
+        if (AnimScene.SLOT_THINK.equals(slot) || AnimScene.SLOT_EXEC.equals(slot)) {
+            int f = thinkForm();
+            if (f == 0) return AnimScene.cap(Math.max(1, Math.min(9, prefs().getInt("think_loader", 1))));
+            return f == 1 ? AnimScene.A_WAVE : (f == 2 ? AnimScene.A_DOTS : AnimScene.A_FLUID);
+        }
+        if (AnimScene.SLOT_APPROVAL.equals(slot) || AnimScene.SLOT_SEARCH.equals(slot)
+                || AnimScene.SLOT_ZONES.equals(slot)) {
+            return AnimScene.A_OFF;
+        }
+        return AnimScene.A_WAVE;
+    }
+
+    /** 解析槽 + 落地动画（force=true 时无视"看起来没变"）。 */
+    private void refreshScene(boolean force) {
+        if (renderer == null) return;
+        String slot = resolveSlot();
+        boolean master = AnimScene.master(animPrefs());
+        String anim = master ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
+        boolean changed = force || sceneDirty || !slot.equals(sceneSlot) || !anim.equals(sceneAnim);
+        sceneSlot = slot;
+        sceneAnim = anim;
+        if (!changed) return;
+        sceneDirty = false;
+        boolean text = hasBallText();
+        applyAnimParams(anim);
+        applyAnimToRenderer(anim);
+        placeAnimForText(anim, text);
+        Log.i("FloatingBall", "场景动画: 槽=" + slot + " 动画=" + anim
+                + (master ? "" : "（旧逻辑）") + " 有字=" + text
+                + " → waveMode=" + renderer.waveMode + " loader=" + renderer.loaderMode
+                + " gate→" + waveGateTarget + " orbMix→" + orbMixTarget);
+    }
+
+    /** 把某个动画自己的参数推到渲染器（每个动画一套，互不干扰）。 */
+    private void applyAnimParams(String anim) {
+        if (renderer == null) return;
+        android.content.SharedPreferences sp = animPrefs();
+        if (AnimScene.isCap(anim)) {
+            renderer.animSpeed = 1f;
+            renderer.loaderSpeed = Math.max(.2f, AnimScene.param(sp, anim, "speed") / 100f);
+            renderer.loaderScale = Math.max(.2f, AnimScene.param(sp, anim, "scale") / 100f);
+            renderer.loaderDot = Math.max(.2f, AnimScene.param(sp, anim, "dot") / 100f);
             return;
         }
-        // 没字：圆点回到**默认位置**（正常大小地铺在球里 —— 用户要求「读取/运行命令/工具调用
-        // 和思考是同一个状态，要用同一个动画」，而工具执行期间球里通常没字，
-        // 那时圆点若还沉在底部窄带里，就几乎看不到动画）。
-        // 没字 → 0（圆点铺在球心）。注意不能直接用用户那个 -0.03 的默认值：
-        // 扁球里 hy 小，-0.03*hy 几乎等于没偏移，反而会让圆点被球底切掉一块。
-        orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
-        if ("THINKING".equals(state)) {
-            // 只有「思考中」才切到流体圆点
-            saveWaveOnce();
-            renderer.waveOn = true;
-            setWaveForm(thinkForm());              // 2 = 流体圆点 / 3 = 连续发光流体
-            setOrbMixTarget(1f);
+        if (AnimScene.A_WAVE.equals(anim)) {
+            renderer.waveAmp = Math.max(.2f, AnimScene.param(sp, anim, "amp") / 100f);
+            renderer.waveScale = Math.max(.3f, AnimScene.param(sp, anim, "scale") / 100f);
+            renderer.waveDropPx = Math.max(0f, AnimScene.param(sp, anim, "drop"));
+            renderer.animSpeed = Math.max(.2f, AnimScene.param(sp, anim, "speed") / 100f);
+            return;
+        }
+        if (AnimScene.A_DOTS.equals(anim)) {
+            renderer.orbRadius = Math.max(30f, AnimScene.param(sp, anim, "radius"));
+            renderer.orbGain = Math.max(.1f, AnimScene.param(sp, anim, "gain") / 100f);
+            renderer.orbRim = Math.max(0f, AnimScene.param(sp, anim, "rim") / 100f);
+            renderer.orbOffsetDefault = AnimScene.param(sp, anim, "offset") / 100f;
+            renderer.animSpeed = 1f;
+            return;
+        }
+        if (AnimScene.A_FLUID.equals(anim)) {
+            int cm = (int) AnimScene.param(sp, anim, "colorMode");
+            renderer.fluidColorMode = Math.max(0, Math.min(2, cm));
+            int hue = ((int) AnimScene.param(sp, anim, "hue") % 360 + 360) % 360;
+            int c = android.graphics.Color.HSVToColor(new float[]{ hue, 0.85f, 1f });
+            renderer.fluidColorR = android.graphics.Color.red(c) / 255f;
+            renderer.fluidColorG = android.graphics.Color.green(c) / 255f;
+            renderer.fluidColorB = android.graphics.Color.blue(c) / 255f;
+            renderer.fluidHot = Math.max(0f, AnimScene.param(sp, anim, "hot") / 100f);
+            renderer.fluidDash = Math.max(0f, AnimScene.param(sp, anim, "dash") / 100f);
+            renderer.fluidRibs = Math.max(4f, AnimScene.param(sp, anim, "ribs"));
+            renderer.fluidSize = Math.max(.1f, AnimScene.param(sp, anim, "size") / 100f);
+            renderer.fluidGain = Math.max(.2f, AnimScene.param(sp, anim, "gain") / 100f);
+            renderer.animSpeed = 1f;
+            return;
+        }
+        renderer.animSpeed = 1f;
+    }
+
+    /**
+     * 把动画落到渲染器。换形态一律走「幅度淡到 0 → 换 → 淡回来」的包络，
+     * 所以任何两个动画之间切换都不会硬跳。
+     */
+    private void applyAnimToRenderer(final String anim) {
+        if (renderer == null) return;
+        final boolean cap = AnimScene.isCap(anim);
+        final boolean off = AnimScene.A_OFF.equals(anim);
+        final int mode = AnimScene.A_WAVE.equals(anim) ? 1
+                : AnimScene.A_DOTS.equals(anim) ? 2
+                : AnimScene.A_FLUID.equals(anim) ? 3 : 0;
+
+        // 搜索胶囊 / 六区：球那趟合成不跑 → 胶囊加载改走屏幕空间叠层
+        boolean overlay = cap && (AnimScene.SLOT_SEARCH.equals(sceneSlot)
+                || AnimScene.SLOT_ZONES.equals(sceneSlot));
+        renderer.overlayLoader = overlay;
+        if (overlay) {
+            float[] geo = overlayGeometry();
+            renderer.ovlCx = geo[0];
+            renderer.ovlCy = geo[1];
+            renderer.ovlHx = Math.max(24f, geo[2]);
+            renderer.ovlHy = Math.max(24f, geo[3]);
+        }
+
+        final int wantLoader = cap ? AnimScene.capIndex(anim) : 0;
+        final boolean wantSuppress = cap;
+        final boolean wantWaveOn = !off;
+        final int wantMode = mode == 0 ? renderer.waveMode : mode;
+
+        Runnable commit = new Runnable() {
+            @Override public void run() {
+                if (renderer == null) return;
+                if (wantMode > 0 && renderer.waveMode != wantMode) renderer.waveMode = wantMode;
+                renderer.loaderMode = wantLoader;
+                renderer.suppressWave = wantSuppress;
+                renderer.waveOn = wantWaveOn;
+            }
+        };
+
+        boolean needFade = (mode != 0 && renderer.waveMode != mode)
+                || renderer.loaderMode != wantLoader
+                || renderer.suppressWave != wantSuppress
+                || renderer.waveOn != wantWaveOn;
+
+        if (needFade && renderer.waveGate > 0.02f) {
+            sceneCommit = commit;
+            waveModePending = -1;
+            waveGateTarget = 0f;              // 淡到 0 时执行 commit（见 pumpWaveGate）
         } else {
-            // 回答中 / 空闲：不出波，保持「处理中」形态 —— 用户要求处理中动画必须连续，
-            // 所以 ANSWERING 不再切回 Siri 波（波只在"初始/结束"出现）。
-            // 球里此时挂着回答文字；字清掉之后，IDLE 沉降到点再交还给用户的 Siri 模式。
-            if ("IDLE".equals(state) && !hasBallText()) {
-                // 真正结束且已经没字 → 交还 Siri 波（用户要的"结束状态才出波"）
-                releaseWaveForm();
-                setOrbMixTarget(0f);
-            } else {
-                // 还在处理（THINKING/ANSWERING）或字还挂着 → 保持"处理中"，不出波
-                setWaveForm(-1);
-                waveGateTarget = 0f;
+            commit.run();
+            sceneCommit = null;
+            waveGateTarget = wantWaveOn ? 1f : 0f;
+        }
+
+        boolean orb = AnimScene.A_DOTS.equals(anim) || AnimScene.A_FLUID.equals(anim);
+        setOrbMixTarget(orb ? 1f : 0f);
+        orbWanted = orb ? 1f : 0f;
+    }
+
+    /** 搜索胶囊 / 六区里，动画该叠在哪里（窗口像素，y 向下）。 */
+    private float[] overlayGeometry() {
+        if (renderer == null) return new float[]{ 0, 0, 100, 40 };
+        if (AnimScene.SLOT_SEARCH.equals(sceneSlot) && renderer.searchMode) {
+            return new float[]{
+                    renderer.sBlobCx - renderer.winX,
+                    renderer.sBlobCy - renderer.winY,
+                    Math.max(20f, renderer.sBlobHx),
+                    Math.max(20f, renderer.sBlobHy)
+            };
+        }
+        if (zonesView != null) {
+            int[] loc = new int[2];
+            try { zonesView.getLocationOnScreen(loc); } catch (Throwable ignored) { }
+            int w = zonesView.getWidth(), h = zonesView.getHeight();
+            if (w > 0 && h > 0) {
+                return new float[]{
+                        loc[0] - renderer.winX + w / 2f,
+                        loc[1] - renderer.winY + h / 2f,
+                        Math.max(24f, w / 4f),
+                        Math.max(24f, h / 4f)
+                };
             }
         }
-        Log.i("FloatingBall", "assistant state=" + state
-                + " waveOn=" + renderer.waveOn + " waveMode=" + renderer.waveMode
-                + " gate→" + waveGateTarget + " pending=" + waveModePending
-                + " orbMix→" + orbMixTarget + " (0=Siri波 1=流体圆点)");
+        return new float[]{ renderer.ballCxW, renderer.ballCyW,
+                Math.max(24f, renderer.ballHxW), Math.max(24f, renderer.ballHyW) };
+    }
+
+    /** 有字时把动画挪到球底「动效带」，没字时回到球心（文字和动画不打架）。 */
+    private void placeAnimForText(String anim, boolean text) {
+        if (renderer == null) return;
+        boolean orb = AnimScene.A_DOTS.equals(anim) || AnimScene.A_FLUID.equals(anim);
+        boolean cap = AnimScene.isCap(anim);
+        if (text && orb) {
+            float halfH = winSize * 0.9f * Math.max(0.05f, tHalfY) * 0.5f;
+            float depthPerNy = Math.max(dp(40), halfH * 0.85f);
+            float wantNy = Math.min(0.85f, (siriAnimBand * 0.5f) / depthPerNy);
+            orbOffsetTarget = Math.max(0.05f, wantNy);
+            renderer.loaderDyPx = 0f;
+        } else if (text && cap) {
+            orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
+            renderer.loaderDyPx = Math.max(0f, siriAnimBand * 0.45f);
+        } else {
+            orbOffsetTarget = Math.max(-0.06f, Math.min(0.06f, renderer.orbOffsetDefault));
+            renderer.loaderDyPx = 0f;
+        }
+    }
+
+    /** 每帧（限频 100ms）看一次「槽 / 动画」有没有变。 */
+    private void pumpScene() {
+        if (renderer == null) {
+            sceneLastCheck = android.os.SystemClock.uptimeMillis();
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - sceneLastCheck < 100) return;
+        sceneLastCheck = now;
+        String slot = resolveSlot();
+        String anim = AnimScene.master(animPrefs())
+                ? AnimScene.binding(animPrefs(), slot) : legacyAnimFor(slot);
+        if (sceneDirty || !slot.equals(sceneSlot) || !anim.equals(sceneAnim)) refreshScene(false);
+    }
+
+    /** 设置页改了绑定/参数：立刻重推（悬浮球没开就只是存着，下次启动生效）。 */
+    public static void notifySceneChanged() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.sceneDirty = true;
+                s.refreshScene(true);
+            }
+        });
+    }
+
+    /** 设置页「预览」：把球钉在某个槽上（空字符串 = 结束预览）。 */
+    public static void setScenePreview(String slot) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        final String v = (slot == null || slot.trim().isEmpty()) ? null : slot.trim();
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                s.previewSlot = v;
+                s.sceneDirty = true;
+                s.refreshScene(true);
+                Log.i("FloatingBall", "预览槽 → " + (v == null ? "结束" : v));
+            }
+        });
+    }
+
+    /** 给设置页/日志看：现在到底在跑哪个槽、哪个动画。 */
+    public static String sceneStateJson() {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return "{\"running\":false}";
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            o.put("running", true);
+            o.put("slot", s.sceneSlot);
+            o.put("anim", s.sceneAnim);
+            o.put("preview", s.previewSlot == null ? "" : s.previewSlot);
+            o.put("master", AnimScene.master(s.animPrefs()));
+            o.put("gate", s.renderer == null ? 0 : s.renderer.waveGate);
+            o.put("loader", s.renderer == null ? 0 : s.renderer.loaderMode);
+            o.put("waveMode", s.renderer == null ? 0 : s.renderer.waveMode);
+        } catch (Throwable ignored) { }
+        return o.toString();
+    }
+
+    /** 外部（DSH 实际发来工具事件时）可以显式标「执行中」。 */
+    public static void setAssistantToolRunning(boolean running) {
+        FloatingBallService s = INSTANCE;
+        if (s == null) return;
+        s.main.post(new Runnable() {
+            @Override public void run() {
+                if (s.asstToolRunning != running) {
+                    s.asstToolRunning = running;
+                    s.sceneDirty = true;
+                    s.refreshScene(true);
+                }
+            }
+        });
     }
 
     /** 助手接管前的波形设置存档（只存一次）。 */
@@ -2982,6 +3303,36 @@ public class FloatingBallService extends Service {
         return s == null ? 1f : s.prefs().getFloat("think_loader_speed", 1f);
     }
 
+    public static void setThinkStyle(int st) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyThinkStyle(st));
+    }
+
+    public static int getThinkStyle() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 0 : s.prefs().getInt("think_style", 0);
+    }
+
+    public static void setThinkLoaderScale(float v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyThinkLoaderScale(v));
+    }
+
+    public static float getThinkLoaderScale() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 1f : s.prefs().getFloat("think_loader_scale", 1f);
+    }
+
+    public static void setThinkLoaderDot(float v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyThinkLoaderDot(v));
+    }
+
+    public static float getThinkLoaderDot() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 1f : s.prefs().getFloat("think_loader_dot", 1f);
+    }
+
     // ── 思考中动画：圆点 / 连续发光流体（Fluid Glow）──────────────────────────
     // 用户：现有两种动画（Siri 波、dots）之外，再要一个「和 dots 同一套光核的连续流体」，
     // 颜色可纯白/单色/混色，亮度不均（有的刺眼有的柔和），背景跟 dots 一样只有纯黑。
@@ -3103,13 +3454,36 @@ public class FloatingBallService extends Service {
         });
     }
 
-    /** 思考中动画该用哪个 waveMode：2 = dots，3 = 流体发光；0 = 关（交给胶囊加载叠层）。 */
+    /** 思考中动画 waveMode：1 = Siri 波，2 = dots，3 = 流体发光；0 = 关（胶囊加载器）。 */
     private int thinkForm() {
+        int st = prefs().getInt("think_style", 0);
+        if (st >= 4) return 0;                 // 9 种胶囊加载
+        if (st >= 1 && st <= 3) return st;     // 原版：Siri 波 / dots / 流体发光
         if (prefs().getInt("think_loader", 0) > 0) return 0;
         return prefs().getInt("float_fluid_style", 0) == 1 ? 3 : 2;
     }
 
+    private void applyThinkStyle(int st) {
+        if (AnimScene.master(animPrefs())) return;   // 已交给「动画总控」
+        st = Math.max(0, Math.min(3, st));
+        prefs().edit().putInt("think_style", st).apply();
+        if (st >= 1 && st <= 3) {
+            prefs().edit().putInt("think_loader", 0).apply();
+            if (renderer != null) {
+                renderer.suppressWave = false;
+                renderer.loaderMode = 0;
+            }
+        }
+        if (renderer != null && "THINKING".equals(stateNow)) {
+            renderer.waveOn = true;
+            setWaveForm(thinkForm());
+            waveGateTarget = 1f;
+        }
+        syncThinkLoader(true);
+    }
+
     private void applyFluidStyle(int v) {
+        if (AnimScene.master(animPrefs())) return;   // 已交给「动画总控」
         v = v == 1 ? 1 : 0;
         prefs().edit().putInt("float_fluid_style", v).apply();
         if (renderer == null) return;
@@ -3125,10 +3499,16 @@ public class FloatingBallService extends Service {
     }
 
     private void applyThinkLoader(int v) {
+        if (AnimScene.master(animPrefs())) return;   // 已交给「动画总控」
         v = Math.max(0, Math.min(9, v));
         prefs().edit().putInt("think_loader", v).apply();
+        prefs().edit().putInt("think_style", v > 0 ? v + 3 : 0).apply();
         if (renderer != null) {
             renderer.suppressWave = v > 0;
+            renderer.loaderSpeed = prefs().getFloat("think_loader_speed", 1f);
+            renderer.loaderScale = prefs().getFloat("think_loader_scale", 1f);
+            renderer.loaderDot = prefs().getFloat("think_loader_dot", 1f);
+            renderer.loaderMode = "THINKING".equals(stateNow) ? v : 0;
             if ("THINKING".equals(stateNow)) {
                 renderer.waveOn = true;
                 setWaveForm(thinkForm());
@@ -3142,6 +3522,21 @@ public class FloatingBallService extends Service {
     private void applyThinkLoaderSpeed(float v) {
         v = Math.max(0.2f, Math.min(2.5f, v));
         prefs().edit().putFloat("think_loader_speed", v).apply();
+        if (renderer != null) renderer.loaderSpeed = v;
+        syncThinkLoader(true);
+    }
+
+    private void applyThinkLoaderScale(float v) {
+        v = Math.max(0.2f, Math.min(8f, v));
+        prefs().edit().putFloat("think_loader_scale", v).apply();
+        if (renderer != null) renderer.loaderScale = v;
+        syncThinkLoader(true);
+    }
+
+    private void applyThinkLoaderDot(float v) {
+        v = Math.max(0.2f, Math.min(6f, v));
+        prefs().edit().putFloat("think_loader_dot", v).apply();
+        if (renderer != null) renderer.loaderDot = v;
         syncThinkLoader(true);
     }
 
@@ -10438,6 +10833,9 @@ public class FloatingBallService extends Service {
         glView.setZOrderOnTop(true);
         glView.setPreserveEGLContextOnPause(true);
         renderer = new GlassRenderer(screenW, screenH, winW, winH);
+        // 动画总控：第一次跑新逻辑时把老三套开关（think_style / think_loader / float_fluid_*）
+        // 的值搬进 anim_scene，用户已经调好的观感不丢。
+        AnimScene.migrateIfNeeded(animPrefs(), prefs());
         renderer.refSize = winSize;
         // ★ 冷启动第一帧就得是「常态球」尺寸（屏宽 1/3）。
         //   普通球那条渲染路（siriGeom=false）以前用原版 halfX/halfY → 窗口已经显示、
@@ -10457,6 +10855,10 @@ public class FloatingBallService extends Service {
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
         applyFluidPrefs();                       // 思考中流体发光的颜色/密度/刺眼程度
         renderer.suppressWave = prefs().getInt("think_loader", 0) > 0;
+        renderer.loaderSpeed = prefs().getFloat("think_loader_speed", 1f);
+        renderer.loaderScale = prefs().getFloat("think_loader_scale", 1f);
+        renderer.loaderDot = prefs().getFloat("think_loader_dot", 1f);
+        renderer.loaderMode = 0;
         renderer.orbOffsetDefault = renderer.orbOffset;   // 有字时会被临时改到"底带"，恢复用这个
         // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
         // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
@@ -10554,7 +10956,7 @@ public class FloatingBallService extends Service {
                 }
             }
             trackWindow(glView);
-            setupThinkLoader(params.type);
+            // setupThinkLoader(params.type);  // 旧 WebView 叠层方案：点会跑到胶囊外，已弃用
             homeCx = params.x + winW * 0.5f;    // 启动时窗口就是最小圆球 → 这里就是家
             homeCy = params.y + winH * 0.5f + winY0();
             // ★ 关键一格：实测挡注入的是 GLSurfaceView 自带的 SurfaceView 子 surface
@@ -10778,7 +11180,9 @@ public class FloatingBallService extends Service {
         lastParamsJson = sig;
         if (s != null) applyParams(s);
         // 圆点/黑区那几个标量原先只在启动读一次，调"太亮/太实"时每次都得重装。
-        if (renderer != null) {
+        // ★ 动画总控开着时，这些标量由 AnimScene 的「动画参数」管，
+        //   这里再回推会把用户刚在设置页调好的值冲掉。
+        if (renderer != null && !AnimScene.master(animPrefs())) {
             renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
@@ -10798,6 +11202,7 @@ public class FloatingBallService extends Service {
         if (json == null || renderer == null || glView == null) return;
         final JSONObject o;
         try { o = new JSONObject(json); } catch (Exception e) { return; }
+        final boolean sceneDrives = AnimScene.master(animPrefs());
         glView.queueEvent(new Runnable() {
             @Override public void run() {
                 renderer.master     = f(o, "master", renderer.master);
@@ -10816,10 +11221,13 @@ public class FloatingBallService extends Service {
                 renderer.black0     = f(o, "black0", renderer.black0);
                 renderer.black1     = f(o, "black1", renderer.black1);
                 renderer.edgeBleed  = f(o, "edgeBleed", renderer.edgeBleed);
-                renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
-                renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
-                renderer.waveOn     = o.optBoolean("waveOn", renderer.waveOn);
-                renderer.waveMode   = o.optInt("waveMode", renderer.waveMode);
+                // 统一调度开着时，波的形态/参数由状态槽里的动画管，别让 float_params 抢
+                if (!sceneDrives) {
+                    renderer.waveAmp    = f(o, "waveAmp", renderer.waveAmp);
+                    renderer.waveScale  = f(o, "waveScale", renderer.waveScale);
+                    renderer.waveOn     = o.optBoolean("waveOn", renderer.waveOn);
+                    renderer.waveMode   = o.optInt("waveMode", renderer.waveMode);
+                }
             }
         });
     }

@@ -495,6 +495,8 @@
       this.rectSet = false;
       this.cssW = 1; this.cssH = 1;
       this.speed = opts.speed || 1;
+      this.scale = opts.scale || 1;
+      this.dotScale = opts.dotScale || 1;
       this.t = 0; this.last = 0; this.raf = 0; this.running = false;
       this.loop = this.loop.bind(this);
       this.resize();
@@ -532,6 +534,8 @@
       this.mode.init();
     }
     setSpeed(s) { this.speed = Math.max(.05, Math.min(4, +s || 1)); }
+    setScale(s) { this.scale = Math.max(.1, Math.min(12, +s || 1)); }
+    setDotScale(s) { this.dotScale = Math.max(.1, Math.min(10, +s || 1)); }
     clear() {
       const c = this.ctx;
       c.clearRect(0, 0, this.cssW, this.cssH);
@@ -539,9 +543,13 @@
     }
     dot(x, y, r, a) {
       if (r <= 0) return;
-      const S = r * 5.2, c = this.ctx;
+      const k = this.scale || 1;
+      const cx = this.rect.x + this.rect.w / 2, cy = this.rect.y + this.rect.h / 2;
+      const px = cx + (this.rect.x + x - cx) * k;
+      const py = cy + (this.rect.y + y - cy) * k;
+      const S = r * k * (this.dotScale || 1) * 5.2, c = this.ctx;
       c.globalAlpha = clamp(a, 0, 1);
-      c.drawImage(SPRITE, this.rect.x + x - S, this.rect.y + y - S, S * 2, S * 2);
+      c.drawImage(SPRITE, px - S, py - S, S * 2, S * 2);
     }
     start() {
       if (this.running) return;

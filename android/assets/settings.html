@@ -44,15 +44,80 @@
     .grp{padding:12px;margin-bottom:10px}
     button{padding:9px 12px}
   }
+
+  /* ── 动画总控 ───────────────────────────────────────────────── */
+  .tabs{display:flex;gap:6px;margin:10px 0 12px}
+  .tabs button{flex:1;padding:9px 6px;font-size:12px;border-radius:9px}
+  .slot{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);
+    border-radius:11px;padding:10px 11px;margin-bottom:8px}
+  .slotTop{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .slotTop b{font-size:13px;color:#fff;font-weight:600}
+  .slotAnim{font-size:12px;color:#5b9dff;border:1px solid rgba(91,157,255,.35);
+    background:rgba(91,157,255,.12);border-radius:8px;padding:5px 9px;white-space:nowrap;cursor:pointer}
+  .slotDesc{font-size:11px;color:#8a8a92;margin-top:5px;line-height:1.5}
+  .slotNote{font-size:10.5px;color:#c39257;margin-top:4px;line-height:1.5}
+  .acard{border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);
+    border-radius:12px;margin-bottom:8px;overflow:hidden}
+  .acard.on{border-color:rgba(91,157,255,.45);background:rgba(91,157,255,.07)}
+  .acHead{display:flex;align-items:center;gap:8px;padding:11px 12px;cursor:pointer}
+  .acHead .nm{font-size:13px;font-weight:600;color:#fff;flex:none}
+  .acHead .us{flex:1;font-size:10.5px;color:#7f8c9b;text-align:right;line-height:1.35}
+  .acHead .cv{color:#6b7480;font-size:12px;flex:none}
+  .acBody{padding:0 12px 12px}
+  .acDesc{font-size:11px;color:#8a8a92;line-height:1.55;margin-bottom:8px}
+  .acBody input[type=range]{display:block;margin-bottom:9px}
+  .acBtns{display:flex;gap:6px;margin-top:2px}
+  .acBtns button{padding:8px 10px;font-size:12px}
+  .sheet{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:60;
+    align-items:flex-end;justify-content:center;-webkit-backdrop-filter:blur(6px)}
+  .sheet.on{display:flex}
+  .sheetIn{width:100%;max-height:82vh;overflow:auto;background:#141419;
+    border-radius:16px 16px 0 0;padding:16px 14px calc(20px + env(safe-area-inset-bottom));
+    border-top:1px solid rgba(255,255,255,.12)}
+  .sheetH{font-size:14px;font-weight:700;margin-bottom:10px}
+  .pickRow{display:block;width:100%;text-align:left;margin-bottom:6px;font-size:13px}
+  .pickRow small{display:block;color:#7f8c9b;font-size:10.5px;margin-top:3px;font-weight:400;line-height:1.45}
+  .bar{position:fixed;left:0;right:0;bottom:0;z-index:50;display:none;gap:10px;
+    align-items:center;justify-content:space-between;
+    padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+    background:rgba(20,20,25,.95);border-top:1px solid rgba(255,255,255,.12)}
+  .bar.on{display:flex}
+  .bar b{color:#5b9dff}
 </style>
 </head>
 <body>
   <div class="top"><a href="index.html">‹ 返回</a><h1>设置</h1></div>
 
-  <div class="grp">
-    <div class="gh">思考中动画 · 胶囊加载</div>
-    <div class="btns"><button id="btnThinkLabTop">🧪 打开调试页（9 种 · 可调速度）</button></div>
-    <div class="muted">在液态玻璃胶囊里预览、选择思考中的动画；速度会存到悬浮球，思考时球里直接跑这个动画。</div>
+  <div class="grp" id="grpAnim">
+    <div class="gh">动画总控 · 每个状态一套</div>
+    <div class="row"><label>统一调度（关 = 回到旧逻辑）</label><div class="switch on" id="swAnimMaster"></div></div>
+    <div class="muted" style="margin-top:-2px">点状态右边的动画名就能换；「动画库」里每个动画都单独一套参数。
+      改完点「预览」，球会钉在这个状态上一直演。</div>
+    <div class="tabs">
+      <button id="tabBtnSlots" class="on">状态 → 动画</button>
+      <button id="tabBtnAnims">动画库</button>
+    </div>
+    <div id="tabSlots"><div id="animSlots"><div class="muted">读取中…</div></div></div>
+    <div id="tabAnims" style="display:none"><div id="animCards"></div></div>
+    <div class="btns" style="margin-top:10px">
+      <button id="btnAnimReset">恢复默认</button>
+      <button id="btnAnimReload">刷新</button>
+      <button id="btnAnimAlignLG">⚖ 对齐 Liquid Glass 参数</button>
+    </div>
+    <div class="muted" id="animLive" style="margin-top:6px">此刻：—</div>
+  </div>
+
+  <div class="bar" id="animPrevBar">
+    <span>预览中：<b id="animPrevName">—</b></span>
+    <button id="btnAnimPrevStop">结束预览</button>
+  </div>
+
+  <div class="sheet" id="animPick">
+    <div class="sheetIn">
+      <div class="sheetH" id="animPickTitle">选择动画</div>
+      <div id="animPickList"></div>
+      <button id="animPickCancel" style="width:100%;margin-top:6px">取消</button>
+    </div>
   </div>
 
   <div class="grp" id="grpDevice" style="display:none">
@@ -208,6 +273,8 @@
       <div class="row" style="margin-top:8px"><label>文字与 Siri 波的安全距离</label><span class="v" id="vSiriBlack">0.10</span></div>
       <input type="range" id="siriBlack" min="0" max="450" step="5" value="100">
       <div class="muted" style="margin-top:6px">黑区下沿按<b>文字实际高度</b>自动贴合（不再按行数算），再往下留出这个安全距离给 Siri 波 —— 所以改字号、改行数都不会让文字压到波上。</div>
+      <!-- 圆点/流体参数搬进「动画库」了 -->
+      <div id="legacyOrbUI" style="display:none">
       <div class="row" style="margin-top:10px"><label>思考中圆点环半径 (px)</label><span class="v" id="vOrbR">90</span></div>
       <input type="range" id="orbR" min="30" max="220" step="5" value="90">
       <div class="row" style="margin-top:8px"><label>思考中圆点亮度</label><span class="v" id="vOrbG">1.10</span></div>
@@ -220,9 +287,12 @@
         <b>边缘辉光</b>是圆点带起的球壳高光 / 赤道线 / 底缘亮度：波动形态用的是波自己的暗色，
         圆点形态若用固定满值会让整圈球边亮 5 倍（就是「思考中边缘太亮、很突兀」），
         所以这里按「圆点自身亮度 × 系数」走，默认 1.30 与 Siri 波同亮；调到 0 = 圆点完全不带边缘光。</div>
+      </div>
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
 
+    <!-- 旧的三套思考动画开关：已并入上方「动画总控」，DOM 保留只为不破坏旧 JS -->
+    <div id="legacyAnimUI" style="display:none">
     <div class="gh">思考中动画</div>
       <div class="muted" style="margin-top:2px"><b>思考中动画</b>：除了那圈流体圆点（dots），还可以换成
         <b>连续发光流体</b> —— 和 dots 用的是<b>同一个发光核</b>（细锐芯 + 长拖尾），
@@ -258,6 +328,8 @@
       <input type="range" id="fluidGain" min="20" max="300" step="5" value="100">
       <div class="muted" style="margin-top:6px">发光<b>故意不均匀</b>：每根丝线有自己的亮度权重，
         少数段落会被"热点"烧成刺眼的白，其余偏柔和、有的地方几乎暗下去 —— 调「刺眼程度」控制这个反差。</div>
+
+    </div>
 
     <div class="row" style="margin-top:16px"><label>DSH 文本助手（打字问答）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
@@ -413,7 +485,11 @@
 
   var btnThinkLabTop = document.getElementById('btnThinkLabTop');
   if (btnThinkLabTop) btnThinkLabTop.addEventListener('click', function () { location.href = 'think-lab.html'; });
-  if (!W) return;
+  if (!W) {
+    var _as = document.getElementById('animSlots');
+    if (_as) _as.innerHTML = '<div class="muted">在浏览器里只能看外观；动画总控需要 App 桥（window.Watch）。</div>';
+    return;
+  }
   document.getElementById('grpNone').style.display = 'none';
   ['grpDevice','grpScreen','grpFloat','grpKiosk','grpMore',
    'grpGlassShape','grpGlassRefr','grpGlassTop','grpGlassEdge','grpGlassWave','grpPreset','grpVoice'].forEach(function (id) {
@@ -1256,6 +1332,249 @@
     var u = document.getElementById('url').value.trim();
     if (u) W.openUrl(u);
   });
+
+  // ═════════════ 动画总控：所有动画同一个级别 + 每个状态单独绑 ═════════════
+  // 目录 / 绑定 / 参数全部来自 Java 侧 AnimScene（W.animCatalog）；
+  // 这里只画界面：状态槽列表 + 动画库卡片 + 选择器 + 预览条。
+  var AN = null, anOpen = {}, anPrev = '', anPickSlot = '';
+  // 旧的「液态玻璃 · Siri 波」那一组和动画库重复，且写的是另一套参数 —— 收起来，避免两个真相
+  try { var _gw = document.getElementById('grpGlassWave'); if (_gw) _gw.style.display = 'none'; } catch (e) {}
+
+  function anEl(id) { return document.getElementById(id); }
+
+  function anName(id) {
+    if (!AN) return id || '—';
+    for (var i = 0; i < AN.animations.length; i++) {
+      if (AN.animations[i].id === id) return AN.animations[i].name;
+    }
+    return id === 'off' ? '关闭' : id;
+  }
+
+  function anSlotDef(id) {
+    if (!AN) return null;
+    for (var i = 0; i < AN.slots.length; i++) if (AN.slots[i].id === id) return AN.slots[i];
+    return null;
+  }
+
+  function anFmt(p, v) {
+    switch (p.fmt) {
+      case 'pct': return (v / 100).toFixed(2);
+      case 'pct2': return (v / 100).toFixed(2);
+      case 'px': return Math.round(v) + 'px';
+      case 'deg': return Math.round(v) + '°';
+      case 'ny': return (v / 100).toFixed(2);
+      case 'count': return String(Math.round(v));
+      case 'mode': return ['纯白', '单色', '混色'][v] || String(v);
+      default: return String(v);
+    }
+  }
+
+  function anUsedBy(animId) {
+    var out = [];
+    if (!AN) return out;
+    for (var i = 0; i < AN.slots.length; i++) {
+      if (AN.values[AN.slots[i].id] === animId) out.push(AN.slots[i]);
+    }
+    return out;
+  }
+
+  function anLoad() {
+    try { AN = JSON.parse(W.animCatalog()); } catch (e) { AN = null; }
+    if (!AN || !AN.slots || !AN.slots.length) {
+      anEl('animSlots').innerHTML = '<div class="muted">动画总控不可用（需要新版 App）。</div>';
+      return;
+    }
+    try { anEl('swAnimMaster').classList.toggle('on', !!W.animMaster()); } catch (e) {}
+    anRenderSlots();
+    anRenderCards();
+  }
+
+  function anRenderSlots() {
+    var box = anEl('animSlots');
+    box.innerHTML = '';
+    AN.slots.forEach(function (sl) {
+      var cur = AN.values[sl.id] || 'off';
+      var d = document.createElement('div');
+      d.className = 'slot';
+      var h = '<div class="slotTop"><b>' + sl.name + '</b>'
+            + '<span class="slotAnim" data-slot="' + sl.id + '">' + anName(cur) + ' ▾</span></div>'
+            + '<div class="slotDesc">' + sl.desc + '</div>';
+      if (sl.note) h += '<div class="slotNote">' + sl.note + '</div>';
+      d.innerHTML = h;
+      d.querySelector('.slotAnim').addEventListener('click', function () {
+        anOpenPicker(this.getAttribute('data-slot'));
+      });
+      box.appendChild(d);
+    });
+  }
+
+  function anRenderCards() {
+    var box = anEl('animCards');
+    box.innerHTML = '';
+    AN.animations.forEach(function (a) {
+      var used = anUsedBy(a.id);
+      var open = !!anOpen[a.id];
+      var card = document.createElement('div');
+      card.className = 'acard' + (open ? ' on' : '');
+      var usedTxt = used.length
+        ? '用于 ' + used.map(function (x) { return x.name; }).join(' · ')
+        : '没被任何状态用';
+      card.innerHTML = '<div class="acHead"><span class="nm">' + a.name + '</span>'
+        + '<span class="us">' + usedTxt + '</span>'
+        + '<span class="cv">' + (open ? '▾' : '▸') + '</span></div>';
+      card.querySelector('.acHead').addEventListener('click', function () {
+        anOpen[a.id] = !anOpen[a.id];
+        anRenderCards();
+      });
+      if (open) {
+        var body = document.createElement('div');
+        body.className = 'acBody';
+        body.innerHTML = '<div class="acDesc">' + a.desc + '</div>';
+        var vals = (AN.params && AN.params[a.id]) || {};
+        a.params.forEach(function (p) {
+          var v = (typeof vals[p.k] === 'number') ? vals[p.k] : p.def;
+          var row = document.createElement('div');
+          row.className = 'row';
+          row.innerHTML = '<label>' + p.label + '</label><span class="v">' + anFmt(p, v) + '</span>';
+          var sl = document.createElement('input');
+          sl.type = 'range';
+          sl.min = p.min; sl.max = p.max; sl.step = p.step; sl.value = v;
+          sl.addEventListener('input', function () {
+            var nv = +sl.value;
+            row.querySelector('.v').textContent = anFmt(p, nv);
+            if (AN.params[a.id]) AN.params[a.id][p.k] = nv;
+            try { W.animParam(a.id, p.k, nv); } catch (e) {}
+          });
+          body.appendChild(row);
+          body.appendChild(sl);
+        });
+        var btns = document.createElement('div');
+        btns.className = 'acBtns';
+        var pv = document.createElement('button');
+        pv.textContent = '▶ 预览';
+        pv.addEventListener('click', function () {
+          anPreview(used.length ? used[0].id : 'thinking');
+        });
+        btns.appendChild(pv);
+        body.appendChild(btns);
+        card.appendChild(body);
+      }
+      box.appendChild(card);
+    });
+  }
+
+  function anAllowedFor(slot) {
+    var out = [];
+    var limited = slot && (slot.ballOnly || slot.id === 'search' || slot.id === 'zones');
+    AN.animations.forEach(function (a) {
+      if (limited && !(a.id === 'off' || a.id.indexOf('cap') === 0)) return;
+      out.push(a);
+    });
+    return out;
+  }
+
+  function anOpenPicker(slotId) {
+    anPickSlot = slotId;
+    var sl = anSlotDef(slotId);
+    anEl('animPickTitle').textContent = (sl ? sl.name : slotId) + ' · 用哪个动画？';
+    var list = anEl('animPickList');
+    list.innerHTML = '';
+    anAllowedFor(sl).forEach(function (a) {
+      var b = document.createElement('button');
+      b.className = 'pickRow' + (AN.values[slotId] === a.id ? ' on' : '');
+      b.innerHTML = a.name + '<small>' + a.desc + '</small>';
+      b.addEventListener('click', function () {
+        try { W.animBind(slotId, a.id); } catch (e) {}
+        AN.values[slotId] = a.id;
+        anEl('animPick').classList.remove('on');
+        anRenderSlots();
+        anRenderCards();
+        anPreview(slotId);
+      });
+      list.appendChild(b);
+    });
+    anEl('animPick').classList.add('on');
+  }
+
+  function anPreview(slotId) {
+    anPrev = slotId;
+    var sl = anSlotDef(slotId);
+    try { W.animPreview(slotId); } catch (e) {}
+    anEl('animPrevBar').classList.add('on');
+    anEl('animPrevName').textContent = sl ? sl.name : slotId;
+    anEl('animLive').textContent = '预览中：' + (sl ? sl.name : slotId)
+      + ' —— 球会一直按这个状态演，点底部「结束预览」回到真实状态。';
+  }
+
+  function anStopPreview() {
+    anPrev = '';
+    try { W.animPreview(''); } catch (e) {}
+    anEl('animPrevBar').classList.remove('on');
+    anEl('animLive').textContent = '此刻：—（已结束预览）';
+  }
+
+  function anTabTo(t) {
+    anEl('tabSlots').style.display = t === 'slots' ? 'block' : 'none';
+    anEl('tabAnims').style.display = t === 'anims' ? 'block' : 'none';
+    anEl('tabBtnSlots').classList.toggle('on', t === 'slots');
+    anEl('tabBtnAnims').classList.toggle('on', t === 'anims');
+  }
+
+  anEl('tabBtnSlots').addEventListener('click', function () { anTabTo('slots'); });
+  anEl('tabBtnAnims').addEventListener('click', function () { anTabTo('anims'); });
+
+  anEl('swAnimMaster').addEventListener('click', function () {
+    var on = !this.classList.contains('on');
+    this.classList.toggle('on', on);
+    try { W.animSetMaster(on); } catch (e) {}
+    anEl('animLive').textContent = on
+      ? '统一调度已开：每个状态按上面绑的动画走。'
+      : '统一调度已关：回到旧逻辑（思考 = 旧的三套开关，其余 = Siri 波）。';
+  });
+
+  // 一键把"玻璃 + 波"的参数对齐 Liquid Glass 页面里的那组默认值：
+  // 球和页面用的是同一段 shader，观感不一样基本都出在这几个参数上（尤其 zoom）
+  anEl('btnAnimAlignLG').addEventListener('click', function () {
+    var o = {
+      master: 1, posX: 0.5, posY: 0.5, halfX: 0.37, halfY: 0.25, corner: 1,
+      refraction: 200, band: 170, zoom: 1, dome: 0.4, aberration: 10, blur: 0.3,
+      topDarken: 0.93, black0: -1, black1: -0.01, edgeBleed: 0.11,
+      waveAmp: 1.9, waveScale: 0.85, waveOn: true, waveMode: 1
+    };
+    try { W.setFloatParams(JSON.stringify(o)); } catch (e) {}
+    try {
+      W.animParam('wave', 'amp', 190);
+      W.animParam('wave', 'scale', 85);
+      W.animParam('wave', 'drop', 78);
+      W.animParam('wave', 'speed', 100);
+    } catch (e) {}
+    anEl('animLive').textContent = '已把玻璃/波参数对齐 Liquid Glass 页面（zoom 1.00 · 波幅 1.90）。';
+    setTimeout(anLoad, 400);
+  });
+
+  anEl('btnAnimReset').addEventListener('click', function () {
+    if (!window.confirm('恢复默认：所有动画参数 + 状态绑定都回到出厂值？')) return;
+    try { W.animReset(); } catch (e) {}
+    anLoad();
+  });
+
+  anEl('btnAnimReload').addEventListener('click', anLoad);
+  anEl('btnAnimPrevStop').addEventListener('click', anStopPreview);
+  anEl('animPickCancel').addEventListener('click', function () { anEl('animPick').classList.remove('on'); });
+  anEl('animPick').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('on'); });
+
+  function anPoll() {
+    try {
+      var st = JSON.parse(W.animState());
+      if (!st || !st.running) return;
+      if (anPrev) return;                        // 预览中：底部那条已经写明
+      var nm = anSlotDef(st.slot) ? anSlotDef(st.slot).name : st.slot;
+      anEl('animLive').textContent = '此刻：' + nm + ' · ' + anName(st.anim)
+        + (st.master ? '' : '（旧逻辑）');
+    } catch (e) {}
+  }
+  setInterval(anPoll, 1500);
+  anLoad();
 })();
 </script>
 </body>

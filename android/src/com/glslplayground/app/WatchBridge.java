@@ -491,6 +491,30 @@ public class WatchBridge {
         ui(new Runnable() { public void run() { FloatingBallService.setThinkLoaderSpeed(v); } });
     }
 
+    @JavascriptInterface
+    public float getThinkLoaderScale() { return FloatingBallService.getThinkLoaderScale(); }
+
+    @JavascriptInterface
+    public void setThinkLoaderScale(final float v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setThinkLoaderScale(v); } });
+    }
+
+    @JavascriptInterface
+    public float getThinkLoaderDot() { return FloatingBallService.getThinkLoaderDot(); }
+
+    @JavascriptInterface
+    public int getThinkStyle() { return FloatingBallService.getThinkStyle(); }
+
+    @JavascriptInterface
+    public void setThinkStyle(final int st) {
+        ui(new Runnable() { public void run() { FloatingBallService.setThinkStyle(st); } });
+    }
+
+    @JavascriptInterface
+    public void setThinkLoaderDot(final float v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setThinkLoaderDot(v); } });
+    }
+
     /** 0 = 流体圆点（dots），1 = 连续发光流体。 */
     @JavascriptInterface
     public int getFluidStyle() { return FloatingBallService.getFluidStyle(); }
@@ -834,5 +858,95 @@ public class WatchBridge {
     @JavascriptInterface
     public String vmTalkState() {
         return act.voiceTalkState();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  动画总控（AnimScene）
+    //  —— 所有动画同一个级别汇总在设置页；每个状态槽单独绑一个动画；
+    //     每个动画自己的参数单独存、单独调；预览就是把球钉在某个槽上。
+    // ══════════════════════════════════════════════════════════════════════
+
+    private android.content.SharedPreferences animPrefs() {
+        return act.getSharedPreferences(AnimScene.PREFS, Context.MODE_PRIVATE);
+    }
+
+    /** 整份目录：动画库（含每个参数的范围/默认值）+ 状态槽 + 当前绑定 + 当前参数值 + 运行时状态。 */
+    @JavascriptInterface
+    public String animCatalog() {
+        try {
+            AnimScene.migrateIfNeeded(animPrefs(),
+                    act.getSharedPreferences("watch", Context.MODE_PRIVATE));
+            org.json.JSONObject o = new org.json.JSONObject(AnimScene.catalogJson(animPrefs()));
+            o.put("params", AnimScene.allParams(animPrefs()));
+            o.put("values", AnimScene.bindingsJson(animPrefs()));
+            o.put("running", FloatingBallService.sceneStateJson());
+            return o.toString();
+        } catch (Throwable t) {
+            return "{\"animations\":[],\"slots\":[],\"params\":{},\"values\":{}}";
+        }
+    }
+
+    /** 把某个状态槽绑到某个动画（搜索/六区只接受「关闭 / 胶囊加载」）。 */
+    @JavascriptInterface
+    public void animBind(final String slot, final String anim) {
+        if (slot == null || anim == null) return;
+        if (AnimScene.ballOnly(slot) && !AnimScene.A_OFF.equals(anim) && !AnimScene.isCap(anim)) return;
+        animPrefs().edit().putString("bind." + slot, anim).apply();
+        FloatingBallService.notifySceneChanged();
+    }
+
+    /** 改某个动画自己的一个参数（整数刻度，单位见 catalog 的 fmt）。 */
+    @JavascriptInterface
+    public void animParam(final String anim, final String key, final float value) {
+        if (anim == null || key == null) return;
+        AnimScene.setParam(animPrefs(), anim, key, value);
+        FloatingBallService.notifySceneChanged();
+    }
+
+    @JavascriptInterface
+    public boolean animMaster() {
+        return AnimScene.master(animPrefs());
+    }
+
+    @JavascriptInterface
+    public void animSetMaster(final boolean on) {
+        AnimScene.setMaster(animPrefs(), on);
+        FloatingBallService.notifySceneChanged();
+    }
+
+    /** 预览：把球钉在某个槽（"" = 结束预览）。球没开就先拉起来。 */
+    @JavascriptInterface
+    public void animPreview(final String slot) {
+        ui(new Runnable() {
+            public void run() {
+                try {
+                    if (!act.isFloating()) act.requestFloat();
+                } catch (Throwable ignored) { }
+                FloatingBallService.setScenePreview(slot);
+                final String again = slot;
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                    public void run() { FloatingBallService.setScenePreview(again); }
+                }, 1500);
+            }
+        });
+    }
+
+    /** 一线当前状态（槽 / 动画 / 预览 / 总开关）。 */
+    @JavascriptInterface
+    public String animState() {
+        return FloatingBallService.sceneStateJson();
+    }
+
+    /** 全部恢复默认（参数 + 绑定）。 */
+    @JavascriptInterface
+    public void animReset() {
+        AnimScene.reset(animPrefs());
+        FloatingBallService.notifySceneChanged();
+    }
+
+    /** 某个动画被哪些状态用着（卡片副标题）。 */
+    @JavascriptInterface
+    public String animUsedBy(final String anim) {
+        return AnimScene.usedBy(animPrefs(), anim);
     }
 }
