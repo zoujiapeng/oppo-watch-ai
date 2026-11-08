@@ -453,7 +453,7 @@ public class FloatingBallService extends Service {
             + "最后一段普通文字，验证换行与滚动。";
 
     private static final String[] STATE_EXTRA =
-            {"TURNEND", "TURNSTART",
+            {"TURNEND", "TURNSTART", "FLUID",
              // 离线预览：`touch files/state-PREVIEW` 灌示例并钉住；`state-PREVIEWOFF` 结束。
              "PREVIEW", "PREVIEWOFF", "SETTLED"};
 
@@ -471,6 +471,8 @@ public class FloatingBallService extends Service {
                 previewText(smp != null ? smp : MD_PREVIEW_FALLBACK);
             } else if ("PREVIEWOFF".equals(name)) {
                 previewStop();
+            } else if ("FLUID".equals(name)) {
+                applyFluidDebugFile();
             } else if ("SETTLED".equals(name)) {
                 SiriAssistant a = SiriAssistant.peek();
                 if (a != null) a.debugMarkTurnSettled();
@@ -807,7 +809,7 @@ public class FloatingBallService extends Service {
                 //   文字待在一起等下一个回复」。所以有字时**不再**把圆点压到 0：
                 //   把流体圆点沉到"底部动效带"里（文字区已经不占那条带，见 updateSiriTextPos）。
                 // 位置：球底往上 animBand/2（屏占比），并放大 uOrbOffset 让圆点真的落在那条带上。
-                setWaveForm(2);
+                setWaveForm(thinkForm());          // 圆点 or 流体发光（用户设置）
                 float halfH = winSize * 0.9f * Math.max(0.05f, tHalfY) * 0.5f;
                 float depthPerNy = Math.max(dp(40), halfH * 0.85f);
                 // 有字：圆点沉到"底部动效带"（不压字）。没字时会被下面各分支改回默认值。
@@ -853,7 +855,7 @@ public class FloatingBallService extends Service {
             // 只有「思考中」才切到流体圆点
             saveWaveOnce();
             renderer.waveOn = true;
-            setWaveForm(2);                        // siriFluidDotsCore
+            setWaveForm(thinkForm());              // 2 = 流体圆点 / 3 = 连续发光流体
             setOrbMixTarget(1f);
         } else {
             // 回答中 / 空闲：不出波，保持「处理中」形态 —— 用户要求处理中动画必须连续，
@@ -2607,6 +2609,16 @@ public class FloatingBallService extends Service {
               .append(" freeze:").append(renderer.freezeCapture).append('\n');
         }
         sb.append("winY0=").append(Math.round(winY0())).append('\n');
+        if (renderer != null) {
+            sb.append("anim=state:").append(stateNow)
+              .append(" waveMode:").append(renderer.waveMode)
+              .append(" wavePending:").append(waveModePending)
+              .append(" gate:").append(round3(renderer.waveGate))
+              .append(" orbMix:").append(round3(renderer.orbMix))
+              .append(" fluidStyle:").append(prefs().getInt("float_fluid_style", 0))
+              .append(" fluid:").append(renderer.fluidRibs).append('/').append(renderer.fluidGain)
+              .append('\n');
+        }
         sb.append("flags=searchActive:").append(searchActive)
           .append(" searchOpen:").append(searchOpen)
           .append(" searchClosing:").append(searchClosing)
@@ -2935,6 +2947,214 @@ public class FloatingBallService extends Service {
         pct = Math.max(10, Math.min(400, pct));
         prefs().edit().putInt("float_orb_gain", pct).apply();
         if (renderer != null) renderer.orbGain = pct / 100f;
+    }
+
+    // ── 思考中动画：圆点 / 连续发光流体（Fluid Glow）──────────────────────────
+    // 用户：现有两种动画（Siri 波、dots）之外，再要一个「和 dots 同一套光核的连续流体」，
+    // 颜色可纯白/单色/混色，亮度不均（有的刺眼有的柔和），背景跟 dots 一样只有纯黑。
+    // 实现：它就是一种新的 waveMode（3），几何/光核在 GlassRenderer.fluidScenePx()。
+
+    /** 思考中动画形态：0 = 流体圆点（dots），1 = 连续发光流体（fluid glow）。 */
+    public static void setFluidStyle(int v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidStyle(v));
+    }
+
+    public static int getFluidStyle() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 0 : s.prefs().getInt("float_fluid_style", 0);
+    }
+
+    /** 流体发光的颜色模式：0 纯白 / 1 单色（配 Hue）/ 2 混色（按丝线走光谱）。 */
+    public static void setFluidColorMode(int v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidColorMode(v));
+    }
+
+    public static int getFluidColorMode() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 0 : s.prefs().getInt("float_fluid_color_mode", 0);
+    }
+
+    /** 单色模式的色相（0..359）。 */
+    public static void setFluidHue(int hue) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidHue(hue));
+    }
+
+    public static int getFluidHue() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 190 : s.prefs().getInt("float_fluid_hue", 190);
+    }
+
+    /** 刺眼程度（百分之一，100 = 1.00）：越大，越多的段落烧到纯白。 */
+    public static void setFluidHot(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidHot(pct));
+    }
+
+    public static int getFluidHot() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 100 : s.prefs().getInt("float_fluid_hot", 100);
+    }
+
+    /** 丝线密度（条）：球小的时候 8~12 最清楚。 */
+    public static void setFluidRibs(int v) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidRibs(v));
+    }
+
+    public static int getFluidRibs() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 14 : s.prefs().getInt("float_fluid_ribs", 12);
+    }
+
+    /** 体量（百分之一，100 = 和圆点环同半径）。 */
+    public static void setFluidSize(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidSize(pct));
+    }
+
+    public static int getFluidSize() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 78 : s.prefs().getInt("float_fluid_size", 100);
+    }
+
+    /** 断线密度：0 = 整根连续；越大段越短（百分之一刻度，600 = 6.0）。 */
+    public static void setFluidDash(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidDash(pct));
+    }
+
+    public static int getFluidDash() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 600 : s.prefs().getInt("float_fluid_dash", 0);
+    }
+
+    private void applyFluidDash(int pct) {
+        pct = Math.max(0, Math.min(2400, pct));
+        prefs().edit().putInt("float_fluid_dash", pct).apply();
+        if (renderer != null) renderer.fluidDash = pct / 100f;
+    }
+
+    /** 流体亮度（百分之一，100 = 1.00）。 */
+    public static void setFluidGain(int pct) {
+        FloatingBallService s = INSTANCE;
+        if (s != null) s.main.post(() -> s.applyFluidGain(pct));
+    }
+
+    public static int getFluidGain() {
+        FloatingBallService s = INSTANCE;
+        return s == null ? 85 : s.prefs().getInt("float_fluid_gain", 100);
+    }
+
+    /** 思考中动画该用哪个 waveMode：2 = dots，3 = 流体发光。 */
+    private int thinkForm() {
+        return prefs().getInt("float_fluid_style", 0) == 1 ? 3 : 2;
+    }
+
+    private void applyFluidStyle(int v) {
+        v = v == 1 ? 1 : 0;
+        prefs().edit().putInt("float_fluid_style", v).apply();
+        if (renderer == null) return;
+        // 正在思考中就立刻换脸（走包络，不硬切）
+        if ("THINKING".equals(stateNow)) {
+            saveWaveOnce();
+            renderer.waveOn = true;
+            setWaveForm(v == 1 ? 3 : 2);
+            setOrbMixTarget(1f);
+            waveGateTarget = 1f;
+        }
+        Log.i("FloatingBall", "思考中动画 → " + (v == 1 ? "流体发光" : "流体圆点"));
+    }
+
+    private void applyFluidColorMode(int v) {
+        v = Math.max(0, Math.min(2, v));
+        prefs().edit().putInt("float_fluid_color_mode", v).apply();
+        if (renderer != null) renderer.fluidColorMode = v;
+    }
+
+    private void applyFluidHue(int hue) {
+        hue = ((hue % 360) + 360) % 360;
+        prefs().edit().putInt("float_fluid_hue", hue).apply();
+        if (renderer == null) return;
+        int c = android.graphics.Color.HSVToColor(new float[]{ hue, 0.85f, 1f });
+        renderer.fluidColorR = android.graphics.Color.red(c) / 255f;
+        renderer.fluidColorG = android.graphics.Color.green(c) / 255f;
+        renderer.fluidColorB = android.graphics.Color.blue(c) / 255f;
+    }
+
+    private void applyFluidHot(int pct) {
+        pct = Math.max(0, Math.min(200, pct));
+        prefs().edit().putInt("float_fluid_hot", pct).apply();
+        if (renderer != null) renderer.fluidHot = pct / 100f;
+    }
+
+    private void applyFluidRibs(int v) {
+        v = Math.max(4, Math.min(20, v));
+        prefs().edit().putInt("float_fluid_ribs", v).apply();
+        if (renderer != null) renderer.fluidRibs = v;
+    }
+
+    private void applyFluidSize(int pct) {
+        pct = Math.max(30, Math.min(150, pct));
+        prefs().edit().putInt("float_fluid_size", pct).apply();
+        if (renderer != null) renderer.fluidSize = pct / 100f;
+    }
+
+    private void applyFluidGain(int pct) {
+        pct = Math.max(20, Math.min(300, pct));
+        prefs().edit().putInt("float_fluid_gain", pct).apply();
+        if (renderer != null) renderer.fluidGain = pct / 100f;
+    }
+
+    /** 把流体发光的全部参数从 prefs 推到 renderer（启动/热重载用）。 */
+    /**
+     * 调试口子（改流体发光的手感不用重装）：
+     *   echo '{"style":1,"colorMode":0,"hue":190,"hot":1.2,"ribs":9,"size":1.0,"gain":1.0}' \
+     *     > /sdcard/Android/data/com.glslplayground.app/files/fluid.json
+     *   touch /sdcard/Android/data/com.glslplayground.app/files/state-FLUID
+     * 每个字段都可省略；改完立刻生效（正在思考中就当场换）。
+     */
+    private void applyFluidDebugFile() {
+        java.io.File f = new java.io.File("/sdcard/Android/data/com.glslplayground.app/files/fluid.json");
+        String txt = null;
+        try {
+            byte[] b = new byte[(int) Math.min(f.length(), 4096)];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = in.read(b); in.close();
+            txt = new String(b, 0, Math.max(0, n), "UTF-8").trim();
+        } catch (Throwable ignored) { }
+        if (txt == null || txt.isEmpty()) { Log.w("FloatingBall", "fluid.json 读不到"); return; }
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(txt);
+            if (o.has("style"))     applyFluidStyle(o.optInt("style", 1));
+            if (o.has("colorMode")) applyFluidColorMode(o.optInt("colorMode", 0));
+            if (o.has("hue"))       applyFluidHue(o.optInt("hue", 190));
+            if (o.has("hot"))       applyFluidHot(Math.round((float) o.optDouble("hot", 1.0) * 100f));
+            if (o.has("ribs"))      applyFluidRibs(o.optInt("ribs", 9));
+            if (o.has("size"))      applyFluidSize(Math.round((float) o.optDouble("size", 1.0) * 100f));
+            if (o.has("gain"))      applyFluidGain(Math.round((float) o.optDouble("gain", 1.0) * 100f));
+            if (o.has("dash"))      applyFluidDash(Math.round((float) o.optDouble("dash", 6.0) * 100f));
+            Log.i("FloatingBall", "fluid debug: " + txt);
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "fluid.json 解析失败：" + t);
+        }
+    }
+
+    private void applyFluidPrefs() {
+        if (renderer == null) return;
+        renderer.fluidRibs  = Math.max(4, Math.min(24, prefs().getInt("float_fluid_ribs", 12)));
+        renderer.fluidSize  = Math.max(0.3f, Math.min(1.5f, prefs().getInt("float_fluid_size", 100) / 100f));
+        renderer.fluidHot   = Math.max(0f, Math.min(2f, prefs().getInt("float_fluid_hot", 100) / 100f));
+        renderer.fluidGain  = Math.max(0.2f, Math.min(3f, prefs().getInt("float_fluid_gain", 100) / 100f));
+        renderer.fluidDash  = Math.max(0f, Math.min(24f, prefs().getInt("float_fluid_dash", 0) / 100f));
+        renderer.fluidColorMode = Math.max(0, Math.min(2, prefs().getInt("float_fluid_color_mode", 0)));
+        int hue = prefs().getInt("float_fluid_hue", 190);
+        int c = android.graphics.Color.HSVToColor(new float[]{ hue, 0.85f, 1f });
+        renderer.fluidColorR = android.graphics.Color.red(c) / 255f;
+        renderer.fluidColorG = android.graphics.Color.green(c) / 255f;
+        renderer.fluidColorB = android.graphics.Color.blue(c) / 255f;
     }
 
     private void applySiriBlackStep(int v) {
@@ -10158,6 +10378,7 @@ public class FloatingBallService extends Service {
         renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
         renderer.orbGain = prefs().getInt("float_orb_gain", 110) / 100f;
         renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
+        applyFluidPrefs();                       // 思考中流体发光的颜色/密度/刺眼程度
         renderer.orbOffsetDefault = renderer.orbOffset;   // 有字时会被临时改到"底带"，恢复用这个
         // 方形态收尾时，Siri 波中心藏在球底**下方多少像素**（与球高无关 → 字号怎么变、
         // 露出来的波顶都一样多）。默认 150px：球底边缘正好切在波的顶部一点点。
@@ -10381,6 +10602,7 @@ public class FloatingBallService extends Service {
             renderer.orbRim = prefs().getInt("float_orb_rim", 130) / 100f;
             renderer.orbRadius = prefs().getInt("float_orb_radius", 90);
             renderer.waveDropPx = prefs().getInt("float_wave_drop", 78);
+            applyFluidPrefs();                    // 流体发光的颜色/密度/刺眼程度（热重载）
         }
         Log.i("FloatingBall", "参数热重载（含圆点亮度/黑区不透明度）");
         return true;

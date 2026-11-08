@@ -461,6 +461,77 @@ public class WatchBridge {
         });
     }
 
+    // ─────────── 思考中动画：圆点 / 连续发光流体（Fluid Glow）───────────
+
+    /** 0 = 流体圆点（dots），1 = 连续发光流体。 */
+    @JavascriptInterface
+    public int getFluidStyle() { return FloatingBallService.getFluidStyle(); }
+
+    @JavascriptInterface
+    public void setFluidStyle(final int v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidStyle(v); } });
+    }
+
+    /** 0 纯白 / 1 单色 / 2 混色。 */
+    @JavascriptInterface
+    public int getFluidColorMode() { return FloatingBallService.getFluidColorMode(); }
+
+    @JavascriptInterface
+    public void setFluidColorMode(final int v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidColorMode(v); } });
+    }
+
+    /** 单色模式的色相 0..359。 */
+    @JavascriptInterface
+    public int getFluidHue() { return FloatingBallService.getFluidHue(); }
+
+    @JavascriptInterface
+    public void setFluidHue(final int h) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidHue(h); } });
+    }
+
+    /** 刺眼程度（百分之一）。 */
+    @JavascriptInterface
+    public int getFluidHot() { return FloatingBallService.getFluidHot(); }
+
+    @JavascriptInterface
+    public void setFluidHot(final int pct) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidHot(pct); } });
+    }
+
+    @JavascriptInterface
+    public int getFluidRibs() { return FloatingBallService.getFluidRibs(); }
+
+    @JavascriptInterface
+    public void setFluidRibs(final int v) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidRibs(v); } });
+    }
+
+    @JavascriptInterface
+    public int getFluidSize() { return FloatingBallService.getFluidSize(); }
+
+    @JavascriptInterface
+    public void setFluidSize(final int pct) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidSize(pct); } });
+    }
+
+    /** 断线密度（百分之一，0 = 连续），球里的流体丝线会被切成一段一段。 */
+    @JavascriptInterface
+    public int getFluidDash() { return FloatingBallService.getFluidDash(); }
+
+    @JavascriptInterface
+    public void setFluidDash(final int pct) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidDash(pct); } });
+    }
+
+    @JavascriptInterface
+    public int getFluidGain() { return FloatingBallService.getFluidGain(); }
+
+    @JavascriptInterface
+    public void setFluidGain(final int pct) {
+        ui(new Runnable() { public void run() { FloatingBallService.setFluidGain(pct); } });
+    }
+
     // ─────────── DSH 文本助手（悬浮球 ↔ 本机 DSH）───────────
 
     @JavascriptInterface

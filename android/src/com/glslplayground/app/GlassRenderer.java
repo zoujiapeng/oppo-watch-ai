@@ -150,6 +150,27 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
     /** orbOffset 的"用户设定值"（有字时会被临时改成"底带位置"，恢复时用它）。 */
     public float orbOffsetDefault = -0.03f;
     public volatile float orbGain = 1.1f;     // 亮度增益（跟 Siri 波对齐）
+
+    // ── 思考中第二种光效：连续发光流体（Fluid Glow）──────────────────────────
+    // 用户要求：「和 dots 一样的光核，但是一团连续的、在水里收缩扩散的光」，
+    // 而且**颜色可调（纯白 / 单色 / 混色）**、**亮度不要均匀（有的地方刺眼、有的地方柔和）**、
+    // 背景跟 dots 一样只有纯黑、不要浮尘/水雾。
+    // 这里只放开关和参数；形状/光核在 FS_COMP 的 fluidScenePx() 里（和 orbScenePx 并排）。
+    /** true = 思考中画流体发光；false = 还是那圈流体圆点。由服务按设置推过来。 */
+    public volatile boolean fluidOrb = false;
+    /** 纬线数量：越多越密（球小的时候 8~12 最清楚）。 */
+    public volatile float fluidRibs = 12f;
+    /** 这团光的半径相对 uOrbRadius 的倍数。 */
+    public volatile float fluidSize = 1.0f;
+    /** 刺眼程度：0 = 整团都比较柔和，1 = 少数地方烧到纯白。 */
+    public volatile float fluidHot = 1.0f;
+    /** 0 = 纯白，1 = 单色（fluidColor），2 = 混色（按丝线走光谱）。 */
+    public volatile int fluidColorMode = 0;
+    public volatile float fluidColorR = 0.55f, fluidColorG = 0.92f, fluidColorB = 1.0f;
+    /** 总亮度倍数（和圆点的 uOrbGain 分开，流体自己一套）。 */
+    public volatile float fluidGain = 1.0f;
+    /** 断线密度：0 = 连续的一整根；>0 = 沿丝线切成一段一段（单位≈每弧度的段数）。 */
+    public volatile float fluidDash = 0f;
     public volatile float orbRim = 1.3f;      // 边缘辉光 = 圆点自身亮度 × 这个系数（跟波对齐，别把球边点亮）
     /** 波↔圆点的交叉淡化进度：0=纯 Siri 波，1=纯流体圆点（见 FloatingBallService.setAssistantState）。 */
     public volatile float orbMix = 0f;
@@ -321,6 +342,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "uniform vec3 uPanelAccent;\n" +
 
         "uniform float uOrbRadius, uOrbOffset, uOrbGain, uOrbRim;\n" +
+        "uniform float uFluid;          // 1 = 思考中画流体发光（否则画流体圆点）\n" +
+        "uniform float uFluidRibs, uFluidSize, uFluidHot, uFluidColorMode, uFluidGain, uFluidDash;\n" +
+        "uniform vec3  uFluidColor;      // 单色模式的颜色（0..1）\n" +
         "uniform float uDropMode;   // 1 = 水珠模式（四区那四个圆）\n" +
         "uniform float uDropZoom;   // 水珠的缩小倍率（>1 = 缩小镜：把更大的范围压进圆里）\n" +
         "float sdRoundRect(vec2 c, vec2 h, float r){\n" +
@@ -432,6 +456,113 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float k = 0.17/max(uOrbRadius, 1e-3);\n" +
         "  vec2 q = localPx - vec2(0.0, -uOrbOffset*hy);\n" +
         "  return orbScene(q*k, t, 0.038*k); }\n" +
+        // ── Fluid Glow（连续发光流体）────────────────────────────────────────
+        // 和上面 orbScene 用的是**同一个光核**：
+        //     g = clamp(0.0032 / pow(sd, 1.35), 0, 1) * (1 - smoothstep(0.02, 0.56, sd))
+        // 只是 sd 从"圆点距离场"换成"球壳上的丝线距离场"——一圈点变成一团连续流动的光。
+        // 坐标：和 orbScenePx 同一套（环半径 = uOrbRadius 屏幕像素），
+        //       所以球体大小/形状一变，这团光跟着一起缩，不会跑出去。
+        "float fh11(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }\n" +
+        "float fn2(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n" +
+        "  return mix(mix(fh11(i),fh11(i+vec2(1,0)),f.x), mix(fh11(i+vec2(0,1)),fh11(i+vec2(1,1)),f.x), f.y); }\n" +
+        "float ffbm3(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<3;i++){ s+=a*fn2(p); p=p*2.03+19.7; a*=0.5; } return s; }\n" +
+        "float ffbm2(vec2 p){ float s=0.0,a=0.55; for(int i=0;i<2;i++){ s+=a*fn2(p); p=p*2.11+7.3; a*=0.45; } return s; }\n" +
+        "vec3 hue2rgbF(float h){ h=fract(h);\n" +
+        "  return vec3(clamp(abs(h*6.0-3.0)-1.0,0.0,1.0), clamp(2.0-abs(h*6.0-2.0),0.0,1.0), clamp(2.0-abs(h*6.0-4.0),0.0,1.0)); }\n" +
+        "vec3 rotFY(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(c*v.x+s*v.z, v.y, -s*v.x+c*v.z); }\n" +
+        "vec3 rotFX(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(v.x, c*v.y-s*v.z, s*v.y+c*v.z); }\n" +
+        "vec3 rotFZ(vec3 v,float a){ float c=cos(a),s=sin(a); return vec3(c*v.x-s*v.y, s*v.x+c*v.y, v.z); }\n" +
+        // 半颗球壳：纬线 + 屏幕剪切 + 球面透视；亮暗按丝线段落走（有的刺眼、有的柔和）
+        "vec3 fluidShell(vec2 q, float side, float t, float dens){\n" +
+        "  float r2 = dot(q,q); float z = sqrt(max(0.0, 1.0-r2));\n" +
+        "  vec3 v = vec3(q, z*side);\n" +
+        // 球面受光：不是均匀发光，换边会暗下去
+        "  vec3 ldir = normalize(vec3(-0.55,-0.42,0.72));\n" +
+        "  float lit = 0.12 + 0.88*max(dot(v, ldir), 0.0);\n" +
+        "  float rimL = pow(1.0-z, 2.5)*0.55;\n" +
+        // 姿态照视频截图：极轴贴在屏幕平面内，丝线在右上角汇聚，不会出现正对镜头的同心圆
+        "  v = rotFY(v, t*0.30+0.85);\n" +
+        "  v = rotFZ(v, -0.80+0.06*sin(t*0.11));\n" +
+        "  v = rotFX(v, 0.10+0.05*sin(t*0.17));\n" +
+        "  float lat = asin(clamp(v.y,-1.0,1.0)); float lon = atan(v.x, v.z);\n" +
+        "  float wn  = ffbm3(vec2(cos(lon),sin(lon))*1.15 + vec2(lat*0.85, t*0.16));\n" +
+        "  float wn2 = ffbm2(vec2(cos(lon),sin(lon))*2.4  - vec2(lat*0.70, t*0.11));\n" +
+        "  float wn3 = ffbm2(vec2(cos(lon),sin(lon))*4.6  + vec2(lat*2.3, t*0.27));\n" +
+        "  float foreshorten = 0.42 + 0.58*z;                 // 越靠轮廓线越密\n" +
+        "  float spacing = 3.14159265/max(dens, 3.0);\n" +
+        "  float shear = 0.30*q.x*(1.0+0.15*sin(t*0.27));     // 斜过来，别是横条纹\n" +
+        // 摆动幅度调大、再叠一层碎噪声：丝线不再是"一圈一圈很规整"，而是被水流扯得乱晃
+        // 每根丝线自己的 id/随机相位（必须在 f 之前定，后面颜色也用它）
+        "  float band = floor((lat + shear)/spacing + 0.5);\n" +
+        "  float hb = fh11(vec2(band, side*7.0));\n" +
+        "  float latWarp = (wn-0.5)*0.70 + (wn3-0.5)*0.35\n" +
+        "                + 0.22*sin(lon*2.0 + t*0.5 + hb*6.2831853);\n" +
+        "  float f = (lat + latWarp + shear)/spacing;\n" +
+        "  float sdLat = abs(fract(f+0.5)-0.5)*spacing*foreshorten*1.18;\n" +
+
+        "  float thick = 0.40 + 1.30*pow(0.5+0.5*sin(lat*2.2+t*0.9+hb*6.2831853), 3.0);\n" +
+        // 先算"这根丝线这一段有多亮/有多热"，再决定芯的粗细 —— 热点处芯会变粗、变白
+        "  float segN = ffbm2(vec2(band*0.73, hb*4.0 + t*0.13));\n" +
+        "  float hotN = ffbm2(vec2(lat*1.7 + band*0.9, lon*0.6 + t*0.12));\n" +
+        "  float hot  = smoothstep(0.42, 0.86, hotN) * clamp(uFluidHot, 0.0, 2.0);\n" +
+        "  float sdN = sdLat/max(thick * (1.0 + hot*0.9), 0.32);\n" +
+        "  float g = clamp(0.0055/pow(max(sdN,1e-4), 1.22), 0.0, 1.0) * (1.0-smoothstep(0.02,0.80,sdN));\n" +
+        // 把连续的丝线切成一段一段：沿经度切开，每根线自己的相位，
+        // 切口用 smoothstep 软化（硬切会出现锯齿）。uFluidDash 越大，段越短越碎。
+        "  float dashOn = step(0.5, uFluidDash);\n" +
+        "  float dashJit = (ffbm2(vec2(band*1.7, t*0.15)) - 0.5) * 2.4;\n" +   // 每段的起点/长度都不一样
+        "  float duty = 0.38 + 0.22 * ffbm2(vec2(band*2.3 + hb*3.0, t*0.10));\n" +
+        "  float dp = (lon + 0.30*sin(lat*3.0 + t*0.2)) * max(uFluidDash, 0.0)\n" +
+        "           + hb*9.0 + t*0.22 + dashJit;\n" +
+        "  float dph = fract(dp);\n" +
+        "  float dash = smoothstep(0.02, 0.10, dph) * (1.0 - smoothstep(duty, duty+0.12, dph));\n" +
+        "  g *= mix(1.0, dash, dashOn);\n" +
+        // 每根丝线自己的亮度权重 + 缓慢游走的"热点"：少数段落烧到白、其余偏柔
+        "  float wSeg = mix(0.12, 1.60, segN);\n" +
+        "  vec3 base;\n" +
+        "  if(uFluidColorMode < 0.5)      base = vec3(0.96, 0.98, 1.00);        // 纯白\n" +
+        "  else if(uFluidColorMode < 1.5) base = uFluidColor;                    // 单色\n" +
+        "  else {                                                                // 混色：按丝线走光谱\n" +
+        "    float hue = fract(0.478 + 0.09*sin(band*1.7 + t*0.21) + 0.05*(wn2-0.5));\n" +
+        "    base = hue2rgbF(hue);\n" +
+        "  }\n" +
+        "  vec3 c = mix(base, vec3(1.0), clamp(hot*0.9, 0.0, 1.0));   // 热点往白里烧\n" +
+        "  float depth = (side > 0.0) ? 1.0 : 0.26;                   // 背面暗 → 有厚度\n" +
+        // 芯 + 宽光晕：球很小，只有芯就像玻璃碴；加一层 exp 晕才是"发光"
+        "  float core = g * (wSeg * (1.0 + hot*2.6) + hot*1.2);\n" +
+        "  float halo = 0.16 * exp(-sdN * 2.8);\n" +
+        "  return c * (core + halo) * (lit + rimL) * depth;\n" +
+        "}\n" +
+        "vec3 fluidScenePx(vec2 localPx, float hx, float hy, float t){\n" +
+        // 半径按**形状**给（短半轴 × uFluidSize），不是按圆点环：
+        // 胶囊/方卡里这团光都会正好铺在中间，不会因为 orbRadius 被 shapeK 放大而只看到中间几条。
+        "  float R = max(min(hx, hy) * 0.62 * max(uFluidSize, 0.2), 6.0);\n" +
+        "  vec2 q = (localPx - vec2(0.0, -uOrbOffset*hy*0.5)) / R;\n" +
+        // 呼吸：半径在收缩/扩散（用户要的"在水里"）
+        "  float pulse = 0.10*sin(t*0.55) + 0.045*sin(t*1.27+2.1);\n" +
+        "  q /= (1.0 + 0.9*pulse);\n" +
+        // 域扭曲：轮廓和丝线一起被水流拖着走
+        "  vec2 flow = vec2(ffbm2(q*2.1 + vec2(0.0, t*0.33)) - 0.5,\n" +
+        "                   ffbm2(q*2.1 + vec2(5.2, t*0.30) + 3.1) - 0.5);\n" +
+        "  vec2 wq = q + flow*0.16;\n" +
+        "  float ang = atan(wq.y, wq.x);\n" +
+        "  float bulge = 0.075*sin(2.0*ang + t*0.31) + 0.045*sin(3.0*ang - t*0.23)\n" +
+        "              + 0.030*sin(5.0*ang + t*0.17 + 1.7);\n" +
+        "  wq /= (1.0 + bulge);\n" +
+        "  float r = length(wq);\n" +
+        "  vec3 col = vec3(0.0);\n" +
+        // 体内柔光：让这团光有体积（不然只剩一堆线，像线框）
+        "  if(r < 1.05){\n" +
+        "    float body = exp(-r*r*2.6) * smoothstep(1.05, 0.6, r);\n" +
+        "    vec3 bc = (uFluidColorMode < 0.5) ? vec3(0.96,0.98,1.0)\n" +
+        "            : ((uFluidColorMode < 1.5) ? uFluidColor : hue2rgbF(0.5));\n" +
+        "    col += bc * body * 0.16;\n" +
+        "    float edge = smoothstep(1.05, 0.85, r);\n" +
+        "    col += fluidShell(wq,  1.0, t, uFluidRibs) * edge;\n" +
+        "    col += fluidShell(wq, -1.0, t, uFluidRibs) * edge;\n" +
+        "  }\n" +
+        "  return col * max(uFluidGain, 0.0);\n" +
+        "}\n" +
         "vec2 screenUv(vec2 fc){\n" +
         // fc 是**绘制缓冲**里的像素；乘 uPxToScreen 换成屏幕像素，才能和 uWinPos/uScreen 对齐
         "  vec2 top = vec2(fc.x, iRes.y - fc.y) * uPxToScreen;\n" +
@@ -498,6 +629,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "  float b0 = uBlack0 - uBlackOffset;\n" +
         "  float b1 = uBlack1 - uBlackOffset;\n" +
         "  float blackMask = smoothstep(b0, b1, ny);\n" +
+        // 流体发光模式：整颗球垫成纯黑（用户：背景不要东西，跟 dots 一样纯黑）。
+        // 只改这一层的遮罩，玻璃的折射/边缘亮线照旧在外面叠。
+        "  blackMask = mix(blackMask, 1.0, clamp(uFluid, 0.0, 1.0));\n" +
         "  blackMask = blackMask*blackMask*(3.0-2.0*blackMask);\n" +
         // 普通球：黑区是深色玻璃。面板：底色**保持黑**，但做成「上暗下亮」——
         // 顶上几乎纯黑，越往下越亮，最底下那一条亮到有点刺眼（像底部藏了个光源）。
@@ -522,7 +656,9 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "    tBlackK = mix(0.92, 0.02, pow(top01, 0.60));\n" +
         "    tBlackK *= smoothstep(0.0, 18.0 * uScale, -sd);\n" +
         "  }\n" +
-        "  col = mix(col, blackCol, blackMask*uTopDarken*tBlackK);\n" +
+        "  float blackMix = blackMask*uTopDarken*tBlackK;\n" +
+        "  blackMix = mix(blackMix, 1.0, clamp(uFluid, 0.0, 1.0));\n" +
+        "  col = mix(col, blackCol, blackMix);\n" +
         "  vec3 wglow = vec3(0.0);\n" +
         // 波照旧画（方形态收尾也画），**只挪竖直锚点**：
         //   圆球态 = 黑区下沿 b1（原来的观感，一点没动），坐标按球高归一化；
@@ -550,13 +686,14 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         "      }\n" +
         "    } else {\n" +
         // 黑区遮蔽：圆球态照旧（波画在黑区里，不压一下会过曝）
-        "    float waveVis = 1.0 - blackMask*uTopDarken*0.85;\n" +
+        "    float waveVis = mix(1.0 - blackMask*uTopDarken*0.85, 1.0, clamp(uFluid, 0.0, 1.0));\n" +
         "    // 两种形态用同一个框架，uOrbMix 做交叉淡化：思考→回答时不再「啪」地换一套光效\n" +
         "    vec3 waveEff = waveCol(wp, iTime, 1.0);\n" +
         "    wglow = waveCol(wp, iTime, 7.0) * vec3(0.80,0.95,1.25);\n" +
         "    float below = smoothstep(0.7, -0.5, wp.y);\n" +
         "    waveEff += wglow*(0.25 + 0.6*below);\n" +
-        "    vec3 orbRaw = orbScenePx(cw, uHalf.x, uHalf.y, iTime);\n" +
+        "    vec3 orbRaw = mix(orbScenePx(cw, uHalf.x, uHalf.y, iTime),\n" +
+        "                      fluidScenePx(cw, uHalf.x, uHalf.y, iTime), clamp(uFluid,0.0,1.0));\n" +
         "    vec3 orbEff = pow(max(orbRaw, 0.0), vec3(1.0/1.2)) * uOrbGain;\n" +
         // 边缘辉光必须跟着光效自己的亮度：Siri 波用波的颜色（很暗），圆点若用固定满值
         // (0.80,0.95,1.25)，球壳高光/赤道线/底缘会整体亮 5 倍 —— 「思考中球边缘太亮」的根源。
@@ -1121,6 +1258,18 @@ public class GlassRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbOffset"), orbOffset);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbGain"), orbGain);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uOrbRim"), orbRim);
+        // 思考中第二种光效（流体发光）的开关与参数：颜色三选一、刺眼程度、丝线密度…
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluid"), waveMode == 3 ? 1f : 0f);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidRibs"), Math.max(4f, fluidRibs));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidSize"), Math.max(0.3f, fluidSize));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidHot"), Math.max(0f, fluidHot));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidColorMode"), fluidColorMode);
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidGain"), Math.max(0f, fluidGain));
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uFluidDash"), Math.max(0f, fluidDash));
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(compProg, "uFluidColor"),
+                Math.max(0f, Math.min(1f, fluidColorR)),
+                Math.max(0f, Math.min(1f, fluidColorG)),
+                Math.max(0f, Math.min(1f, fluidColorB)));
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uPanelMode"), panelMode);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropMode"), 0f);
         GLES20.glUniform1f(GLES20.glGetUniformLocation(compProg, "uDropZoom"), 1f);

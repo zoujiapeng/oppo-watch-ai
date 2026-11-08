@@ -217,6 +217,36 @@
       <div class="muted" style="margin-top:8px">开启后：水晶球弹出，文字从球内出现，球随文字实时变宽变高、圆角变小。需先打开「悬浮于桌面」。</div>
     </div>
 
+    <div class="gh">思考中动画</div>
+      <div class="muted" style="margin-top:2px"><b>思考中动画</b>：除了那圈流体圆点（dots），还可以换成
+        <b>连续发光流体</b> —— 和 dots 用的是<b>同一个发光核</b>（细锐芯 + 长拖尾），
+        只是形状从一圈点变成一团在水里收缩 / 扩散的光；背景跟 dots 一样只有纯黑。</div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnStyleDots">流体圆点 dots</button>
+        <button id="btnStyleFluid">连续流体发光</button>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnColWhite">纯白</button>
+        <button id="btnColSingle">单色</button>
+        <button id="btnColMix">混色</button>
+      </div>
+      <div class="row" style="margin-top:8px"><label>单色色相</label>
+        <span class="v"><span id="swatch" style="display:inline-block;width:12px;height:12px;border-radius:50%;
+        vertical-align:-2px;background:#00d5ff;box-shadow:0 0 8px #00d5ff"></span> <span id="vFluidHue">190</span></span></div>
+      <input type="range" id="fluidHue" min="0" max="359" step="1" value="190">
+      <div class="row" style="margin-top:8px"><label>刺眼程度（越高越多段落烧到纯白）</label><span class="v" id="vFluidHot">1.00</span></div>
+      <input type="range" id="fluidHot" min="0" max="200" step="5" value="100">
+      <div class="row" style="margin-top:8px"><label>断线密度（0 = 整根连续）</label><span class="v" id="vFluidDash">0.00</span></div>
+      <input type="range" id="fluidDash" min="0" max="2400" step="50" value="0">
+      <div class="row" style="margin-top:8px"><label>丝线密度（条）</label><span class="v" id="vFluidRibs">9</span></div>
+      <input type="range" id="fluidRibs" min="4" max="16" step="1" value="9">
+      <div class="row" style="margin-top:8px"><label>体量（相对圆点环半径）</label><span class="v" id="vFluidSize">1.00</span></div>
+      <input type="range" id="fluidSize" min="50" max="160" step="5" value="100">
+      <div class="row" style="margin-top:8px"><label>亮度</label><span class="v" id="vFluidGain">1.00</span></div>
+      <input type="range" id="fluidGain" min="20" max="300" step="5" value="100">
+      <div class="muted" style="margin-top:6px">发光<b>故意不均匀</b>：每根丝线有自己的亮度权重，
+        少数段落会被"热点"烧成刺眼的白，其余偏柔和、有的地方几乎暗下去 —— 调「刺眼程度」控制这个反差。</div>
+
     <div class="row" style="margin-top:16px"><label>DSH 文本助手（打字问答）</label><div class="switch" id="swAsst"></div></div>
     <div id="asstBox" style="display:none;margin-top:8px">
       <div class="row" style="margin-top:8px"><label>镜像当前会话（AI 一回复球就出字）</label><div class="switch" id="swAsstMirror"></div></div>
@@ -706,6 +736,91 @@
   orbRim.addEventListener('input', function () {
     vOrbRim.textContent = (orbRim.value / 100).toFixed(2);
     try { W.setOrbRim(parseInt(orbRim.value, 10)); } catch (e) {}
+  });
+
+  // ── 思考中动画：圆点 / 连续发光流体（Fluid Glow）+ 颜色 ──
+  var btnStyleDots = document.getElementById('btnStyleDots');
+  var btnStyleFluid = document.getElementById('btnStyleFluid');
+  var btnColWhite = document.getElementById('btnColWhite');
+  var btnColSingle = document.getElementById('btnColSingle');
+  var btnColMix = document.getElementById('btnColMix');
+  var fluidHue = document.getElementById('fluidHue'), vFluidHue = document.getElementById('vFluidHue');
+  var swatch = document.getElementById('swatch');
+  var fluidHot = document.getElementById('fluidHot'), vFluidHot = document.getElementById('vFluidHot');
+  var fluidRibs = document.getElementById('fluidRibs'), vFluidRibs = document.getElementById('vFluidRibs');
+  var fluidSize = document.getElementById('fluidSize'), vFluidSize = document.getElementById('vFluidSize');
+  var fluidGain = document.getElementById('fluidGain'), vFluidGain = document.getElementById('vFluidGain');
+
+  function paintStyle(style) {
+    btnStyleDots.classList.toggle('on', style === 0);
+    btnStyleFluid.classList.toggle('on', style === 1);
+  }
+  function paintColor(mode) {
+    btnColWhite.classList.toggle('on', mode === 0);
+    btnColSingle.classList.toggle('on', mode === 1);
+    btnColMix.classList.toggle('on', mode === 2);
+  }
+  function paintHue(h) {
+    vFluidHue.textContent = h;
+    swatch.style.background = 'hsl(' + h + ',85%,55%)';
+    swatch.style.boxShadow = '0 0 8px ' + 'hsl(' + h + ',85%,55%)';
+  }
+  try { paintStyle(W.getFluidStyle()); } catch (e) { paintStyle(0); }
+  try { paintColor(W.getFluidColorMode()); } catch (e) { paintColor(0); }
+  try { fluidHue.value = W.getFluidHue(); } catch (e) {}
+  try { fluidHot.value = W.getFluidHot(); } catch (e) {}
+  try { fluidRibs.value = W.getFluidRibs(); } catch (e) {}
+  try { fluidSize.value = W.getFluidSize(); } catch (e) {}
+  try { fluidGain.value = W.getFluidGain(); } catch (e) {}
+  paintHue(parseInt(fluidHue.value, 10));
+  vFluidHot.textContent = (fluidHot.value / 100).toFixed(2);
+  vFluidRibs.textContent = fluidRibs.value;
+  vFluidSize.textContent = (fluidSize.value / 100).toFixed(2);
+  vFluidGain.textContent = (fluidGain.value / 100).toFixed(2);
+
+  if (btnStyleDots) btnStyleDots.addEventListener('click', function () {
+    paintStyle(0); try { W.setFluidStyle(0); } catch (e) {}
+  });
+  if (btnStyleFluid) btnStyleFluid.addEventListener('click', function () {
+    paintStyle(1); try { W.setFluidStyle(1); } catch (e) {}
+  });
+  if (btnColWhite) btnColWhite.addEventListener('click', function () {
+    paintColor(0); try { W.setFluidColorMode(0); } catch (e) {}
+  });
+  if (btnColSingle) btnColSingle.addEventListener('click', function () {
+    paintColor(1); try { W.setFluidColorMode(1); } catch (e) {}
+  });
+  if (btnColMix) btnColMix.addEventListener('click', function () {
+    paintColor(2); try { W.setFluidColorMode(2); } catch (e) {}
+  });
+  fluidHue.addEventListener('input', function () {
+    var h = parseInt(fluidHue.value, 10);
+    paintHue(h);
+    try { W.setFluidHue(h); } catch (e) {}
+  });
+  fluidHot.addEventListener('input', function () {
+    vFluidHot.textContent = (fluidHot.value / 100).toFixed(2);
+    try { W.setFluidHot(parseInt(fluidHot.value, 10)); } catch (e) {}
+  });
+
+  var fluidDash = document.getElementById('fluidDash'), vFluidDash = document.getElementById('vFluidDash');
+  try { fluidDash.value = W.getFluidDash(); } catch (e) {}
+  vFluidDash.textContent = (fluidDash.value / 100).toFixed(2);
+  fluidDash.addEventListener('input', function () {
+    vFluidDash.textContent = (fluidDash.value / 100).toFixed(2);
+    try { W.setFluidDash(parseInt(fluidDash.value, 10)); } catch (e) {}
+  });
+  fluidRibs.addEventListener('input', function () {
+    vFluidRibs.textContent = fluidRibs.value;
+    try { W.setFluidRibs(parseInt(fluidRibs.value, 10)); } catch (e) {}
+  });
+  fluidSize.addEventListener('input', function () {
+    vFluidSize.textContent = (fluidSize.value / 100).toFixed(2);
+    try { W.setFluidSize(parseInt(fluidSize.value, 10)); } catch (e) {}
+  });
+  fluidGain.addEventListener('input', function () {
+    vFluidGain.textContent = (fluidGain.value / 100).toFixed(2);
+    try { W.setFluidGain(parseInt(fluidGain.value, 10)); } catch (e) {}
   });
 
   // ── 液态玻璃参数（实时作用于悬浮水晶球 / Siri 模式）──
