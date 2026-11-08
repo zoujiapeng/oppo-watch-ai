@@ -5992,7 +5992,11 @@ public class FloatingBallService extends Service {
                 + " view=" + gw + "x" + gh
                 + " pixel=" + renderer.winPixelW + "x" + renderer.winPixelH
                 + " rWin=" + renderer.winX + "," + renderer.winY
-                + " zone0=" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0]));
+                + " zone0=" + Math.round(zoneCx[0]) + "," + Math.round(zoneCy[0])
+                // 输入框焦点：语音期间没有它 = 输入法没有编辑框 = 识别的字上不了屏
+                + " imF=" + (searchBar != null && searchBar.input().hasFocus())
+                + " barF=" + (searchBar != null && searchBar.hasFocus())
+                + " winF=" + (searchBar != null && searchBar.hasWindowFocus()));
         boolean bad = gw > 0 && (Math.abs(gw - params.width) > 2 || Math.abs(gh - params.height) > 2
                 || Math.abs(renderer.winPixelW - gw) > 2 || Math.abs(renderer.winPixelH - gh) > 2);
         if (bad) {
@@ -6917,6 +6921,7 @@ public class FloatingBallService extends Service {
             powerHoldStartedAt = now;
             searchVoiceMode = true;
             if (searchBar != null) { try { searchBar.focusInput(); } catch (Throwable ignored) { } }
+            startVoiceFocusGuard();          // 胶囊已开：输入框焦点同样要盯住
             try { vm().cmd("stealthon"); } catch (Throwable ignored) { }
             powerHoldActive = true;
             powerHoldDown = false;
@@ -7181,6 +7186,7 @@ public class FloatingBallService extends Service {
             try { searchBar.input().setShowSoftInputOnFocus(true); } catch (Throwable ignored) { }
         }
         searchVoiceMode = false;            // 接下来是打字，不是语音了
+        stopVoiceFocusGuard();              // 手点输入框那条路：焦点自己会回来，看守撤掉
         Log.i("FloatingBall", "search: 点输入框 → 结束语音识别（不发送，wasHolding=" + wasHolding + "）");
     }
 
@@ -10547,6 +10553,7 @@ public class FloatingBallService extends Service {
         hideSearchIme();
         try { vm().cmd("stealthoff"); } catch (Throwable ignored) { }   // 万一还停在隐身态
         searchVoiceMode = false;
+        stopVoiceFocusGuard();
         main.postDelayed(new Runnable() {
             @Override public void run() { removeSearchWindows(); }
         }, 170);
@@ -10747,10 +10754,36 @@ public class FloatingBallService extends Service {
                 @Override public void onFocusChange(View v, boolean hasFocus) {
                     // ⚠ 语音期间**不许**补弹键盘：胶囊一拿到窗口焦点这里就会 showSoftInput，
                     //   而那时 Voicemap 的隐身还没生效 → 屏幕上就是"先弹一个真键盘、再被隐藏"。
-                    if (hasFocus && searchActive && searchOpen && !searchVoiceMode) {
-                        main.postDelayed(new Runnable() {
-                            @Override public void run() { showSearchIme(); }
-                        }, 80);      // 窗口焦点会被系统抢走，拿到就补一次
+                    if (!hasFocus || !searchActive || !searchOpen) return;
+                    if (searchVoiceMode) {
+                        // ★ 容器自己 setFocusableInTouchMode(true)（为了吃返回键）：窗口焦点一来，
+                        //   系统会把焦点塞给它、而不是 EditText —— 输入法于是"没有编辑框"
+                        //   （getCurrentInputConnection()=null），语音识别的字无处上屏。
+                        //   这里一发现容器抢到焦点就立刻还给输入框，键盘仍然不弹。
+                        Log.i("FloatingBall", "voice-focus: 容器抢到焦点 → 还给输入框（不弹键盘）");
+                        main.post(new Runnable() {
+                            @Override public void run() {
+                                if (!searchActive || !searchVoiceMode || searchBar == null) return;
+                                try {
+                                    searchBar.input().setFocusableInTouchMode(true);
+                                    searchBar.input().requestFocus();
+                                } catch (Throwable ignored) { }
+                            }
+                        });
+                        return;
+                    }
+                    main.postDelayed(new Runnable() {
+                        @Override public void run() { showSearchIme(); }
+                    }, 80);      // 窗口焦点会被系统抢走，拿到就补一次
+                }
+            });
+            // 语音期间把 EditText 的焦点进出记下来（排障用：没有焦点 = 输入法没编辑框）
+            bar.input().setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override public void onFocusChange(View v, boolean hasFocus) {
+                    if (searchActive && searchVoiceMode) {
+                        Log.i("FloatingBall", "voice-focus: EditText focus=" + hasFocus
+                                + " barF=" + (searchBar != null && searchBar.hasFocus())
+                                + " winF=" + (searchBar != null && searchBar.hasWindowFocus()));
                     }
                 }
             });
@@ -10828,12 +10861,58 @@ public class FloatingBallService extends Service {
         if (searchBar == null || !searchActive) return;
         try {
             searchBar.input().setShowSoftInputOnFocus(false);   // 拿焦点也不弹键盘
-            searchBar.requestFocus();
+            Log.i("FloatingBall", "voice-focus: 进入 barF=" + searchBar.hasFocus()
+                    + " imF=" + searchBar.input().hasFocus()
+                    + " winF=" + searchBar.hasWindowFocus());
+            // ⚠ 别让胶囊容器先拿焦点：它自己 setFocusableInTouchMode(true)（为了吃返回键），
+            //   先 requestFocus() 会把焦点从 EditText 拿走 —— 输入法就成了"服务一个 LinearLayout"，
+            //   getCurrentInputConnection() 是 null，语音识别出来的字没地方上屏（用户报的
+            //   「长按电源键说话，输入框里一个字都没有」）。窗口焦点是系统给的，不靠这一句。
             searchBar.focusInput();
-            Log.i("FloatingBall", "search: 按住说话 → 输入框拿焦点（不弹键盘，等 Voicemap 隐身接管）");
+            Log.i("FloatingBall", "voice-focus: 之后 barF=" + searchBar.hasFocus()
+                    + " imF=" + searchBar.input().hasFocus()
+                    + " winF=" + searchBar.hasWindowFocus());
+            startVoiceFocusGuard();
         } catch (Throwable t) {
             Log.w("FloatingBall", "voice focus failed: " + t);
         }
+    }
+
+    // ───────── 按住说话期间：输入框焦点看守 ─────────
+    // 输入法的识别结果是通过**当前焦点视图的 InputConnection** 上屏的（Voicemap 只是
+    // 在输入法进程里按住空格）。胶囊窗口一拿到/丢掉窗口焦点、输入法窗口隐身地 showWindow
+    // 的那一下，焦点都可能被系统塞回容器（BallSearchBar）——一旦那样，输入法就"没有编辑框"，
+    // 说话全白说。这里在语音期间盯着，一掉就悄悄要回来，绝不动键盘可见性。
+    private final Runnable voiceFocusGuard = new Runnable() {
+        @Override public void run() {
+            if (!searchActive || !searchVoiceMode || searchBar == null) return;
+            boolean held;
+            try {
+                held = searchBar.input().hasFocus();
+            } catch (Throwable t) {
+                return;
+            }
+            if (!held) {
+                try {
+                    searchBar.input().setFocusableInTouchMode(true);
+                    boolean ok = searchBar.input().requestFocus();
+                    Log.i("FloatingBall", "voice-focus: 焦点掉了 → 要回来 ok=" + ok
+                            + " imF=" + searchBar.input().hasFocus()
+                            + " barF=" + searchBar.hasFocus()
+                            + " winF=" + searchBar.hasWindowFocus());
+                } catch (Throwable ignored) { }
+            }
+            main.postDelayed(this, held ? 600 : 250);
+        }
+    };
+
+    private void startVoiceFocusGuard() {
+        main.removeCallbacks(voiceFocusGuard);
+        main.postDelayed(voiceFocusGuard, 300);
+    }
+
+    private void stopVoiceFocusGuard() {
+        main.removeCallbacks(voiceFocusGuard);
     }
 
     /**
