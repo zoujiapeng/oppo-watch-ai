@@ -75,6 +75,7 @@ final class WebChatPane {
     private int loadGen;
     private boolean resolvingTitle;
     private boolean latestTried;
+    private int verifyFails = 0;
     private long showLogAt;
 
     WebChatPane(Context ctx, WindowManager wm) {
@@ -138,6 +139,7 @@ final class WebChatPane {
         wantTitle = (title == null || title.trim().isEmpty()) ? null : title.trim();
         attempt = 0;
         hit = false;
+        verifyFails = 0;
         if (!sid.equals(sessionId)) Log.i(TAG, "会话 → " + sid + "（" + wantTitle + "）");
         if (loaded) {
             resetPageState();
@@ -289,7 +291,12 @@ final class WebChatPane {
     // ── 定位到那条会话 ────────────────────────────────────────────────────
 
     private void scheduleOpen() {
-        if (wantTitle == null) { resolveLatest(); return; }
+        if (wantTitle == null) {
+            // 知道是哪条会话（有 sid）就等标题 —— 绝不拿"最近那条"顶替，否则玻璃里会开错对话。
+            if (wantSid != null) resolveTitle(wantSid, loadGen);
+            else resolveLatest();
+            return;
+        }
         if (hit || attempt >= OPEN_AT.length) {
             if (!hit) Log.i(TAG, "没找到「" + wantTitle + "」，停在 DSH 首页");
             return;
@@ -310,6 +317,7 @@ final class WebChatPane {
                 hit = true;
                 sessionId = wantSid;
                 scrollToEndSoon();
+                verifyOpen();
             } else {
                 scheduleOpen();
             }
@@ -351,6 +359,38 @@ final class WebChatPane {
             }
         }, "pane-latest").start();
     }
+
+    /**
+     * 点完再看一眼：对话区到底开没开（`data-conversation-*` 是 DSH 前端对话区的标记）。
+     * 没开就清掉"点过了"的标记再试一次 —— 光看 click 有没有派发出去不算数。
+     */
+    private void verifyOpen() {
+        if (web == null) return;
+        web.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (web == null || !hit) return;
+                web.evaluateJavascript(VERIFY_JS, v -> {
+                    Log.i(TAG, "verify → " + v);
+                    boolean open = v != null && v.contains("open");
+                    if (open) return;
+                    if (verifyFails++ >= 2) {
+                        Log.w(TAG, "对话区一直没开，停在 DSH 首页（用户可自己点）");
+                        return;
+                    }
+                    hit = false;
+                    sessionId = null;
+                    resetPageState();
+                    scheduleOpen();
+                });
+            }
+        }, 1200);
+    }
+
+    private static final String VERIFY_JS =
+            "(function(){var n=document.querySelectorAll("
+          + "'[data-conversation-region],[data-conversation-scroll],[data-conversation-session]').length;"
+          + "var t=(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,70);"
+          + "return (n>0?'open':'closed')+'#'+n+':'+t;})()";
 
     private void resetPageState() {
         if (web == null) return;

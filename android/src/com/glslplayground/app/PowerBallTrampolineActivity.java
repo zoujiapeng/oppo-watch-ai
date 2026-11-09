@@ -40,6 +40,8 @@ public class PowerBallTrampolineActivity extends Activity {
             // 调试直通（实验用）：`--es test_reply "…"` 让球把这段字摆进玻璃
             String test = it == null ? null : it.getStringExtra("test_reply");
             if (test != null) i.putExtra("test_reply", test);
+            String testRaw = it == null ? null : it.getStringExtra("test_reply_raw");
+            if (testRaw != null) i.putExtra("test_reply_raw", testRaw);
             if ("stop".equals(what)) {
                 startService(i);
             } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {

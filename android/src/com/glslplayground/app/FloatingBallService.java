@@ -5500,6 +5500,7 @@ public class FloatingBallService extends Service {
      */
     void forceHomeShape(String why) {
         Log.i("FloatingBall", "forceHomeShape: " + why);
+        hideWebChatPane();                       // 手动收回胶囊：网页立刻收（不等下一帧判断）
         SiriAssistant a = SiriAssistant.peek();
         if (a != null) a.cancelByGesture();      // 顺手取消正在进行的这一轮问答
         setAssistantPinned(false);
@@ -5628,6 +5629,13 @@ public class FloatingBallService extends Service {
         s.main.post(new Runnable() {
             @Override public void run() {
                 if (s.isUserScrollingText()) {          // 正在翻阅 → 不收回
+                    s.lastTextAt = android.os.SystemClock.uptimeMillis();
+                    return;
+                }
+                // ★ 2026-11-09（用户二次）：玻璃里是 DSH 网页 → **只能手动收回**
+                //   （双指手势 / 点球），"最终回复安静 1.5s" 这条自动收起对它不算数。
+                if (s.webPaneOn) {
+                    Log.i("FloatingBall", "最终回复到了，但玻璃里是 DSH 网页 → 不自动收（等手动）");
                     s.lastTextAt = android.os.SystemClock.uptimeMillis();
                     return;
                 }
@@ -5962,6 +5970,11 @@ public class FloatingBallService extends Service {
         //   会话卡是**一页在看的东西**，不是转瞬即逝的一段回复 —— 只要卡还开着就续命，
         //   8 秒兜底不许把它收走（收走 = 用户正看着，屏幕上的对话突然没了、输入框悬着）。
         //   关掉卡只有三条路：点球（单击退出卡）、双指手势、进菜单/搜索/拍照藏界面。
+        // ★ 2026-11-09（用户二次）：玻璃里是 DSH 网页时**不许自动收** —— 由用户双指手势手动收回胶囊。
+        if (webPaneOn) {
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            return;
+        }
         if (convoOpen) {
             lastTextAt = android.os.SystemClock.uptimeMillis();
             return;
@@ -6095,6 +6108,13 @@ public class FloatingBallService extends Service {
 
     private void measureSiriTargetsInner(String s) {
         int n = s == null ? 0 : s.trim().length();
+        if (n <= 1 && webPaneOn) {
+            // 玻璃里是 DSH 网页：字被清空（安静清空/换段）不许把玻璃收掉，也不许关会话卡 ——
+            // 收回胶囊是用户自己的动作（双指手势），见 webChatHoldingGlass()。
+            hideSiriTextNow();
+            applyHoldGeometry();
+            return;
+        }
         if (n <= 1) {                           // 0/1 个字
             if (textHold) {
                 // 本轮已经出过字、还没结束：文字被清空（多段生成之间的空档）也不缩回圆球，
@@ -6961,6 +6981,13 @@ public class FloatingBallService extends Service {
         if (testReply != null) {
             main.postDelayed(new Runnable() {
                 @Override public void run() { previewText(testReply); }   // 钉住，方便对着看
+            }, 1800);
+        }
+        // 不钉住的版本：用来验「玻璃里是网页时，自动收起必须不生效」（8s 兜底 / 30s 安静清空都不许动它）
+        final String testRaw = intent == null ? null : intent.getStringExtra("test_reply_raw");
+        if (testRaw != null) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() { applySiriText(testRaw); }
             }, 1800);
         }
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
@@ -9718,6 +9745,15 @@ public class FloatingBallService extends Service {
      */
     private boolean webChatEnabled() { return prefs().getBoolean("web_chat", false); }
 
+    /**
+     * 玻璃里此刻真的是那块 DSH 网页吗 —— **自动收起**的那几条路都要先问这一句。
+     * 用户口径（2026-11-09 二次）：「手动恢复回胶囊状态而不是自动恢复」。
+     */
+    public static boolean webChatHoldingGlass() {
+        FloatingBallService s = INSTANCE;
+        return s != null && s.webChatEnabled() && s.webPaneOn;
+    }
+
     // ── 玻璃里的 DSH 网页（实验）────────────────────────────────────────────
 
     /** 这一帧网页该不该盖在玻璃里：回复页真的画出来了、且不在任何"借玻璃"的模式里。 */
@@ -10455,6 +10491,7 @@ public class FloatingBallService extends Service {
         convoGen++;                             // 还在路上的读会话/轮询一律作废
         convoBarHiddenBySearch = false;
         Log.i("FloatingBall", "convo: 退出对话（" + why + "）");
+        hideWebChatPane();
         try {
             if (convoBar != null && wm != null) wm.removeView(convoBar);
         } catch (Throwable ignored) { }

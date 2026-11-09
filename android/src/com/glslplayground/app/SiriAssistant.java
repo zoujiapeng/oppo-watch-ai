@@ -563,6 +563,11 @@ public final class SiriAssistant {
                 }
             }
 
+            // ★ 2026-11-09（用户二次）：玻璃里是 DSH 网页 → 不清字、不收形状，等用户手动收回胶囊。
+            if (FloatingBallService.webChatHoldingGlass()) {
+                armQuiet();
+                return;
+            }
             // ① 最终回复：安静 30s → 收形状，**并且同一时刻把文字清掉**
             //    （用户要求：变回初始形状时不允许出现任何文字）
             if (!shapeBackSent && quiet >= FINAL_SHAPE_BACK_MS) {

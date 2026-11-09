@@ -50,8 +50,17 @@ http://127.0.0.1:3080/  （cookie 就是 RPC 那条签名 cookie；主文档自�
   输入行（`composerSubmit → convoSend`），发出去以后网页自己会实时收到——所以页面里
   那条 DSH 输入条被 CSS 藏掉了（`[data-composer-overlay]`），不白占地方。
 - **会话定位**：DSH 前端没有 URL 路由，只能按标题在左栏点。`WebChatPane` 先 `session/list`
-  查标题；不知道是哪条就开**最近更新**那条。点不中（标题被改/侧栏结构变了）就停在首页，
-  绝不假装已经进去了。
+  查**这条会话自己的标题**（有 sid 就绝不用"最近那条"顶替 —— 那是开错对话的根源），
+  点完再 `verify` 一眼：对话区有 `data-conversation-*` 才算真的开了，没开就重试（最多 2 次），
+  还不行就停在首页，绝不假装已经进去了。日志里直接能看到玻璃里是哪条：
+  `verify → "open#3:在最新分支使用 dsh 前端聊天页面 对话 轨迹 加载更早 …"`。
+- **只手动收回**（用户 2026-11-09 二次明确）：「手动恢复回胶囊状态而不是自动恢复」。
+  玻璃里是网页时，`pumpTextHoldSafety` 的 8 秒兜底、`releaseHoldForFinalReply` 的
+  安静 1.5 秒、`SiriAssistant.quietTick` 的 30 秒清字+收形状**全部让路**
+  （`FloatingBallService.webChatHoldingGlass()`）；文字被清空的空档也不许把玻璃收掉
+  （`measureSiriTargetsInner` 的 `n<=1` 分支）。收回胶囊只走用户自己的动作：
+  双指手势（`forceHomeShape`）、点球退出会话卡（`closeConversation`）——两条都显式
+  `hideWebChatPane()`。
 
 ### 验证（截图看不到玻璃的真实渲染，别拿 screencap 判断）
 
