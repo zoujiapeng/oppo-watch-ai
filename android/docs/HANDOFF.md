@@ -46,20 +46,28 @@
   "返回键"记录；点输入行 → `composer: 进入编辑…` + `winF=true`，键盘弹出；
   键盘收起后 `composer: 退出编辑… → 输入行不再抢焦点`，焦点回到浏览器。
 
-### ② 参数面板关掉回到的不是回复页 —— 面板开着时那一页被"兜底收回"了
+### ② 参数面板关掉回到的不是回复页 —— 两条路，两个病根
 
-- 病根：回复页的字由 100ms 巡检在菜单期间收掉（`replyTextHiddenForUi`），本身没问题；
-  但 **`pumpTextHoldSafety()` 的 8 秒兜底 / `releaseHoldForFinalReply()` 的 1.5 秒最终回复收回
-  不认"参数面板开着"** —— 用户在面板里调模型/权限超过 8 秒，`textHold` 就被释放、几何回圆球；
-  点空白关掉面板时 `exitGlassPanel()` 只把玻璃还原成球，没人把那一页放回来。
-- 修法：`openSettingsMenu()` 里如果是**回复页**（不是会话卡）进参数：
-  `menuReplyGuard = true` + 续 `lastTextAt`，先把字/输入行收起来；
-  `hideMenu()` 里按这个标记调 `restoreReplyTextAfterUi()`（重建内容 + 重新量几何 + 露字）
-  再 `syncComposerBar()`；`pumpTextHoldSafety()` / `releaseHoldForFinalReply()` 都加
-  `menuShown || glassFullscreen` 守卫（面板期间不收回）。
-- 实机验证：回复页 → `menu-settings` 钩子开参数 → **等 17 秒** → 点空白：
-  `menu: 关闭（点空白处）` + `reply: 参数面板关闭，回复页原样放回（40 字）`
-  + `composer: 方形态有字 → 输入行摆上`，文字/输入行/焦点都回来了。
+- **第一版只修了回复页，漏了会话卡**（用户第二次追报就是这条）：
+  `openSettingsMenu()` 里原来的"会话卡暂存"是 `setSiriText("")`，这会触发
+  `measureSiriTargets("")` → `textHold + 空闲` → `releaseTextHold()`（内含
+  `closeConversation("球回到初始形态")`）。参数面板还没关，**会话卡已经被收掉**；
+  等用户点空白/按返回时 `convoSessionId` 已经是 null，`convoStashed` 的 restore 什么也做不了
+  —— 屏幕上只剩一颗球，当然"回不到回复页"。
+- 修法（统一成一条路，回复页/会话卡都适用）：
+  1. `openSettingsMenu()` **不再清空 siriStr**，只 `hideReplyTextForUi()` + 收起输入行，
+     并置 `menuReplyGuard = true`、续 `lastTextAt`；`siriStr / convoOpen / textHold` 全都不动。
+  2. `hideMenu()` 按 `menuReplyGuard` 调 `restoreReplyTextAfterUi()`（重建内容 + 重算几何 + 露字）
+     再 `measureSiriTargets + syncComposerBar`。
+  3. `pumpTextHoldSafety()` / `releaseHoldForFinalReply()` 都加
+     `menuShown || glassFullscreen` 守卫（面板期间不收回）。
+  4. 废弃 `convoStashed / convoStashText / suppressConvoAutoClose`（这套清空暂存就是病根）。
+- 实机验证（**真的双指**：用 root `app_process` 注入两指 800ms 长按到输入行）：
+  - 回复页：`menu: 打开参数面板，先把当前这一页收好（convo=false，22 字）` → 点空白 →
+    `menu: 参数面板关闭，原页放回（convo=false，22 字）` + `composer: 方形态有字 → 输入行摆上`；
+    再开一次按返回 → `返回键（玻璃面板）` + `menu: 关闭（返回键）` + 原页放回。
+  - 会话卡：`（convo=true，1270 字）` 开参数期间**没有** `convo: 退出` → 点空白/按返回 →
+    `原页放回（convo=true，1270 字）` + 输入行回来（截图里 1270 字记录都在）。
 
 ### ③ 左下：运行中的会话 → 最近会话（绿点 + 左进右停）
 

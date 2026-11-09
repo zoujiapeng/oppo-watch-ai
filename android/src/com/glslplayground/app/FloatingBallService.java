@@ -1427,7 +1427,7 @@ public class FloatingBallService extends Service {
      */
     public static boolean conversationCardOwnsText() {
         FloatingBallService s = INSTANCE;
-        return s != null && s.convoOpen && !s.convoStashed;
+        return s != null && s.convoOpen;
     }
 
     /** 当前球里这段回复是**哪条会话**产的（最终回复要查的是它，不是镜像随手跟的那条）。 */
@@ -3683,8 +3683,7 @@ public class FloatingBallService extends Service {
 
     public static void setSiriText(String text) {
         FloatingBallService s = INSTANCE;
-        if (s != null && s.convoOpen && !s.suppressConvoAutoClose
-                && (text == null || text.isEmpty())) {
+        if (s != null && s.convoOpen && (text == null || text.isEmpty())) {
             s.main.post(new Runnable() {
                 @Override public void run() { s.closeConversation("球回到初始态"); }
             });
@@ -9670,22 +9669,19 @@ public class FloatingBallService extends Service {
      * 但**不能弹键盘**。见 focusSearchInputForVoice()。
      */
     private boolean searchVoiceMode = false;
-    private boolean convoStashed = false;
     /**
-     * 从**回复页**（不是手动打开的会话卡）双指长按进参数面板：面板开着期间把这段回复原样
-     * 保住，关掉面板再放回来。
+     * 参数面板开着期间把**当前这一页**（AI 回复页或会话卡）原样保住，关掉面板再放回来。
      *
-     * 以前没有这个标记 —— 参数面板一开，回复页的字被 100ms 巡检收掉，8 秒兜底 / 最终回复
-     * 收回又趁机把 textHold 释放掉；用户点空白关掉参数面板时，屏幕上只剩一颗光球，
-     * 根本不是他刚才看的那一页（「返回的地方并不是回复页面」）。
+     * 以前是"会话卡把 siriStr 清空暂存" —— 清空会触发 measureSiriTargets("") →
+     * textHold + 空闲 → releaseTextHold()/closeConversation()，面板还没关会话卡就被收掉；
+     * 用户点空白回来时 convoSessionId 已经是 null，restore 什么也做不了。
+     * 现在只 hide 字和输入行，siriStr / convoOpen / textHold 全都不动，靠这个标记恢复。
      */
     private boolean menuReplyGuard = false;
     private long convoOpenedAt = 0;
     private boolean convoHadText = false;
     private long convoDragLogAt = 0;
-    private String convoStashText = "";
     private String convoSentText = "";
-    private boolean suppressConvoAutoClose = false;
     private String convoSessionId = null, convoTitle = null;
     private BallSearchBar convoBar;
     private WindowManager.LayoutParams convoBarParams;
@@ -9784,7 +9780,6 @@ public class FloatingBallService extends Service {
         if (glView == null || wm == null) return false;
         if (searchActive || searchClosing || menuSurfaceOpen()) return false;
         if (approvalShown || approvalClosing || glassFullscreen) return false;
-        if (convoStashed) return false;                       // 参数面板借走了这块玻璃
         if (!siriTextShown) return false;                     // 字没露出来 → 输入行也不该在
         if (siriStr == null || siriStr.trim().isEmpty()) return false;
         if (squareDrawn01() < 0.5f) return false;             // 画出来还是胶囊 → 不许有输入行
@@ -10620,31 +10615,21 @@ public class FloatingBallService extends Service {
         exitGlassPanel();
         applyBallTouchability();
         restoreBarIfStashed();               // 是从状态 2 进来的就把胶囊放回去
-        if (convoStashed) {                  // 参数面板关掉：把对话内容放回来
-            convoStashed = false;
-            suppressConvoAutoClose = false;
-            if (convoSessionId != null) {
-                setSiriText(convoStashText == null ? "" : convoStashText);
-                main.postDelayed(new Runnable() {
-                    @Override public void run() { syncComposerBar(); }
-                }, 80);
-                Log.i("FloatingBall", "convo: 参数面板关闭，恢复对话内容");
-            }
-        }
-        if (menuReplyGuard) {                // 参数面板是**从回复页**进去的：原样放回那一页
+        if (menuReplyGuard) {                // 参数面板是**从回复页/会话卡**进去的：原样放回那一页
             menuReplyGuard = false;
             lastTextAt = android.os.SystemClock.uptimeMillis();  // 回来重新计时，别刚看见又收
-            if (!uiHidden && !searchActive && !searchClosing && !convoOpen
+            if (!uiHidden && !searchActive && !searchClosing
                     && siriStr != null && !siriStr.trim().isEmpty()) {
                 restoreReplyTextAfterUi();   // 内容（被巡检清过）+ 几何 + 露出文字
                 main.postDelayed(new Runnable() {
                     @Override public void run() {
-                        if (convoOpen || searchActive) return;
+                        if (searchActive) return;
                         measureSiriTargets(siriStr);
                         syncComposerBar();   // 输入行跟着玻璃一起回来
                     }
                 }, 80);
-                Log.i("FloatingBall", "reply: 参数面板关闭，回复页原样放回（" + siriStr.length() + " 字）");
+                Log.i("FloatingBall", "menu: 参数面板关闭，原页放回（convo=" + convoOpen
+                        + "，" + siriStr.length() + " 字）");
             }
         }
     }
@@ -10806,23 +10791,17 @@ public class FloatingBallService extends Service {
     // ── 参数（Agent 预设 / 模型 / 推理等级 / 权限 / 发送目录）──────────────
 
     private void openSettingsMenu() {
-        // 从对话卡里双指长按进来的：先把对话内容暂时收起（否则参数面板和对话文字叠在一起很乱）
-        if (convoOpen && !convoStashed) {
-            convoStashed = true;
-            convoStashText = siriStr == null ? "" : siriStr;
-            suppressConvoAutoClose = true;
-            setSiriText("");
-            suppressConvoAutoClose = false;
-            if (convoBar != null) convoBar.setVisibility(View.GONE);
-            Log.i("FloatingBall", "convo: 打开参数面板，先收起对话内容");
-        } else if (!convoOpen && !menuReplyGuard
-                && (siriTextShown || squareFormActive())
-                && siriStr != null && !siriStr.trim().isEmpty()) {
-            // ★ 2026-11-09（用户：参数面板关掉后回到的地方并不是回复页）：
-            //   把这一页原样保住 —— 面板只借用玻璃那块矩形，字先收起来、输入行让位；
-            //   关掉面板时 hideMenu() 会按 menuReplyGuard 把内容和几何一起放回来。
-            //   同时续一次 lastTextAt：否则 8 秒兜底 / 最终回复收回会在面板开着的时候把它收走，
-            //   用户点空白回来就只剩一颗空球。
+        // 双指长按输入行进来：参数面板只借用玻璃那块矩形 —— 把**当前这一页**
+        // （AI 回复页 / 手打开的会话卡都算）原样收好，关掉面板再放回来。
+        //
+        // ⚠️ 这里**绝不能** setSiriText("")（老写法）：那会触发
+        //    measureSiriTargets("") → textHold + 空闲 → releaseTextHold() / closeConversation()，
+        //    参数面板还没关，会话卡就被当成"球回初始形态"收掉了；等用户点空白回来时
+        //    convoSessionId 已经是 null，restore 什么也做不了 —— 用户报的
+        //    「关掉参数后回不到回复页/会话卡」就是这条。
+        //    现在只 hide 字和输入行，siriStr / convoOpen / textHold 全都不动。
+        if (!menuReplyGuard && siriStr != null && !siriStr.trim().isEmpty()
+                && (convoOpen || siriTextShown || squareFormActive())) {
             menuReplyGuard = true;
             lastTextAt = android.os.SystemClock.uptimeMillis();
             hideComposerIme();
@@ -10831,7 +10810,8 @@ public class FloatingBallService extends Service {
                 convoBar.setVisibility(View.GONE);
             }
             composerShown = false;
-            Log.i("FloatingBall", "reply: 打开参数面板，先把回复页收好（" + siriStr.length() + " 字）");
+            Log.i("FloatingBall", "menu: 打开参数面板，先把当前这一页收好（convo=" + convoOpen
+                    + "，" + siriStr.length() + " 字）");
         }
         List<BallGlassMenu.Row> rows = new ArrayList<>();
         rows.add(new BallGlassMenu.Row("Agent 预设", cur("send_preset", "跟随默认"), false));
