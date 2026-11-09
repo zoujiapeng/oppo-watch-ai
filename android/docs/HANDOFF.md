@@ -10,6 +10,75 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-10：实验 —— 回复页玻璃里直接显示 **DSH 前端网页** 的对话页（分支 `feat/web-chat`）
+
+**用户原话**：「做一个实验性的功能，就是把聊天页面直接用 dsh 前端的聊天页面的网站网页，
+而不是手搓的」→ 澄清：「是 dsh 前端网页的对话页面显示在**回复页面的玻璃上**」
+「缩小看不清也没关系，**不用改变原本玻璃的大小**」。
+
+一句话结论：**玻璃的几何一个像素都不动**，只是把玻璃里"原本写字的那块矩形"盖上一条
+WebView，加载本机 DSH 前端、并按标题点进当前那条会话；关掉开关就回到原来手搓的 markdown。
+
+### 它长什么样 / 怎么工作
+
+```
+回复页出字（siriStr 有内容、球画成方形态）
+        │  updateSiriTextPos() 每帧算出"文字视口"矩形 (x,y,tw,th)
+        ▼
+FloatingBallService.syncWebChatPane(x,y,tw,th)
+        │  条件：web_chat 开 + 方形态 sq>0.55 + 不在菜单/搜索/六区/审批/全屏里
+        ▼
+WebChatPane（一块贴上去的 WebView 窗，TYPE_APPLICATION_OVERLAY）
+        │  · 不抢焦点：FLAG_NOT_FOCUSABLE（回复页不许吃前台 App 的返回键）
+        │  · 不抢触摸：FLAG_NOT_TOUCH_MODAL（网页矩形以外照常归球/桌面）
+        │  · 圆角：FrameLayout + outline(radius 30dp) + clipToOutline
+        ▼
+http://127.0.0.1:3080/  （cookie 就是 RPC 那条签名 cookie；主文档自己取回来插兼容层）
+        │  页面起来后：左栏「打开侧边栏」→ 按标题点开那条会话 → 滚到最新
+        ▼
+玻璃里看到的就是 DSH 前端自己的对话页
+```
+
+- **开关**：设置页「悬浮 → 网页聊天（玻璃内）」（prefs `watch/web_chat`，默认关）。
+- **全屏版**：`WebChatActivity`（同一套兼容层）——参数面板「网页聊天（全屏）」、
+  设置页「全屏打开网页聊天」。
+- **兼容层**（这机器系统 WebView 是 **Chrome 116**，DSH 前端要 119 的
+  `Promise.withResolvers`）：`shouldInterceptRequest` 把主文档自己用 cookie 取回来，
+  在 `<head>` 后插 `Promise.withResolvers / URL.canParse / Array#toSorted·toReversed·with`，
+  再交给 WebView —— 只有这条路能保证 shim **先于**页面脚本执行（`onPageStarted` 会被抢跑）。
+- **玻璃里的网页是只读的**：窗口不抢焦点 → 点不动网页里的输入框。打字仍然走球自己那条
+  输入行（`composerSubmit → convoSend`），发出去以后网页自己会实时收到——所以页面里
+  那条 DSH 输入条被 CSS 藏掉了（`[data-composer-overlay]`），不白占地方。
+- **会话定位**：DSH 前端没有 URL 路由，只能按标题在左栏点。`WebChatPane` 先 `session/list`
+  查标题；不知道是哪条就开**最近更新**那条。点不中（标题被改/侧栏结构变了）就停在首页，
+  绝不假装已经进去了。
+
+### 验证（截图看不到玻璃的真实渲染，别拿 screencap 判断）
+
+```bash
+# 起球 + 把一段字钉进玻璃（test_reply 走 previewText，会钉住方便对着看）
+su -c "am start -n com.glslplayground.app/.PowerBallTrampolineActivity \
+  --es pk_hold none --es test_reply '## 测试：玻璃里的 DSH 网页'"
+# 窗口确实贴上去了：mViewVisibility=0x0 / isVisible=true / gr=TOP LEFT CENTER
+su -c "dumpsys window windows" | grep -B2 -A6 glslplayground
+# 日志
+su -c "logcat -s WebChatPane:* FloatingBall:*"
+#   WebChatPane: 贴上玻璃 732x277 @(84,112)
+#   FloatingBall: webpane: 玻璃里显示 DSH 网页 …
+#   WebChatPane: page finished … title=DeepSeek Harness
+#   WebChatPane: open-session #1 → "hit:140:SPAN"
+```
+
+开关默认关；本机已经写好 `web_chat=true` 直接验过了。
+
+### 已知边界
+
+- 玻璃里那块的 CSS 宽度 ≈ 244px（= 文字视口 732px ÷ 3），DSH 按自己的窄屏布局排，
+  一屏只能看到几行 —— 用户明确说过「缩小看不清也没关系」。
+- 网页不抢焦点 → 玻璃里那块**不能打字**（这是 2026-11-09 那条"回复页不许吃返回键"的延续）。
+- 球回到胶囊（`squareDrawn01() ≤ 0.55`）时网页自动收起；再长成方形态会自己贴回来，
+  不重新加载页面（会话变了才重新点）。
+
 ## 2026-11-09（第四版）：回复页不抢前台返回键 / 参数面板回到原页 / 左下改成「最近会话」
 
 **用户原话**：「1 回复页面是手机返回键对手机前台应用无效（比如当前在 edge 浏览器），

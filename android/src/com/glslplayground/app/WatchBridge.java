@@ -648,6 +648,36 @@ public class WatchBridge {
         return SiriAssistant.get(act).mirrorStatus();
     }
 
+    // ─────────── 实验：聊天页直接用 DSH 前端网页（WebChatActivity）───────────
+
+    /** 开关：球里"进会话"的入口改道到 DSH 前端网页（默认关 = 现在这套手搓的）。 */
+    @JavascriptInterface
+    public boolean getWebChat() {
+        return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getBoolean("web_chat", false);
+    }
+
+    @JavascriptInterface
+    public void setWebChat(final boolean v) {
+        act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .edit().putBoolean("web_chat", v).apply();
+    }
+
+    /** 设置页直接开一次网页聊天（不带会话 = DSH 前端首页）。 */
+    @JavascriptInterface
+    public void openWebChatPage() {
+        ui(new Runnable() {
+            public void run() {
+                try {
+                    Intent i = new Intent(act, WebChatActivity.class);
+                    act.startActivity(i);
+                } catch (Throwable t) {
+                    Toast.makeText(act, "打不开网页聊天：" + t, Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+    }
+
     // ─────────── 审批球（DSH 要你点批准/拒绝时弹的那颗新球）───────────
 
     @JavascriptInterface

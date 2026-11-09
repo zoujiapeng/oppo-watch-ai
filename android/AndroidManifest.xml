@@ -58,6 +58,14 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- 实验：聊天页 = DSH 前端网页本身（全屏 WebView，签名 cookie 复用 RPC 那一份） -->
+        <activity
+            android:name=".WebChatActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 无界面跳板：root 起它 → 它在 Activity 上下文里起前台服务（绕开后台启动限制） -->
         <activity
             android:name=".PowerBallTrampolineActivity"

@@ -121,6 +121,8 @@
         <div class="row"><label>低延迟</label><span style="flex:1"></span><i class="sw" id="swLowLat"></i></div>
         <div class="row"><label>Siri 形变</label><span style="flex:1"></span><i class="sw" id="swSiri"></i></div>
         <div class="row"><label>跟随对话（镜像）</label><span style="flex:1"></span><i class="sw" id="swMirror"></i></div>
+        <div class="row"><label>网页聊天（玻璃内）</label><span style="flex:1"></span><i class="sw" id="swWebChat"></i></div>
+        <div class="btns"><button class="sm" id="btnWebChat">全屏打开网页聊天</button></div>
       </section>
       <section class="p"><div class="ph"><em>屏幕</em></div><div id="screenRows" class="rows"></div>
         <div class="btns"><button class="sm" id="btnLock">锁定</button><button class="sm" id="btnUnlock">解锁</button></div>
@@ -412,6 +414,7 @@
     $('swLowLat').classList.toggle('on', !!safe(function () { return W.getFloatLowLat(); }, false));
     $('swSiri').classList.toggle('on', !!safe(function () { return W.getSiriEnabled(); }, false));
     $('swMirror').classList.toggle('on', !!safe(function () { return W.getMirrorEnabled(); }, false));
+    $('swWebChat').classList.toggle('on', !!safe(function () { return W.getWebChat(); }, false));
     var src = safe(function () { return W.getFloatCaptureSrc(); }, 0);
     var sc = safe(function () { return W.getFloatCapScale(); }, 2);
     each('[data-src]', function (b) { b.classList.toggle('on', +b.dataset.src === src); });
@@ -441,6 +444,15 @@
     this.classList.toggle('on', on);
     try { W.setMirrorEnabled(on); } catch (e) {}
     setTimeout(floatSync, 700);
+  });
+  // 实验：聊天页直接用 DSH 前端网页 —— 打开后，球里"进会话"的入口都改道到那个全屏网页。
+  $('swWebChat').addEventListener('click', function () {
+    var on = !this.classList.contains('on');
+    this.classList.toggle('on', on);
+    try { W.setWebChat(on); } catch (e) {}
+  });
+  $('btnWebChat').addEventListener('click', function () {
+    try { W.openWebChatPage(); } catch (e) {}
   });
   each('[data-src]', function (b) {
     b.addEventListener('click', function () {

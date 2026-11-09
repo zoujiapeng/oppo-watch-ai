@@ -6573,7 +6573,12 @@ public class FloatingBallService extends Service {
      */
     private void updateSiriTextPos() {
         if (siriText == null || siriParams == null || wm == null) return;
-        if (siriText.getVisibility() != View.VISIBLE) return;   // 藏起来（球回最小形态）就别再摆
+        if (siriText.getVisibility() != View.VISIBLE) {
+            // 文字层在动画里会短暂 GONE（重建/换行/收缩）。网页不跟着抖：
+            // 用**上一次**的矩形按"该不该在"再摆一次，真该收（球回胶囊）由 squareDrawn01 判。
+            syncWebChatPane(siriTextLastX, siriTextLastY, siriTextLastW, siriTextLastH);
+            return;
+        }
         if (glView == null) return;
         // 玻璃的**真实屏幕矩形**是唯一可信基准：renderer.winX/winY 是 500ms 刷一次的缓存，
         // 窗口刚变大时是过期值（拿它算会把文字整体推偏，实测推低到屏外）。
@@ -6641,10 +6646,13 @@ public class FloatingBallService extends Service {
             }
         }
         syncSiriTouchLayer();
+        // ★ 2026-11-10 实验：玻璃里盖上 DSH 网页（位置就是文字视口那块矩形，玻璃大小不变）
+        syncWebChatPane(x, y, tw, th);
         // ★ 2026-11-08：胶囊状态（球还没长成方形态 / 正在缩回）里不许露字。
         //   可见度跟着**画出来的**几何走 → 球一缩成胶囊，字立刻淡没（不是等下一次测量）。
         float sq = squareDrawn01();
-        siriText.setAlpha(Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)) * sq);
+        float alpha = Math.max(0f, Math.min(1f, (aMaster - 0.1f) / 0.7f)) * sq;
+        siriText.setAlpha(webPaneOn ? 0f : alpha);   // 网页在玻璃里 → 手搓的字让位（几何照跑）
     }
 
     /** 上一次打过"越界"告警的文字高度（抑制刷屏）。 */
@@ -6946,6 +6954,14 @@ public class FloatingBallService extends Service {
         if (intent != null) {
             resultCode = intent.getIntExtra("code", 0);
             resultData = intent.getParcelableExtra("data");
+        }
+        // 调试（2026-11-09 实验）：`am startservice … --es test_reply "一段字"` 直接把字摆进玻璃，
+        // 用来验证「玻璃里显示 DSH 网页」而不必真问一轮模型。
+        final String testReply = intent == null ? null : intent.getStringExtra("test_reply");
+        if (testReply != null) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() { previewText(testReply); }   // 钉住，方便对着看
+            }, 1800);
         }
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         if (glView == null) setupOverlay();
@@ -9688,6 +9704,100 @@ public class FloatingBallService extends Service {
     private android.widget.TextView convoSideBtn;
     private WindowManager.LayoutParams convoSideParams;
 
+    /**
+     * 实验（2026-11-09 用户口径）：**回复页那块玻璃里显示 DSH 前端网页的对话页**。
+     * 玻璃几何一个像素都不动（缩小看不清也无所谓），只是把"写字的那块矩形"盖上 WebView；
+     * 不抢焦点、不抢返回键，打字仍走球自己的输入行。开关：设置页「网页聊天（玻璃内·实验）」。
+     */
+    private WebChatPane webPane;
+    private boolean webPaneOn = false;
+
+    /**
+     * 实验开关：聊天页直接用 DSH 前端的网页（设置页「悬浮 → 网页聊天（实验）」）。
+     * 关着 = 现在这套手搓的会话卡 / 回复页，一行不变。
+     */
+    private boolean webChatEnabled() { return prefs().getBoolean("web_chat", false); }
+
+    // ── 玻璃里的 DSH 网页（实验）────────────────────────────────────────────
+
+    /** 这一帧网页该不该盖在玻璃里：回复页真的画出来了、且不在任何"借玻璃"的模式里。 */
+    private boolean webPaneShouldShow() {
+        if (!webChatEnabled()) return false;
+        if (uiHidden || approvalShown || approvalClosing || menuShown || glassFullscreen
+                || searchActive || zonesActive) return false;
+        if (squareDrawn01() <= 0.55f) return false;
+        // 注意：这里**不看**文字视图的可见性（siriTextShown）—— 动画/重建的空档它会短暂 GONE，
+        // 跟着它走网页就会闪没。只看"球里到底有没有这段字"。
+        return (siriStr != null && !siriStr.trim().isEmpty()) || convoOpen || textHold;
+    }
+
+    /** 玻璃里这块网页现在该看哪条会话。 */
+    private String webPaneSessionId() {
+        if (convoOpen && convoSessionId != null && !convoSessionId.isEmpty()) return convoSessionId;
+        if (replySessionId != null && !replySessionId.isEmpty()) return replySessionId;
+        return asstSessionId;
+    }
+
+    /**
+     * 跟着 {@link #updateSiriTextPos()} 走：**只更新位置/大小**，绝不碰球的几何。
+     * 顺手把文字层变透明（几何还在跑，玻璃该怎么长还怎么长），网页走了再露字。
+     */
+    private void syncWebChatPane(int x, int y, int w, int h) {
+        if (!webPaneShouldShow()) {
+            if (webPaneOn) {
+                Log.i("FloatingBall", "webpane: 收起（shown=" + siriTextShown
+                        + " sq=" + squareDrawn01() + " text=" + (siriStr == null ? -1 : siriStr.length())
+                        + " convo=" + convoOpen + " hold=" + textHold + " uiHidden=" + uiHidden
+                        + " menu=" + menuShown + " search=" + searchActive + " zones=" + zonesActive
+                        + " approval=" + approvalShown + " full=" + glassFullscreen + "）");
+            }
+            hideWebChatPane();
+            return;
+        }
+        if (webPane == null) webPane = new WebChatPane(this, wm);
+        String sid = webPaneSessionId();
+        if (sid != null) webPane.setSession(sid, convoOpen ? convoTitle : null);
+        webPane.show(x, y, w, h);
+        if (!webPaneOn) {
+            webPaneOn = true;
+            Log.i("FloatingBall", "webpane: 玻璃里显示 DSH 网页 " + w + "x" + h + " sid=" + sid);
+        }
+    }
+
+    private void hideWebChatPane() {
+        if (webPane == null) return;
+        if (webPaneOn) Log.i("FloatingBall", "webpane: 收起（回手搓 markdown / 球回胶囊）");
+        webPaneOn = false;
+        webPane.hide();
+    }
+
+    /**
+     * 打开 **DSH 前端网页**（全屏 {@link WebChatActivity}）—— 玻璃里那块的"放大版"，
+     * 从参数面板进来。玻璃里那个实验见 {@link #syncWebChatPane}。
+     *
+     * sid 为空 = 只开 DSH 首页（参数面板里那个入口）；
+     * 有 sid = 网页加载完后按标题把那条会话点开（DSH 前端没有 URL 路由，只能这么进）。
+     * 网页是全屏的，所以先把球那一套藏起来（Activity 里负责，退出时原样恢复）。
+     */
+    void openWebChat(String sid, String title) {
+        if (sid != null && !sid.isEmpty()) {
+            targetSessionId = sid;
+            targetSessionTitle = title;
+            setAssistantSession(sid);
+        }
+        if (convoOpen) closeConversation("改用 DSH 网页聊天");
+        Log.i("FloatingBall", "webchat: 打开 DSH 前端网页 sid=" + sid + " title=" + title);
+        try {
+            Intent i = new Intent(this, WebChatActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (sid != null && !sid.isEmpty()) i.putExtra(WebChatActivity.EXTRA_SESSION_ID, sid);
+            if (title != null && !title.isEmpty()) i.putExtra(WebChatActivity.EXTRA_SESSION_TITLE, title);
+            startActivity(i);
+        } catch (Throwable t) {
+            toast("打不开网页聊天：" + message(t));
+        }
+    }
+
     void openConversation(final String sid, final String title) {
         if (sid == null || sid.isEmpty()) return;
         convoOpen = true;
@@ -10821,6 +10931,8 @@ public class FloatingBallService extends Service {
         rows.add(new BallGlassMenu.Row("推理等级", effort.isEmpty() ? "跟随模型默认" : effort, false));
         rows.add(new BallGlassMenu.Row("权限", cur("send_perm", "跟随默认"), false));
         rows.add(new BallGlassMenu.Row("发送目录", cur("send_cwd", "跟随 DSH 默认"), false));
+        rows.add(new BallGlassMenu.Row("网页聊天（全屏）",
+                webChatEnabled() ? "DSH 前端网页 · 玻璃内实验已开" : "DSH 前端网页", false));
         rows.add(new BallGlassMenu.Row("关闭", "", true));
         showMenu("settings", "参数", "下一次发送时生效", rows, "");
     }
@@ -11046,6 +11158,16 @@ public class FloatingBallService extends Service {
                 case 2: openEffortMenu(); return;
                 case 3: openPermMenu(); return;
                 case 4: openDirsMenu(); return;
+                case 5: {
+                    // 实验：网页聊天 —— 有正在看的会话就定位过去，没有就开 DSH 首页。
+                    final String sid = targetSessionId;
+                    final String title = targetSessionTitle;
+                    hideMenu("打开网页聊天");
+                    main.postDelayed(new Runnable() {
+                        @Override public void run() { openWebChat(sid, title); }
+                    }, 80);
+                    return;
+                }
                 default: hideMenu("关闭"); return;
             }
         }
@@ -12802,6 +12924,7 @@ public class FloatingBallService extends Service {
         main.removeCallbacks(renderTick);
         main.removeCallbacks(siriTick);
         removeSiriText();
+        try { if (webPane != null) { webPane.destroy(); webPane = null; } } catch (Throwable ignored) { }
         if (voice != null) { try { voice.cancel(); } catch (Throwable ignored) { } voice = null; }
         try { exitZones(); } catch (Throwable ignored) { }
         try { hideMenu("服务结束"); } catch (Throwable ignored) { }
