@@ -10,6 +10,76 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-09（第四版）：回复页不抢前台返回键 / 参数面板回到原页 / 左下改成「最近会话」
+
+**用户原话**：「1 回复页面是手机返回键对手机前台应用无效（比如当前在 edge 浏览器），
+回复页面变回胶囊状态的动作已经有了不用加返回键触发（双指同时滑动）；
+2 回复页面中双指长按输入框设置参数后点击空白区域返回的地方并不是回复页面这不人性化；
+3 菜单中显示运行中的会话我想改成最近会话，只是顶部优先显示正在运行中的会话并有绿色标记，
+并且不能只有停止选项，要弄成左半边点击就是进入回话，右半边点击即可停止」。
+
+一句话结论：**回复页绝不接管返回键**（输入行平时不可聚焦，焦点留在前台 App）；
+参数面板只是借玻璃用一下，关掉要原样还回来；
+左下那张卡不再是"运行中列表 + 只能停"，而是"最近会话 + 绿点 + 左进右停"**。
+
+### ① 回复页开着时，手机的返回键对**前台 App** 失效（Edge 退不了）
+
+> ⚠️ 第一版把这条理解反了（以为"回复页要能用返回键收起"），做了一堆 BACK 拦截 + 顶焦点。
+> 用户第二次说明才对齐：**回复页不该接管返回键** —— 返回键要照常给前台 App（比如 Edge 后退）；
+> 回复页收回胶囊的动作已经有了（双指手势），不需要返回键。
+
+- 病根是**焦点窗口**：玻璃/文字/代理窗口全是 `FLAG_NOT_FOCUSABLE`，App 里唯一能拿焦点的
+  是那条**输入行**（`convoBar`）。它一可见，WindowManager 就把焦点给它（实测
+  `mCurrentFocus = com.glslplayground.app`，而前台是 Edge）→ 系统把 BACK 送进这个
+  没有 Activity 的悬浮窗，没人转发 → 前台 App 的返回键/边缘手势就"按了没反应"。
+- 修法（`ensureComposerBar` + `beginComposerEdit/endComposerEdit`）：
+  1. **输入行窗口默认带 `FLAG_NOT_FOCUSABLE`** —— 焦点一直在前台 App 手里，返回键照常后退。
+  2. 只有用户**点输入行要打字**时（`onTapEdit → beginComposerEdit`）才临时去掉该 flag：
+     删掉再加一次窗口（WM 才会真的给焦点）+ `focusInput()` + 弹键盘。
+  3. 退出编辑立刻还回去：API 30+ 用窗口 insets 看 IME 可见性（键盘收起 → `endComposerEdit`），
+     再挂 `addOnWindowFocusChangeListener` 兜底（窗口失焦 → 若没拿着焦点就还回去）。
+     输入行收起时也清一次，保证下次露出来仍是不可聚焦。
+  4. 参数面板（`menuView`）仍是临时可聚焦的**模态小窗**：它开着时返回键先关面板；
+     这是唯一的 BACK 拦截。`onGlassMenuBack()` 只处理这一种情况。
+- 实机验证（1080×2340，ColorOS）：回复页开着时 `dumpsys input` 的 FocusedWindows
+  是浏览器、不是本 App；从屏幕左缘滑 → Edge 正常后退，FloatingBall 日志里**没有**任何
+  "返回键"记录；点输入行 → `composer: 进入编辑…` + `winF=true`，键盘弹出；
+  键盘收起后 `composer: 退出编辑… → 输入行不再抢焦点`，焦点回到浏览器。
+
+### ② 参数面板关掉回到的不是回复页 —— 面板开着时那一页被"兜底收回"了
+
+- 病根：回复页的字由 100ms 巡检在菜单期间收掉（`replyTextHiddenForUi`），本身没问题；
+  但 **`pumpTextHoldSafety()` 的 8 秒兜底 / `releaseHoldForFinalReply()` 的 1.5 秒最终回复收回
+  不认"参数面板开着"** —— 用户在面板里调模型/权限超过 8 秒，`textHold` 就被释放、几何回圆球；
+  点空白关掉面板时 `exitGlassPanel()` 只把玻璃还原成球，没人把那一页放回来。
+- 修法：`openSettingsMenu()` 里如果是**回复页**（不是会话卡）进参数：
+  `menuReplyGuard = true` + 续 `lastTextAt`，先把字/输入行收起来；
+  `hideMenu()` 里按这个标记调 `restoreReplyTextAfterUi()`（重建内容 + 重新量几何 + 露字）
+  再 `syncComposerBar()`；`pumpTextHoldSafety()` / `releaseHoldForFinalReply()` 都加
+  `menuShown || glassFullscreen` 守卫（面板期间不收回）。
+- 实机验证：回复页 → `menu-settings` 钩子开参数 → **等 17 秒** → 点空白：
+  `menu: 关闭（点空白处）` + `reply: 参数面板关闭，回复页原样放回（40 字）`
+  + `composer: 方形态有字 → 输入行摆上`，文字/输入行/焦点都回来了。
+
+### ③ 左下：运行中的会话 → 最近会话（绿点 + 左进右停）
+
+- 数据：预取改成一次 `DshApi.sessions()`（`session/list`，已按 `updatedAt` 新→旧），
+  `applyRecentPrefetch()` 再把 `running=true` 的捞到最前；`prefetchedRunning` 换成 `prefetchedRecent`。
+- 卡片：标题「最近会话」，运行中的行首**绿点**（`0xFF30D158`）+ 副标题「运行中 · 多久以前 · 目录」；
+  行中间一条发丝竖线，**右半边**：运行中 = 绿色 `⏹ 停止`，空闲 = 灰字「空闲」。
+- 点击：`cardTap()` 的 kind=5 按 x 是否过行中线分两个动作 ——
+  左半边 `openConversation()`；右半边且 running → `stopRunningSession()`（只有这一轮）；
+  右半边但没在跑 → toast「现在没在运行」，卡片不关。
+- 停止后不再把行摘掉：`markSessionStopped()` 把预取列表/目录缓存里的 `running` 降下来，
+  绿点和「停止」当场变灰（下次按住也不会又显示成在跑）。
+- 左下圆区图标：原来的「停止方块」换成**时钟**（`BallZonesView.drawIcon` case 2），
+  停不停止不再由圆区表达，交给每一行的右半边。
+
+**改到的文件**：`FloatingBallService.java`（输入行可聚焦生命周期 / 参数守卫 / 最近会话）、
+`BallZonesView.java`（绿点 / 分栏 / 停止键 / 时钟图标）、`docs/OPERATIONS.md`。
+`BallSearchBar.java` 这一轮**没有改动**（第一版的 backHandler 已撤掉）。
+APK 已重编并在本机安装验证。
+
 ## 2026-11-09（第三版）：在会话卡里发消息 → 球的动画跟着这条会话走
 
 **用户原话**：「我在新回话聊天，然后在查看回话的玻璃上回复他叫他去微信点外卖，它操控手机，

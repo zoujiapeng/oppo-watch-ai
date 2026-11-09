@@ -22,10 +22,10 @@ final class BallZonesView extends View {
 
     /**
      * 六个区（2026-10-23：四区 → 六区围成一圈）：
-     * 0=左上 工作目录 / 1=右上 搜索会话 / 2=左下 停止（运行中会话） / 3=右下 参数 /
-     * 4=正上 待定 / 5=正下 待定（占位，只画一圈淡淡的轮廓）。
+     * 0=左上 工作目录 / 1=右上 搜索会话 / 2=左下 最近会话（运行中的排最上面、带绿点） /
+     * 3=右下 参数 / 4=正上 待定 / 5=正下 待定（占位，只画一圈淡淡的轮廓）。
      */
-    static final String[] LABELS = {"工作目录", "搜索会话", "停止", "参数", "待定", "待定"};
+    static final String[] LABELS = {"工作目录", "搜索会话", "最近会话", "参数", "待定", "待定"};
     static final int ZONE_COUNT = 6;
 
     private final float density;
@@ -63,6 +63,10 @@ final class BallZonesView extends View {
     private String[] cardSubs = new String[0];
     private float[] cardRects = new float[0];      // 本 View 坐标：x,y,w,h
     private int cardFocus = -1;
+    /** 「最近会话」卡片：每行是否在跑（true → 左边绿点 + 右半边亮「停止」）。 */
+    private boolean[] cardRunning = new boolean[0];
+    /** 这一张卡片是不是「左半边进入 / 右半边停止」的双击区行。 */
+    private boolean cardSplit = false;
     /** 滚动提示：bit0 = 上面还有、bit1 = 下面还有（列表可滚动时画一个小箭头）。 */
     private int cardScroll = 0;
 
@@ -81,6 +85,10 @@ final class BallZonesView extends View {
     private int cardLocX = 0, cardLocY = 0;
     private long lastAlignLog = 0;
     private final Paint rowHi = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** 「最近会话」行：运行中的绿点 / 右半边的停止键 / 左右分界的发丝线。 */
+    private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint divider = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF stopRect = new RectF();
 
     BallZonesView(Context c) {
         super(c);
@@ -138,6 +146,18 @@ final class BallZonesView extends View {
     /** 切到卡片模式（二级/三级菜单）：圆区图标整组隐藏。 */
     void showCards(String title, String[] labels, String[] subs, float[] rects,
                    float[] titleRect, float[] listRect, int focus) {
+        showCards(title, labels, subs, rects, titleRect, listRect, focus, null, false);
+    }
+
+    /**
+     * 卡片模式（带「最近会话」的双击区信息）。
+     *
+     * @param running 每行是否在跑（只在 split=true 时有意义）；null = 全都不亮绿点
+     * @param split   true = 这一张卡片是「左半边进入会话 / 右半边停止」的分栏行
+     */
+    void showCards(String title, String[] labels, String[] subs, float[] rects,
+                   float[] titleRect, float[] listRect, int focus,
+                   boolean[] running, boolean split) {
         cardMode = true;
         cardTitle = title == null ? "" : title;
         cardLabels = labels == null ? new String[0] : labels;
@@ -146,6 +166,8 @@ final class BallZonesView extends View {
         cardTitleRect = titleRect == null ? new float[0] : titleRect;
         cardListRect = listRect == null ? new float[0] : listRect;
         cardFocus = focus;
+        cardRunning = running == null ? new boolean[0] : running;
+        cardSplit = split;
         invalidate();
     }
 
@@ -281,18 +303,65 @@ final class BallZonesView extends View {
             float x = localRects[i * 4], y = localRects[i * 4 + 1];
             float w = localRects[i * 4 + 2], h = localRects[i * 4 + 3];
             boolean on = (i == cardFocus);
-            text.setTextSize(dp(on ? 13.5f : 12.5f));
-            text.setColor(on ? 0xFFFFFFFF : 0xE6FFFFFF);
+            boolean run = cardSplit && i < cardRunning.length && cardRunning[i];
             String label = cardLabels[i];
             String sub = i < cardSubs.length ? cardSubs[i] : "";
             float baseY = sub == null || sub.isEmpty() ? y + h * 0.62f : y + h * 0.42f;
-            cv.drawText(fit(label, text, w - dp(24f)), x + dp(12f), baseY, text);
+            float labelX = x + dp(12f);
+            if (cardSplit) {
+                // 左右分界：左半边 = 进入会话，右半边 = 停止（运行中才有）
+                divider.setColor(0x24FFFFFF);
+                float mid = x + w * 0.5f;
+                cv.drawLine(mid, y + dp(7f), mid, y + h - dp(7f), divider);
+                if (run) {
+                    // 运行中的绿点（外圈带一点光晕，暗桌面上也一眼看得出来）
+                    float dx = x + dp(11f), dy = y + h * 0.5f;
+                    dot.setColor(0x2E30D158);
+                    cv.drawCircle(dx, dy, dp(6.4f), dot);
+                    dot.setColor(0xFF30D158);
+                    cv.drawCircle(dx, dy, dp(3.3f), dot);
+                    labelX = x + dp(20f);
+                }
+            }
+            // 分栏行：文字只占左半边（右半边留给「停止」），别压过分界线
+            float maxTextW = cardSplit
+                    ? (x + w * 0.5f) - labelX - dp(7f)
+                    : w - dp(24f);
+            text.setTextSize(dp(on ? 13.5f : 12.5f));
+            text.setColor(on ? 0xFFFFFFFF : 0xE6FFFFFF);
+            cv.drawText(fit(label, text, maxTextW), labelX, baseY, text);
             if (sub != null && !sub.isEmpty()) {
                 text.setTextSize(dp(9.5f));
                 text.setColor(on ? 0xCFFFFFFF : 0x8AFFFFFF);
-                cv.drawText(fit(sub, text, w - dp(24f)), x + dp(12f), baseY + dp(13f), text);
+                cv.drawText(fit(sub, text, maxTextW), labelX, baseY + dp(13f), text);
             }
+            if (cardSplit) drawRowAction(cv, y, h, x + w * 0.75f, run, on);
         }
+    }
+
+    /**
+     * 分栏行右半边的动作提示：运行中 = 一个绿色停止方块 + 「停止」；空闲 = 灰字「空闲」。
+     * 左半边不画额外提示 —— 行标题就在左半边，点它就是进入会话。
+     */
+    private void drawRowAction(Canvas cv, float y, float h, float cx, boolean running, boolean focused) {
+        Paint.Align old = text.getTextAlign();
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(dp(10.5f));
+        float cy = y + h * 0.5f;
+        if (running) {
+            // 停止方块（和状态 3 那颗停止图标同一字形，缩小版）
+            float ss = dp(7f);
+            float sx = cx - dp(17f);
+            stopRect.set(sx, cy - ss * 0.5f, sx + ss, cy + ss * 0.5f);
+            fill.setColor(focused ? 0xFFD6FFDD : 0xFFB9F6C4);
+            cv.drawRoundRect(stopRect, dp(1.8f), dp(1.8f), fill);
+            text.setColor(focused ? 0xFFD6FFDD : 0xFFB9F6C4);
+            cv.drawText("停止", cx + dp(2f), cy + dp(3.6f), text);
+        } else {
+            text.setColor(0x59FFFFFF);
+            cv.drawText("空闲", cx, cy + dp(3.6f), text);
+        }
+        text.setTextAlign(old);
     }
 
     private static String fit(String s, Paint p, float maxW) {
@@ -303,7 +372,7 @@ final class BallZonesView extends View {
         return s.substring(0, n) + "…";
     }
 
-    /** 图标：0 文件夹 / 1 放大镜 / 2 停止（运行中会话） / 3 滑杆。尺寸按 r 等比缩放。 */
+    /** 图标：0 文件夹 / 1 放大镜 / 2 时钟（最近会话） / 3 滑杆。尺寸按 r 等比缩放。 */
     private void drawIcon(Canvas cv, int which, float x, float y, boolean on) {
         float s = r * 0.80f;                    // 图标边长（比原来大一截）
         cv.save();
@@ -327,10 +396,12 @@ final class BallZonesView extends View {
                 path.lineTo(20.8f, 20.8f);
                 break;
             }
-            case 2: {                           // 运行中的会话 / 停止（2026-10-23 换掉铅笔）
-                // 外框一个圆角方块 + 中间实心方块 = 一眼认得出的「停止」
-                ring2.set(2.6f, 2.6f, 21.4f, 21.4f);
-                path.addRoundRect(ring2, 4.2f, 4.2f, Path.Direction.CW);
+            case 2: {                           // 最近会话（2026-11-09 换掉「停止」方块）
+                // 时钟：圆环 + 时针分针 = 「最近」一眼认得出（停止挪到每一行的右半边）
+                path.addCircle(12f, 12f, 8.6f, Path.Direction.CW);
+                path.moveTo(12f, 7.1f);
+                path.lineTo(12f, 12.3f);
+                path.lineTo(16.1f, 14.3f);
                 break;
             }
             default: {                          // 参数：三根滑杆
@@ -357,10 +428,6 @@ final class BallZonesView extends View {
         stroke.setColor(0xFFFFFFFF);                  // 芯：纯白
         stroke.setStrokeWidth(core * k24);
         cv.drawPath(path, stroke);
-        if (which == 2) {                             // 停止：中间那块实心（跟芯一样纯白）
-            fill.setColor(0xFFFFFFFF);
-            cv.drawRoundRect(new RectF(8.2f, 8.2f, 15.8f, 15.8f), 1.6f, 1.6f, fill);
-        }
         if (which == 3) {                             // 滑杆的三个旋钮（也用纯白，跟芯一致）
             fill.setColor(0xFFFFFFFF);
             cv.drawCircle(8f, 7f, 1.9f, fill);

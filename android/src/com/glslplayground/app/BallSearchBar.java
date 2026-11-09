@@ -62,6 +62,20 @@ public class BallSearchBar extends LinearLayout {
         void onInputHeight(int px);
     }
 
+    /** 窗口焦点变化（输入行要据此在"可聚焦编辑"与"不抢前台 App 焦点"之间切换）。 */
+    public interface WindowFocusListener {
+        void onWindowFocus(boolean hasFocus);
+    }
+
+    private WindowFocusListener windowFocusListener;
+
+    public void setWindowFocusListener(WindowFocusListener l) { this.windowFocusListener = l; }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (windowFocusListener != null) windowFocusListener.onWindowFocus(hasFocus);
+    }
+
     // 颜色/透明度照 metaball-search.html 的 #search 抄：图标 #fff @ .72、
     // 文字 #fff、placeholder rgba(235,235,245,.45)、文字带 0 1px 5px rgba(0,0,0,.35) 的投影
     private static final int COL_ICON = 0xB8FFFFFF;

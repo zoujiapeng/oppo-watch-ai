@@ -5638,6 +5638,14 @@ public class FloatingBallService extends Service {
                     s.lastTextAt = android.os.SystemClock.uptimeMillis();
                     return;
                 }
+                // ★ 2026-11-09（用户：参数面板关掉后回不到回复页）：
+                //   玻璃菜单（参数面板等）开着 = 用户正在这一页上操作，这一下"最终回复收回"
+                //   先不算数；关面板时 hideMenu() 会把 lastTextAt 续上，回复页原样回来。
+                if (s.menuShown || s.glassFullscreen) {
+                    Log.i("FloatingBall", "最终回复到了，但参数面板还开着 → 先不收（回到回复页再算）");
+                    s.lastTextAt = android.os.SystemClock.uptimeMillis();
+                    return;
+                }
                 // ★ 搜索胶囊开着：这次"收回初始圆球"先记在账上 —— 球这会儿本来就是藏着的，
                 //   真要收也只该等胶囊收起之后。否则不光会把整屏玻璃窗打回球窗（见
                 //   updateSiriWindow 的守卫），还会把刚到的最终回复从球里清掉，
@@ -5956,6 +5964,13 @@ public class FloatingBallService extends Service {
         //   8 秒兜底不许把它收走（收走 = 用户正看着，屏幕上的对话突然没了、输入框悬着）。
         //   关掉卡只有三条路：点球（单击退出卡）、双指手势、进菜单/搜索/拍照藏界面。
         if (convoOpen) {
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            return;
+        }
+        // ★ 2026-11-09：玻璃菜单 / 参数面板开着 = 用户在这一页上操作。
+        //   参数面板借走了玻璃窗，回复页此刻只是暂时收起；这里的 8 秒兜底要是把它释放掉，
+        //   用户点空白关掉面板就回不到刚才那一页了（只剩一颗空球）。
+        if (menuShown || glassFullscreen) {
             lastTextAt = android.os.SystemClock.uptimeMillis();
             return;
         }
@@ -8198,19 +8213,19 @@ public class FloatingBallService extends Service {
                 + ")（原 " + holdWinW0 + "x" + holdWinH0 + "）");
     }
 
-    /** 按住的那一刻就把"工作目录 + 最近目录下的会话"取回来，卡片一出现就是热的。 */
+    /** 按住的那一刻就把"工作目录 + 最近目录下的会话 + 最近会话"取回来，卡片一出现就是热的。 */
     private void prefetchZonesData() {
         final DshApi api = DshApi.get(this);
         prefetchedDirs = null;
         prefetchDirPath = null;
-        prefetchedRunning = null;          // null = 还没取到（卡片会显示「读取中…」）
+        prefetchedRecent = null;           // null = 还没取到（卡片会显示「读取中…」）
         new Thread(() -> {
-            // ① **先**取「运行中的会话」：一次 session/list 就够，几十毫秒。
+            // ① **先**取「最近会话」：一次 session/list 就够，几十毫秒。
             //   左下角那张卡片是 260ms 悬停后就弹的，必须比它快才能一按就有内容。
             try {
-                applyRunningPrefetch(api.runningSessions());
+                applyRecentPrefetch(api.sessions());
             } catch (Throwable t) {
-                Log.w("FloatingBall", "zones: 读运行中会话失败 " + message(t));
+                Log.w("FloatingBall", "zones: 读最近会话失败 " + message(t));
             }
             try {
                 final List<String> dirs = api.recentDirs();
@@ -8231,8 +8246,8 @@ public class FloatingBallService extends Service {
                     prefetchDirPath = firstDir;
                     prefetchedSessions = rows == null ? new ArrayList<>() : rows;
                     Log.i("FloatingBall", "zones: 预取 " + dirs.size() + " 个目录 / "
-                            + rows.size() + " 条会话 / 运行中 "
-                            + (prefetchedRunning == null ? "?" : prefetchedRunning.size()) + " 条");
+                            + rows.size() + " 条会话 / 最近 "
+                            + (prefetchedRecent == null ? "?" : prefetchedRecent.size()) + " 条");
                 });
             } catch (Throwable t) {
                 Log.w("FloatingBall", "zones: 预取失败 " + message(t));
@@ -8377,10 +8392,16 @@ public class FloatingBallService extends Service {
 
     static final class HoldItem {
         String label, sub;
-        int kind;          // 0=目录 1=会话 2=新建会话 3=动作
+        int kind;          // 0=目录 1=会话 2=新建会话 3=动作 4=旧「运行中」 5=最近会话
         String data;       // 目录路径 / 会话 id
+        /** kind=5 专用：这条会话此刻在不在跑（跑着的那几行置顶 + 画绿点 + 右半边可停止）。 */
+        boolean running;
         HoldItem(String label, String sub, int kind, String data) {
+            this(label, sub, kind, data, false);
+        }
+        HoldItem(String label, String sub, int kind, String data, boolean running) {
             this.label = label; this.sub = sub; this.kind = kind; this.data = data;
+            this.running = running;
         }
     }
 
@@ -8441,8 +8462,8 @@ public class FloatingBallService extends Service {
     private List<String> prefetchedDirs = null;
     private String prefetchDirPath = null;
     private List<DshApi.SessionRow> prefetchedSessions = new ArrayList<>();
-    /** 左下角「运行中的会话」预取结果；null = 还没取到。 */
-    private List<DshApi.SessionRow> prefetchedRunning = null;
+    /** 左下角「最近会话」预取结果（运行中的排最前）；null = 还没取到。 */
+    private List<DshApi.SessionRow> prefetchedRecent = null;
     private final java.util.LinkedHashMap<String, List<DshApi.SessionRow>> prefetchCache =
             new java.util.LinkedHashMap<>();
 
@@ -8458,8 +8479,9 @@ public class FloatingBallService extends Service {
     /**
      * 某个圆区的动作（悬停够时、或点击时都走这里）。
      *
-     * 左下角（2026-10-23 替换掉原来的「参数」）是**正在跑的会话**；参数弹窗没丢 ——
-     * 搜索框双指长按（onTwoFingerHold）还是同一条路。
+     * 左下角（2026-11-09 起）是**最近会话**：运行中的置顶并带绿点，
+     * 每行**左半边 = 进入会话 / 右半边 = 停止**；参数弹窗没丢 ——
+     * 搜索框 / 输入行双指长按（onTwoFingerHold）还是同一条路。
      */
     private void runZoneAction(int z) {
         if (z == ZONE_TOP || z == ZONE_BOTTOM) {
@@ -8469,13 +8491,14 @@ public class FloatingBallService extends Service {
         }
         if (z == ZONE_TL) openHoldDirs();
         else if (z == ZONE_TR) commitHold(() -> enterSearchMode("状态3 右上：搜索会话", "", true, BAR_SEARCH));
-        else if (z == ZONE_BL) startHoldRunning();
+        else if (z == ZONE_BL) startHoldRecent();
         else commitHold(() -> openDshSettings("状态3 右下"));
     }
 
     /**
      * 卡片上的一次点击（2026-10-23：卡片落定后就是普通可点面板）：
-     *   标题行「‹ 」→ 返回上一级；某一行 → 执行（目录=进它的会话 / 会话=进对话 / 新建=建 / 运行中=停止）；
+     *   标题行「‹ 」→ 返回上一级；某一行 → 执行（目录=进它的会话 / 会话=进对话 / 新建=建）；
+     *   「最近会话」行（kind=5）**按左右半边分两个动作**：左 = 进入会话，右 = 停止当前这一轮；
      *   点在面板外面（还在球身上）→ 收起卡片回六区。
      */
     private void cardTap(float x, float y) {
@@ -8495,6 +8518,27 @@ public class FloatingBallService extends Service {
             Log.i("FloatingBall", "zones: 点击第 " + (i + 1) + " 行「" + it.label + "」kind=" + it.kind);
             if (it.kind == 0) {                       // 目录 → 进它的会话列表
                 openHoldSessions(it.data);
+                return;
+            }
+            if (it.kind == 5) {                       // 最近会话：左半边进入 / 右半边停止
+                float rx = holdRects[i * 4], rw = holdRects[i * 4 + 2];
+                boolean rightHalf = x >= rx + rw * 0.5f;
+                if (rightHalf && !it.running) {
+                    Log.i("FloatingBall", "zones: 点「" + it.label + "」右半边，但它没在跑 → 不动作");
+                    toast("「" + it.label + "」现在没在运行");
+                    return;                           // 卡片不关，可以继续点左半边进去看
+                }
+                final boolean stop = rightHalf;
+                Log.i("FloatingBall", "zones: 最近会话「" + it.label + "」"
+                        + (stop ? "右半边 → 停止" : "左半边 → 进入会话"));
+                cardTapCommit = true;
+                try { finishZones(false); } finally { cardTapCommit = false; }
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (stop) stopRunningSession(it.data, it.label);
+                        else openConversation(it.data, it.label);
+                    }
+                }, 60);
                 return;
             }
             if (it.kind == 1 || it.kind == 2 || it.kind == 4) {
@@ -8631,7 +8675,7 @@ public class FloatingBallService extends Service {
      * 规则（2026-10-23 新交互）：
      *   · 目录行停 {@link #DIR_DWELL_MS} → 进会话列表；
      *   · 会话行停 {@link #ITEM_DWELL_MS} → 直接进这条会话；
-     *   · 「运行中的会话」那几条**不**做悬停动作（停止只能在松手时确认，避免误停）；
+     *   · 「最近会话」那几条**不**做悬停动作（进/停都在点击时按左右半边决定，避免误停）；
      *   · 换级后 {@link #LEVEL_ARM_MS} 内的悬停不算数 —— 手指没动就被带进下一级是以前最大的坑。
      */
     private void pumpHoldDwell() {
@@ -8700,10 +8744,24 @@ public class FloatingBallService extends Service {
         computeCardRects();
         if (zonesView != null) {
             zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
-                    holdListLocal, holdFocus < 0 ? -1 : holdFocus - holdFirst);
+                    holdListLocal, holdFocus < 0 ? -1 : holdFocus - holdFirst,
+                    runningFlags(), isRecentCard());
             zonesView.setCardScroll(cardScrollMode());
         }
         pushCardScene();
+    }
+
+    /** 当前卡片是不是「最近会话」那张（决定行内要不要画左右分栏 / 绿点 / 停止键）。 */
+    private boolean isRecentCard() {
+        return "最近会话".equals(holdTitle);
+    }
+
+    /** 可见段的 running 标记（和 labels()/subs() 同一段窗口，下标一一对应）。 */
+    private boolean[] runningFlags() {
+        int c = visCount();
+        boolean[] a = new boolean[c];
+        for (int i = 0; i < c; i++) a[i] = holdItems.get(holdFirst + i).running;
+        return a;
     }
 
     /** 0=不滚 / 1=上面还有 / 2=下面还有 / 3=两边都有。 */
@@ -8875,55 +8933,60 @@ public class FloatingBallService extends Service {
     }
 
     /**
-     * 左下角：**正在跑的会话**（`session/list` 里 running=true 的那些）。
+     * 左下角：**最近会话**（用户 2026-11-09 口径：不要只看「运行中的」）。
      *
-     * 用一级卡片（和工作目录同一套版式），所以没有"返回上一级"：
-     * 手指停在某一行上松手 = 停掉那条会话的当前这一轮（`session/cancel`）。
-     * 这一步只中止当前回合，会话本身还在，随时能继续发消息。
+     * 数据 = 一次 `session/list`（已经按 updatedAt 新→旧排好），这里再把 running 的捞到最前：
+     *   ① 运行中的会话置顶，行首画一颗绿点，副标题带「运行中」；
+     *   ② 其余会话按最近更新时间跟在后面；
+     *   ③ **每行左右两半是两个动作**：左半边 = 进入这条会话的回复页，右半边 = 停止当前这一轮。
+     *
+     * 用一级卡片（和工作目录同一套版式），所以没有"返回上一级"：不需要。点标题行仍然回六区。
+     * 停止只中止当前回合（`session/cancel`），会话本身还在，随时能继续发消息。
      */
-    /** 把「运行中」的预取结果落下去；如果卡片正开着，立刻重画一次（不等用户再悬停）。 */
-    private void applyRunningPrefetch(final List<DshApi.SessionRow> rows) {
+    /** 把「最近会话」的预取结果落下去（运行中置顶）；卡片正开着就立刻重画一次。 */
+    private void applyRecentPrefetch(final List<DshApi.SessionRow> all) {
+        final List<DshApi.SessionRow> ordered = new ArrayList<>();
+        if (all != null) {
+            for (DshApi.SessionRow r : all) if (r.running) ordered.add(r);
+            for (DshApi.SessionRow r : all) if (!r.running) ordered.add(r);
+        }
         main.post(() -> {
-            prefetchedRunning = rows;
-            if (zonesActive && holdLevel == 1 && "运行中的会话".equals(holdTitle)) {
-                startHoldRunning();            // 这一次走的是"已有数据"分支，不会递归取数
+            prefetchedRecent = ordered;
+            if (zonesActive && holdLevel == 1 && "最近会话".equals(holdTitle)) {
+                startHoldRecent();             // 这一次走的是"已有数据"分支，不会递归取数
             }
         });
     }
 
-    private void startHoldRunning() {
+    private void startHoldRecent() {
         if (!zonesActive) return;
-        List<DshApi.SessionRow> rows = prefetchedRunning;
+        List<DshApi.SessionRow> rows = prefetchedRecent;
         List<HoldItem> items = new ArrayList<>();
         if (rows != null) {
             int max = Math.min(10, rows.size());          // 面板上限 10 行，多了靠边缘滚动
             for (int i = 0; i < max; i++) {
                 DshApi.SessionRow r = rows.get(i);
                 String sub = relTime(r.updatedAt);
+                if (r.running) sub = "运行中 · " + sub;
                 if (!r.subtitle().isEmpty()) sub = sub + " · " + r.subtitle();
-                items.add(new HoldItem(r.title, sub, 4, r.id));   // kind=4：运行中会话（松手停止）
+                // kind=5：最近会话。左半边进入 / 右半边停止；running 决定绿点与「停止」亮不亮。
+                items.add(new HoldItem(r.title, sub, 5, r.id, r.running));
             }
-            if (items.isEmpty()) items.add(new HoldItem("没有正在跑的会话", "松手退出", 9, ""));
+            if (items.isEmpty()) items.add(new HoldItem("还没有会话", "去工作目录里新建一条", 9, ""));
         } else {
-            items.add(new HoldItem("读取运行中的会话…", "", 9, ""));
+            items.add(new HoldItem("读取最近会话…", "", 9, ""));
         }
-        showCards(1, "运行中的会话", items);
+        showCards(1, "最近会话", items);
         if (rows != null) return;
         // 预取还没回来：后台取一次再刷（用户还停在这一级才刷，别抢画面）
         final DshApi api = DshApi.get(this);
         new Thread(() -> {
             try {
-                final List<DshApi.SessionRow> got = api.runningSessions();
-                main.post(() -> {
-                    prefetchedRunning = got;
-                    if (zonesActive && holdLevel == 1 && "运行中的会话".equals(holdTitle)) {
-                        startHoldRunning();
-                    }
-                });
+                applyRecentPrefetch(api.sessions());
             } catch (Throwable t) {
-                Log.w("FloatingBall", "zones: 读运行中会话失败 " + message(t));
+                Log.w("FloatingBall", "zones: 读最近会话失败 " + message(t));
             }
-        }, "hold-running").start();
+        }, "hold-recent").start();
     }
 
     /** 停掉一条正在跑的会话（`session/cancel`），球上给一句 toast 反馈。 */
@@ -8943,13 +9006,42 @@ public class FloatingBallService extends Service {
                 try {
                     android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
                 } catch (Throwable ignored) { }
-                if (okf && prefetchedRunning != null) {      // 本地列表顺手摘掉，下次按住就是新的
-                    List<DshApi.SessionRow> keep = new ArrayList<>();
-                    for (DshApi.SessionRow r : prefetchedRunning) if (!sid.equals(r.id)) keep.add(r);
-                    prefetchedRunning = keep;
+                if (okf) {
+                    // 不把行摘掉（最近会话还要留着），只把 running 降下来 → 绿点/停止键当场变灰
+                    markSessionStopped(sid);
+                    if (zonesActive && holdLevel == 1 && "最近会话".equals(holdTitle)) refreshCards();
                 }
             });
         }, "hold-stop").start();
+    }
+
+    /** 本地把一条会话标成"没在跑"（预取列表 + 目录缓存都顺手改掉，别等下一次 session/list）。 */
+    private void markSessionStopped(String sid) {
+        if (prefetchedRecent != null) {
+            List<DshApi.SessionRow> out = new ArrayList<>();
+            for (DshApi.SessionRow r : prefetchedRecent) {
+                out.add(sid.equals(r.id)
+                        ? new DshApi.SessionRow(r.id, r.title, r.cwd, r.updatedAt, false, r.asOfSeq)
+                        : r);
+            }
+            prefetchedRecent = out;
+        }
+        for (java.util.Map.Entry<String, List<DshApi.SessionRow>> e : prefetchCache.entrySet()) {
+            List<DshApi.SessionRow> out = new ArrayList<>();
+            for (DshApi.SessionRow r : e.getValue()) {
+                out.add(sid.equals(r.id)
+                        ? new DshApi.SessionRow(r.id, r.title, r.cwd, r.updatedAt, false, r.asOfSeq)
+                        : r);
+            }
+            e.setValue(out);
+        }
+        List<DshApi.SessionRow> first = new ArrayList<>();
+        for (DshApi.SessionRow r : prefetchedSessions) {
+            first.add(sid.equals(r.id)
+                    ? new DshApi.SessionRow(r.id, r.title, r.cwd, r.updatedAt, false, r.asOfSeq)
+                    : r);
+        }
+        prefetchedSessions = first;
     }
 
     /** 卡片上屏（形状 + 文字一起换）。 */
@@ -8968,9 +9060,15 @@ public class FloatingBallService extends Service {
         titleHoverAt = 0;
         computeCardRects();
         if (holdListRect != null) ensureHoldWindow(holdListRect[1], holdListRect[3]);
+        if (holdListRect != null) {
+            Log.i("FloatingBall", "zones: 卡片矩形 " + Math.round(holdListRect[0]) + ","
+                    + Math.round(holdListRect[1]) + " " + Math.round(holdListRect[2]) + "x"
+                    + Math.round(holdListRect[3]) + "（行高 " + Math.round(dp(34)) + "，"
+                    + holdVisible + " 行可见）");
+        }
         if (zonesView != null) {
             zonesView.showCards(cardTitleText(), labels(), subs(), localRects(), holdTitleLocal,
-                    holdListLocal, -1);
+                    holdListLocal, -1, runningFlags(), isRecentCard());
             zonesView.setCardScroll(cardScrollMode());
             zonesView.setCardProgress(-1, 0f);
         }
@@ -9346,17 +9444,6 @@ public class FloatingBallService extends Service {
                     + " focus=" + holdFocus + "）→ 只回初始状态");
             holdFocus = -1;
         }
-        if (!cancelled && holdFocus >= 0 && holdFocus < holdItems.size()
-                && holdItems.get(holdFocus).kind == 4) {
-            final String sid = holdItems.get(holdFocus).data;
-            final String title = holdItems.get(holdFocus).label;
-            Log.i("FloatingBall", "zones: 松手选中运行中会话「" + title + "」→ 停止");
-            exitZones();
-            main.postDelayed(new Runnable() {
-                @Override public void run() { stopRunningSession(sid, title); }
-            }, 60);
-            return;
-        }
         if (!cancelled && holdLevel >= 2 && holdFocus >= 0 && holdFocus < holdItems.size()
                 && holdItems.get(holdFocus).kind == 1) {
             final String sid = holdItems.get(holdFocus).data;
@@ -9572,11 +9659,27 @@ public class FloatingBallService extends Service {
     /** 输入行窗口的高度（px）—— 玻璃底部要给这条带子留位置。 */
     private int composerH = 0;
     /**
+     * 输入行现在是不是"编辑态"（用户点了输入框、窗口临时去掉 NOT_FOCUSABLE）。
+     * 只有编辑态才允许抢焦点；退出编辑（键盘收起/失焦/输入行收起）会立刻还回去。
+     */
+    private boolean composerImeShown = false;
+    /** 最近一次进入编辑的时刻（刚改完窗口标志时焦点还没到，先别被"失焦"回调误判）。 */
+    private long composerEditAt = 0;
+    /**
      * 这一次 enterSearchMode 是「按住说话」那条语音路：输入框要拿焦点（Voicemap 往这儿塞字），
      * 但**不能弹键盘**。见 focusSearchInputForVoice()。
      */
     private boolean searchVoiceMode = false;
     private boolean convoStashed = false;
+    /**
+     * 从**回复页**（不是手动打开的会话卡）双指长按进参数面板：面板开着期间把这段回复原样
+     * 保住，关掉面板再放回来。
+     *
+     * 以前没有这个标记 —— 参数面板一开，回复页的字被 100ms 巡检收掉，8 秒兜底 / 最终回复
+     * 收回又趁机把 textHold 释放掉；用户点空白关掉参数面板时，屏幕上只剩一颗光球，
+     * 根本不是他刚才看的那一页（「返回的地方并不是回复页面」）。
+     */
+    private boolean menuReplyGuard = false;
     private long convoOpenedAt = 0;
     private boolean convoHadText = false;
     private long convoDragLogAt = 0;
@@ -9728,16 +9831,60 @@ public class FloatingBallService extends Service {
 
             @Override public void onTargetTap() { }
             @Override public void onTapEdit() {
-                if (convoBar != null) { convoBar.focusInput(); showConvoIme(); }
+                // ★ 2026-11-09（用户口径）：输入行平时**不可聚焦**（不抢前台 App 的返回键），
+                //   只有用户点它要打字时才临时可聚焦 + 弹键盘。见 beginComposerEdit()。
+                beginComposerEdit("点输入框");
             }
             @Override public void onInputHeight(int px) { onConvoInputHeight(px); }
         });
+        // ★ 2026-11-09（用户：回复页在时，手机的返回键/边缘手势对前台 App 失效）：
+        //   病根是**焦点**。悬浮窗只有可聚焦时才会拿到焦点；一旦拿到，BACK 就被系统
+        //   送进这个没有 Activity 的窗口、没人转发 → Edge 这些前台 App 的返回键"按了没反应"。
+        //   所以输入行**默认带 FLAG_NOT_FOCUSABLE**：焦点一直留在前台 App，返回键照常后退；
+        //   回复页要收起是双指手势的事（用户明确：已有动作，不用返回键触发）。
         convoBarParams = overlayParams(2, 2,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
         convoBarParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
         convoBarParams.width = Math.max(Math.round(dp(160)), Math.round(screenW * 0.6f));
         convoBarParams.height = composerH = Math.round(dp(40));
+        // 窗口失焦（切 App / 键盘被系统收走）→ 退回不可聚焦，把返回键还给前台 App
+        bar.setWindowFocusListener(new BallSearchBar.WindowFocusListener() {
+            @Override public void onWindowFocus(boolean hasFocus) {
+                Log.i("FloatingBall", "composer: 窗口焦点 " + hasFocus);
+                if (hasFocus) return;
+                main.postDelayed(new Runnable() {
+                    @Override public void run() { endComposerEditIfUnfocused("窗口失焦"); }
+                }, 160);
+            }
+        });
+        // 键盘收起（返回键第一下 / 输入法自己收）→ 同样退回不可聚焦。
+        // API 30 起直接从窗口 insets 看 IME 可见性；老系统只能靠焦点回调兜底。
+        if (Build.VERSION.SDK_INT >= 30) {
+            bar.setOnApplyWindowInsetsListener(new android.view.View.OnApplyWindowInsetsListener() {
+                @Override public android.view.WindowInsets onApplyWindowInsets(
+                        android.view.View v, android.view.WindowInsets insets) {
+                    boolean ime = insets.isVisible(android.view.WindowInsets.Type.ime());
+                    if (ime != composerImeShown) {
+                        composerImeShown = ime;
+                        Log.i("FloatingBall", "composer: 键盘" + (ime ? "弹出" : "收起"));
+                        if (!ime) {
+                            // 键盘收起 = 用户打完了：**哪怕窗口还拿着焦点**也要退回不可聚焦，
+                            // 否则下一枚 BACK 又被这个没有 Activity 的悬浮窗吃掉（前台 App 退不了）。
+                            main.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    if (composerImeShown) return;       // 又弹回来了
+                                    if (android.os.SystemClock.uptimeMillis() - composerEditAt < 600) return;
+                                    endComposerEdit("键盘收起");
+                                }
+                            }, 150);
+                        }
+                    }
+                    return v.onApplyWindowInsets(insets);
+                }
+            });
+        }
         try { wm.addView(bar, convoBarParams); convoBar = bar; trackWindow(bar); }
         catch (Throwable t) { Log.w("FloatingBall", "composer bar failed: " + t); return false; }
         convoBar.setVisibility(View.GONE);
@@ -9769,6 +9916,9 @@ public class FloatingBallService extends Service {
         if (!want) {
             if (composerShown) {
                 composerShown = false;
+                // 收起输入行时一定要退出编辑态：否则下次露出来还是"可聚焦"，
+                // 又会把前台 App 的返回键吃掉（用户报的那条）。
+                endComposerEdit("输入行收起");
                 if (convoBar != null && convoBar.getVisibility() != View.GONE) {
                     convoBar.setVisibility(View.GONE);
                     Log.i("FloatingBall", "composer: 玻璃不是方形态（胶囊/菜单/搜索/空）→ 输入行收起");
@@ -9790,6 +9940,8 @@ public class FloatingBallService extends Service {
             convoBar.materialize(true, 0);
             Log.i("FloatingBall", "composer: 方形态有字 → 输入行摆上（" + siriStr.length() + " 字）");
             remeasureForComposer();                          // 玻璃要让出这条带子
+            // ★ 这里**故意不去抢焦点**：输入行默认 NOT_FOCUSABLE，
+            //   返回键/边缘手势留在前台 App（Edge…）手里。
         }
         int h = Math.max(Math.round(dp(40)), convoBarParams.height);
         composerH = h;
@@ -9814,6 +9966,94 @@ public class FloatingBallService extends Service {
 
     /** 输入行"上/下"那一刻要重排一次玻璃高度（重入守卫：measure 里可能又走到这儿）。 */
     private volatile boolean inComposerRemeasure = false;
+
+    /**
+     * 用户点了输入行、要打字：**这时才**把这条窗口临时变成可聚焦并弹键盘。
+     *
+     * 为什么平时不可聚焦：悬浮窗一旦拿到焦点，系统就把返回键/边缘手势送进它；
+     * 而它没有 Activity、没人转发 → 前台 App（Edge…）的返回键就"按了没反应"。
+     * 用户明确：回复页收起是双指手势的事，返回键不该被回复页吃掉。
+     *
+     * 为什么重挂一次：`setVisibility/updateViewLayout` 都不会让 WindowManager 重算焦点，
+     * 把 flag 改回可聚焦也不一定能拿到焦点；删掉再加一个新窗口则一定会（搜索胶囊就靠这条）。
+     * EditText 里的字还在同一个 View 上，不会丢。
+     */
+    private void beginComposerEdit(String why) {
+        if (convoBar == null || convoBarParams == null || wm == null) return;
+        if ((convoBarParams.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) {
+            convoBar.focusInput();
+            showConvoIme();
+            return;
+        }
+        Log.i("FloatingBall", "composer: 进入编辑（" + why + "）→ 临时可聚焦");
+        composerEditAt = android.os.SystemClock.uptimeMillis();
+        convoBarParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        try { wm.removeView(convoBar); } catch (Throwable ignored) { }
+        try {
+            wm.addView(convoBar, convoBarParams);
+            trackWindow(convoBar);
+            convoBar.setVisibility(View.VISIBLE);
+        } catch (Throwable t) {
+            Log.w("FloatingBall", "composer: 编辑态挂窗口失败 " + t);
+            // 挂不回去也要保证别把返回键扣住：恢复不可聚焦
+            convoBarParams.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            return;
+        }
+        convoBar.focusInput();
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (convoBar == null) return;
+                convoBar.focusInput();
+                showConvoIme();
+                Log.i("FloatingBall", "composer: 编辑态 winF=" + convoBar.hasWindowFocus()
+                        + " editing=" + convoBar.isEditing());
+            }
+        }, 120);
+    }
+
+    /** 退出编辑态：窗口重新变成 NOT_FOCUSABLE，焦点/返回键还给前台 App。 */
+    private void endComposerEdit(String why) {
+        if (convoBar == null || convoBarParams == null || wm == null) return;
+        if ((convoBarParams.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0) return;
+        Log.i("FloatingBall", "composer: 退出编辑（" + why + "）→ 输入行不再抢焦点");
+        try { convoBar.input().clearFocus(); } catch (Throwable ignored) { }
+        convoBarParams.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        try { wm.updateViewLayout(convoBar, convoBarParams); } catch (Throwable ignored) { }
+        // 有的 ROM 只改 flag 不会把焦点交出去（窗口还拿着）——那就重挂一次：
+        // 删掉正在持有焦点的窗口，WindowManager 必须把焦点交给下面的前台 App。
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (convoBar == null || convoBarParams == null || wm == null) return;
+                if ((convoBarParams.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) return;
+                if (!convoBar.hasWindowFocus()) return;
+                Log.i("FloatingBall", "composer: 退出编辑后还拿着焦点 → 重挂一次让出去");
+                try { wm.removeView(convoBar); } catch (Throwable ignored) { }
+                try {
+                    wm.addView(convoBar, convoBarParams);
+                    trackWindow(convoBar);
+                    convoBar.setVisibility(composerShown ? View.VISIBLE : View.GONE);
+                } catch (Throwable t) {
+                    Log.w("FloatingBall", "composer: 让焦点重挂失败 " + t);
+                }
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (convoBar != null) {
+                            Log.i("FloatingBall", "composer: 让完焦点 winF=" + convoBar.hasWindowFocus());
+                        }
+                    }
+                }, 120);
+            }
+        }, 200);
+    }
+
+    /** 失焦/键盘收起时调用：只要窗口确实没拿着焦点，就退出编辑态。 */
+    private void endComposerEditIfUnfocused(String why) {
+        if (convoBar == null) return;
+        // 刚进编辑的 600ms 内别动：窗口刚重挂、焦点还在路上
+        if (android.os.SystemClock.uptimeMillis() - composerEditAt < 600) return;
+        if (convoBar.hasWindowFocus()) return;    // 还拿着焦点 = 还在编辑，别动
+        endComposerEdit(why);
+    }
 
     private void remeasureForComposer() {
         if (inComposerRemeasure) return;
@@ -10093,6 +10333,17 @@ public class FloatingBallService extends Service {
         } catch (Throwable ignored) { }
     }
 
+    /** 收起输入行那条输入法（开参数面板 / 收回复页时用；键盘压在面板上很乱）。 */
+    private void hideComposerIme() {
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null && convoBar != null && convoBar.getWindowToken() != null) {
+                imm.hideSoftInputFromWindow(convoBar.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) { }
+    }
+
     private void closeConversation(String why) {
         if (!convoOpen) return;
         convoOpen = false;
@@ -10111,6 +10362,24 @@ public class FloatingBallService extends Service {
         targetSessionTitle = null;
         setSiriText("");
         centerBallOnScreen();
+    }
+
+    // ── 参数面板的返回键（悬浮窗没有 Activity，面板自己得能关）──────
+
+    /**
+     * 参数面板这类**模态玻璃面板**开着时，返回键/边缘手势关掉这一层。
+     *
+     * ⚠️ 只有面板窗口（`menuView`）是临时可聚焦的，所以这个回调只会在面板开着时触发。
+     *    回复页的输入行**平时不可聚焦**（见 ensureComposerBar 的 FLAG_NOT_FOCUSABLE），
+     *    返回键始终归前台 App —— 用户明确要求：回复页收起用双指手势，不用返回键。
+     */
+    private boolean onGlassMenuBack(String why) {
+        if (!menuShown) return false;
+        Log.i("FloatingBall", "返回键（" + why + "）：关掉玻璃面板");
+        main.post(new Runnable() {
+            @Override public void run() { hideMenu("返回键"); }
+        });
+        return true;
     }
 
     // ── 状态 2 暂存：菜单是小窗，胶囊那层收不起来 → 开菜单时先收起胶囊，关掉再放回来 ──
@@ -10193,15 +10462,38 @@ public class FloatingBallService extends Service {
         }
         if (menuView == null) {
             BallGlassMenu m = new BallGlassMenu(this);
+            // ★ 2026-11-09：**故意不带 FLAG_NOT_FOCUSABLE**。
+            //   菜单（尤其参数面板）是独立小窗，背后没有 Activity；窗口不可聚焦时
+            //   返回键/边缘手势会直接落到下面的 App，面板自己收不掉。现在它能拿焦点，
+            //   下面两个钩子就能把 BACK 变成「关掉这一层」。
             menuViewParams = overlayParams(2, 2,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
             menuViewParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
             m.setListener(new BallGlassMenu.Listener() {
                 @Override public void onRow(int index) { onMenuRow(index); }
                 @Override public void onDismiss() { hideMenu("面板返回"); }
             });
+            m.setOnKeyListener(new android.view.View.OnKeyListener() {
+                @Override public boolean onKey(android.view.View v, int code, android.view.KeyEvent ev) {
+                    if (code == android.view.KeyEvent.KEYCODE_BACK) {
+                        if (ev.getAction() == android.view.KeyEvent.ACTION_UP) onGlassMenuBack("玻璃面板");
+                        return true;
+                    }
+                    return false;
+                }
+            });
+            if (Build.VERSION.SDK_INT >= 28) {
+                m.addOnUnhandledKeyEventListener(new android.view.View.OnUnhandledKeyEventListener() {
+                    @Override public boolean onUnhandledKeyEvent(android.view.View v, android.view.KeyEvent ev) {
+                        if (ev.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
+                            if (ev.getAction() == android.view.KeyEvent.ACTION_UP) onGlassMenuBack("玻璃面板");
+                            return true;
+                        }
+                        return false;
+                    }
+                });
+            }
             try { wm.addView(m, menuViewParams); menuView = m; trackWindow(m); }
             catch (Throwable t) { Log.w("FloatingBall", "add menu view failed: " + t); }
         }
@@ -10270,6 +10562,9 @@ public class FloatingBallService extends Service {
         });
         menuView.setContent(title, subtitle, rows);
         menuView.setVisibility(View.VISIBLE);
+        // 让面板自己拿焦点：返回键才会送到这一层（否则被下面的 App 吃掉）
+        menuView.setFocusableInTouchMode(true);
+        menuView.requestFocus();
         menuShown = true;
         menuArmAt = android.os.SystemClock.uptimeMillis() + 700;
         pushMenuScene();
@@ -10334,6 +10629,22 @@ public class FloatingBallService extends Service {
                     @Override public void run() { syncComposerBar(); }
                 }, 80);
                 Log.i("FloatingBall", "convo: 参数面板关闭，恢复对话内容");
+            }
+        }
+        if (menuReplyGuard) {                // 参数面板是**从回复页**进去的：原样放回那一页
+            menuReplyGuard = false;
+            lastTextAt = android.os.SystemClock.uptimeMillis();  // 回来重新计时，别刚看见又收
+            if (!uiHidden && !searchActive && !searchClosing && !convoOpen
+                    && siriStr != null && !siriStr.trim().isEmpty()) {
+                restoreReplyTextAfterUi();   // 内容（被巡检清过）+ 几何 + 露出文字
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (convoOpen || searchActive) return;
+                        measureSiriTargets(siriStr);
+                        syncComposerBar();   // 输入行跟着玻璃一起回来
+                    }
+                }, 80);
+                Log.i("FloatingBall", "reply: 参数面板关闭，回复页原样放回（" + siriStr.length() + " 字）");
             }
         }
     }
@@ -10504,6 +10815,23 @@ public class FloatingBallService extends Service {
             suppressConvoAutoClose = false;
             if (convoBar != null) convoBar.setVisibility(View.GONE);
             Log.i("FloatingBall", "convo: 打开参数面板，先收起对话内容");
+        } else if (!convoOpen && !menuReplyGuard
+                && (siriTextShown || squareFormActive())
+                && siriStr != null && !siriStr.trim().isEmpty()) {
+            // ★ 2026-11-09（用户：参数面板关掉后回到的地方并不是回复页）：
+            //   把这一页原样保住 —— 面板只借用玻璃那块矩形，字先收起来、输入行让位；
+            //   关掉面板时 hideMenu() 会按 menuReplyGuard 把内容和几何一起放回来。
+            //   同时续一次 lastTextAt：否则 8 秒兜底 / 最终回复收回会在面板开着的时候把它收走，
+            //   用户点空白回来就只剩一颗空球。
+            menuReplyGuard = true;
+            lastTextAt = android.os.SystemClock.uptimeMillis();
+            hideComposerIme();
+            hideReplyTextForUi();
+            if (convoBar != null && convoBar.getVisibility() != View.GONE) {
+                convoBar.setVisibility(View.GONE);
+            }
+            composerShown = false;
+            Log.i("FloatingBall", "reply: 打开参数面板，先把回复页收好（" + siriStr.length() + " 字）");
         }
         List<BallGlassMenu.Row> rows = new ArrayList<>();
         rows.add(new BallGlassMenu.Row("Agent 预设", cur("send_preset", "跟随默认"), false));
@@ -11748,6 +12076,26 @@ public class FloatingBallService extends Service {
             fUp.delete();
             finishZones(false);
         }
+        // card-tap:x,y → 直接把一次点击喂给卡片状态机（真机注入的 touch 会被"机器人触摸"兜住，
+        // 所以「最近会话」左半边进 / 右半边停 这条要用文件钩子回归；只走卡片点击，不动触摸层）
+        File fCardTap = new File(dir, "card-tap");
+        if (fCardTap.exists()) {
+            String t = readSmallString(fCardTap, 64).trim();
+            fCardTap.delete();
+            if (t.contains(",")) {
+                try {
+                    String[] xy = t.split(",");
+                    final float cx = Float.parseFloat(xy[0].trim());
+                    final float cy = Float.parseFloat(xy[1].trim());
+                    Log.i("FloatingBall", "zones: 文件钩子 card-tap " + cx + "," + cy);
+                    main.post(new Runnable() {
+                        @Override public void run() { cardTap(cx, cy); }
+                    });
+                } catch (Throwable e) {
+                    Log.i("FloatingBall", "zones: card-tap 坐标解析失败：" + t);
+                }
+            }
+        }
         File fBar = new File(dir, "bar-open");
         if (fBar.exists()) {
             fBar.delete();
@@ -11817,6 +12165,14 @@ public class FloatingBallService extends Service {
         if (fSet.exists()) {
             fSet.delete();
             openSettingsMenu();
+        }
+        // convo-edit → 等价于"用户点了回复页的输入行"（进入编辑、弹键盘）。
+        // 真机注入的触摸会被当机器人兜住，输入行这条编辑态切换只能靠文件钩子回归。
+        File fConvoEdit = new File(dir, "convo-edit");
+        if (fConvoEdit.exists()) {
+            fConvoEdit.delete();
+            Log.i("FloatingBall", "composer: 文件钩子 convo-edit");
+            beginComposerEdit("文件钩子");
         }
         // convo-latest → 直接打开最近一条会话（验证"切回对话"那张卡的玻璃/排版用；
         // 真机上切回对话只能靠长按卡片选，纯脚本很难卡准）
