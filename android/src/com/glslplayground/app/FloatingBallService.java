@@ -1174,6 +1174,28 @@ public class FloatingBallService extends Service {
                 + " gate→" + waveGateTarget + " orbMix→" + orbMixTarget);
     }
 
+    /**
+     * 球这一屏已经**没内容了**（字收了、要回胶囊）：动画槽还停在回复就当场重推。
+     *
+     * ★ 2026-11-10（用户：「点回话页面玻璃的底部回到胶囊状态时，播的动画依然是最终回复动画
+     *   （Siri 波），不应该是待机动画吗」）：
+     *   `releaseTextHold()` 收字走的是 `forceHideAllText()`（只藏视图、不清 siriStr 的轻量版），
+     *   它**不会**像 `hideSiriTextNow()` 那样顺手 `refreshScene()`。于是点卡收回时：
+     *   字没了、几何缩回胶囊，可 `sceneSlot/sceneAnim` 还停在 `reply_final` / `wave`，
+     *   状态机又早就是 IDLE（等不到下一次 applyAssistantState）—— 空胶囊上就一直播 Siri 波。
+     *   这里只处理"槽还停在回复"这一种：菜单/审批/搜索/思考/麦克风各有自己的槽，不打断。
+     */
+    private void refreshSceneForEmptyBall(String why, boolean force) {
+        if (renderer == null || hasBallText()) return;
+        boolean staleReply = AnimScene.SLOT_FINAL.equals(sceneSlot)
+                || AnimScene.SLOT_STREAM.equals(sceneSlot);
+        if (!force && !staleReply) return;
+        sceneDirty = true;
+        refreshScene(true);
+        Log.i("FloatingBall", "回胶囊：重推动画槽（" + why + (staleReply ? "，从回复槽" : "") + "）→ "
+                + sceneSlot + " / " + sceneAnim);
+    }
+
     /** 把某个动画自己的参数推到渲染器（每个动画一套，互不干扰）。 */
     private void applyAnimParams(String anim) {
         if (renderer == null) return;
@@ -1261,6 +1283,10 @@ public class FloatingBallService extends Service {
                 //   这是**唯一**的波定位方式，文字和波之间不再有任何可调距离。
                 renderer.waveInGlass = (AnimScene.A_WAVE.equals(anim)
                         && hasBallText() && squareDrawn01() > 0.05f) ? 1f : 0f;
+                Log.i("FloatingBall", "场景提交: 槽=" + sceneSlot + " 动画=" + anim
+                        + " waveMode=" + renderer.waveMode + " loader=" + renderer.loaderMode
+                        + " suppressWave=" + renderer.suppressWave + " waveOn=" + renderer.waveOn
+                        + " gate=0（淡出到底）");
             }
         };
 
@@ -5524,6 +5550,8 @@ public class FloatingBallService extends Service {
         setAssistantPinned(false);
         siriStr = "";
         forceHideAllText();                      // ① + ②
+        // ★ 2026-11-10：双指收回也是"回胶囊"——动画槽别停在 reply_final，当场重推成待机。
+        refreshSceneForEmptyBall("forceHomeShape", true);
         textHold = false;                        // ③ 本轮保持直接作废
         releasingHold = true;
         holdHalfX = holdHalfY = 0f;
@@ -6049,6 +6077,7 @@ public class FloatingBallService extends Service {
             tMaster = 1f; tHalfX = minHalfX; tHalfY = minHalfY; tCorner = minCorner; tBlack = 0f;
             float bb = winSize * 0.9f;
             updateSiriWindow(bb * minHalfX, bb * minHalfY);
+            refreshSceneForEmptyBall("releaseTextHold(未保持)", true);
             if (convoWasOpen) {                  // 会话卡跟着一起收（见方法末尾的注释）
                 Log.i("FloatingBall", "convo: 球回到初始形态 → 会话卡一起收起（未在保持）");
                 closeConversation("球回到初始形态");
@@ -6080,6 +6109,14 @@ public class FloatingBallService extends Service {
         }
         float b0 = winSize * 0.9f;
         updateSiriWindow(b0 * minHalfX, b0 * minHalfY);
+        // ★ 2026-11-10（用户：「点回话页面玻璃底部回到胶囊，播的还是最终回复动画（Siri 波），
+        //   不应该是待机动画吗」）：收文字这条路以前只收字 + 缩几何，**不重推动画槽** ——
+        //   sceneSlot/sceneAnim 还停在 reply_final / wave，胶囊就把最终回复那道 Siri 波
+        //   一直画到下一次 applyAssistantState（点卡收回时状态机早就 IDLE 了，根本等不到）。
+        //   没字 = 不可能是回复槽：按真实状态重推一次（idle/cap1；工具在跑就 think/exec）。
+        //   ⚠️ 必须放在上面那段 `waveGateTarget = 1f` **之后**：重推会先让幅度淡到 0 再换形态，
+        //   提前设 1 会把淡出目标顶回去，commit 永远等不到 0（胶囊就还是 Siri 波）。
+        refreshSceneForEmptyBall("releaseTextHold", true);
         // ★ 2026-11-09：球自己收回胶囊 = 这一屏会话结束。
         //   卡也要一起收（否则 siriStr 里那 73 字还在，任何一次 measure 都会把它重新放出来，
         //   屏幕上就是"字自己诈尸"）。输入行由 syncComposerBar 同一拍收起。
@@ -6169,6 +6206,8 @@ public class FloatingBallService extends Service {
             // 旧文字还留在屏幕上，看起来就是「球变小了、文字却飞出球外」。
             // 直接把文字视图藏掉（GONE 立即生效、不参与布局），球一变小就没有字。
             hideSiriTextNow();
+            // ★ 2026-11-10：球已经是最小形态、字也没了 —— 槽若还停在回复动画，重推成待机。
+            refreshSceneForEmptyBall("空文字回胶囊", false);
             return;
         }
         if (siriTextPx <= 0) siriTextPx = dp(34);
@@ -12432,6 +12471,15 @@ public class FloatingBallService extends Service {
         }
         // convo-edit → 等价于"用户点了回复页的输入行"（进入编辑、弹键盘）。
         // 真机注入的触摸会被当机器人兜住，输入行这条编辑态切换只能靠文件钩子回归。
+        // convo-close → 等价于"点了一下回话页玻璃"（closeConversation）：验收回胶囊时的动画槽。
+        File fConvoClose = new File(dir, "convo-close");
+        if (fConvoClose.exists()) {
+            fConvoClose.delete();
+            Log.i("FloatingBall", "composer: 文件钩子 convo-close（收会话卡）");
+            main.post(new Runnable() {
+                @Override public void run() { closeConversation("文件钩子"); }
+            });
+        }
         File fConvoEdit = new File(dir, "convo-edit");
         if (fConvoEdit.exists()) {
             fConvoEdit.delete();

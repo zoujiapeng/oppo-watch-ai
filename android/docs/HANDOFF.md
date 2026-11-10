@@ -10,6 +10,43 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-10（第五版）：会话页收回胶囊**不再播最终回复波**（当场重推动画槽）
+
+**用户原话**：「为什么我点击回话页面玻璃的底部它回到胶囊状态的时候播放的动画依然是最终回复动画
+（Siri波）？不应该是待机动画吗」→ 补充：「胶囊的动画和会话页面的动画大部分是相同的，只是会话
+页面变回胶囊状态时不应该显示最终回复动画」。
+
+**病根**：点会话卡玻璃底部 → `closeConversation()` → `setSiriText("")` → `releaseTextHold()`。
+`releaseTextHold()` 只做了 `forceHideAllText()` + 缩几何，**从不重推动画槽**：
+`sceneSlot/sceneAnim` 还停在 `reply_final` / `wave`，而这时状态机早就是 IDLE（不会再有一次
+`applyAssistantState()` 来刷新）—— 空胶囊上就继续播 Siri 波。
+
+**修法**（`FloatingBallService`）：
+
+- 新增 `refreshSceneForEmptyBall(why, force)`：球里没字、且槽还停在 `reply_final` / `reply_stream`
+  时，`sceneDirty + refreshScene(true)` —— 按真实状态重推（正常落 `idle` / 用户绑的 `cap1`；
+  工具还在跑就 `think/exec`；麦克风在听就 `listen`）。菜单/审批/搜索/思考这些自有槽不打断。
+- 挂到所有"回胶囊"的出口：`releaseTextHold()`（两个分支）、`forceHomeShape()`（双指收回）、
+  空文字分支。
+- ⚠️ **顺序坑**：`releaseTextHold()` 里有一段 `waveGateTarget = 1f;`。重推动画会先把幅度
+  淡到 0 再换形态（`sceneCommit`）；如果在这之后又把目标设回 1，commit 永远等不到 0 ——
+  胶囊还是 Siri 波（日志里 `loader=0`、`suppressWave=false` 一直不变）。
+  所以重推必须放在那段 `waveGateTarget = 1f` **之后**。
+- 顺带加了一条可观测日志：`applyAnimToRenderer()` 的 commit 落地时打
+  `场景提交: 槽=… 动画=… waveMode=… loader=… suppressWave=… waveOn=… gate=0`。
+
+**真机验证**（打开空闲会话卡 → `state-TURNEND` 造出最终回复 → `convo-close` 等价于点玻璃底部）：
+
+```text
+场景动画: 槽=reply_final 动画=wave 有字=true → waveMode=1 loader=1 gate→0.0
+convo: 退出对话（文件钩子）
+回胶囊：重推动画槽（releaseTextHold，从回复槽）→ idle / cap1
+场景提交: 槽=idle 动画=cap1 waveMode=1 loader=1 suppressWave=true waveOn=true gate=0（淡出到底）
+```
+
+`ballshot` 抓帧确认胶囊里是 cap1 那套待机光点，不再是 Siri 波（`webchat-capsule-idle-20261110.png`）。
+调试口子新增 `files/convo-close`（等价于点玻璃底部收卡）。
+
 ## 2026-11-10（第四版）：呼出输入框先收网页 + 点玻璃不再弹输入框 + 隐藏网页滚动条
 
 **用户原话**：「显示网页的时候，如果呼出那个单独的输入框时要暂时隐藏网页，（并且单独的输入框
