@@ -162,7 +162,7 @@ final class WebChatJs {
           + "return 'focus='+S.focusMode;};"
           + "S.scrollBottom=function(){S.needBottom=true;S.follow=true;settle();return 'bottom';};"
           // 网页缩放 = 浏览器式缩放：zoom 挂在 <html> 上，布局视口跟着变窄/变宽，内容自己重排
-          + "S.setZoom=function(pct){var z=Math.max(0.5,Math.min(2.5,(pct||100)/100));"
+          + "S.setZoom=function(pct){var z=Math.max(0.3,Math.min(2.0,(pct||100)/100));"
           + "S.zoom=z;S.col=null;"
           + "document.documentElement.style.zoom=(z===1?'':String(z));"
           + "tick();return 'zoom='+z+' vw='+document.documentElement.clientWidth;};"

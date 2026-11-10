@@ -663,7 +663,7 @@ public class WatchBridge {
                 .edit().putBoolean("web_chat", v).apply();
     }
 
-    /** 玻璃里那块网页的**缩放**（%，70~160；浏览器式缩放：布局视口跟着变，内容自己重排）。 */
+    /** 玻璃里那块网页的**缩放**（%，30~200；浏览器式缩放：布局视口跟着变，内容自己重排）。 */
     @JavascriptInterface
     public int getWebChatZoom() {
         return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
@@ -673,20 +673,33 @@ public class WatchBridge {
     @JavascriptInterface
     public void setWebChatZoom(final int v) {
         act.getSharedPreferences("watch", Context.MODE_PRIVATE)
-                .edit().putInt("web_chat_zoom", Math.max(70, Math.min(160, v))).apply();
+                .edit().putInt("web_chat_zoom", Math.max(30, Math.min(200, v))).apply();
     }
 
-    /** 那块网页的**体积**（%，60~130；100 = 文字视口，>100 往玻璃上方的黑区里长，底边不动）。 */
+    /** 玻璃里那块网页的**宽**（%，20~100；100 = 旧版文字视口那么宽，永远不超过它）。 */
     @JavascriptInterface
-    public int getWebChatBox() {
+    public int getWebChatW() {
         return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
-                .getInt("web_chat_box", 100);
+                .getInt("web_chat_w", 100);
     }
 
     @JavascriptInterface
-    public void setWebChatBox(final int v) {
+    public void setWebChatW(final int v) {
         act.getSharedPreferences("watch", Context.MODE_PRIVATE)
-                .edit().putInt("web_chat_box", Math.max(60, Math.min(130, v))).apply();
+                .edit().putInt("web_chat_w", Math.max(20, Math.min(100, v))).apply();
+    }
+
+    /** 玻璃里那块网页的**高**（%，20~100；100 = 旧版文字视口那么高，永远不超过它）。 */
+    @JavascriptInterface
+    public int getWebChatH() {
+        return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getInt("web_chat_h", 100);
+    }
+
+    @JavascriptInterface
+    public void setWebChatH(final int v) {
+        act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .edit().putInt("web_chat_h", Math.max(20, Math.min(100, v))).apply();
     }
 
     /** 设置页直接开一次网页聊天（不带会话 = DSH 前端首页）。 */

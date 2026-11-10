@@ -43,12 +43,14 @@
   （滑动、点链接、双指缩放都行）；**不要**加 `FLAG_LAYOUT_IN_SCREEN` —— 文字窗/玻璃窗都是 overlay，
   坐标原点同在状态栏下（统一 +90px），单独给网页加这个 flag 会让它比玻璃高 90px。
   - 用户一碰网页（`pointerdown`/`touchstart`）就释放"钉在最新"，滑回底部再自动跟随。
-- **网页体积**（prefs `watch/web_chat_box`，60~130，默认 100）：在**玻璃自己的可见范围**里缩放
-  （`winW-2m` / `ballBottom-ballTop`），**底边钉住不动、往上长**，水平居中；100% = 文字视口。
-- **网页缩放**（prefs `watch/web_chat_zoom`，70~160，默认 100）：页面上 `document.documentElement.style.zoom`
+- **网页宽 / 网页高**（prefs `watch/web_chat_w` / `watch/web_chat_h`，各 20~100，默认 100）：
+  宽高**分开**调，上限都是**旧版文字视口**那一块（宽 ≤ `tw`、高 ≤ `th`）—— 永远不超过玻璃给文字
+  留的最大范围；水平居中、**底边钉住**（最新几行贴玻璃底）。
+- **网页缩放**（prefs `watch/web_chat_zoom`，30~200，默认 100）：页面上 `document.documentElement.style.zoom`
   —— 这是浏览器式缩放（布局视口跟着变窄，DSH 自己的排版重排），不是把整页糊成缩略图。
   注意 `applyFocus()` 里的宽度自检要除以 zoom（`clientWidth / S.zoom`），否则每拍都重摆一次会闪。
-- **设置页**：「悬浮 → 网页体积 / 网页缩放」两个滑块（`settings.html` → `WatchBridge.get/setWebChatBox·Zoom`）。
+- **设置页**：「悬浮 → 网页宽 / 网页高 / 网页缩放」三个滑块
+  （`settings.html` → `WatchBridge.get/setWebChatW·H·Zoom`）。
 
 ### 验证（真机实测，2026-11-10）
 
@@ -75,8 +77,9 @@ su -c "dumpsys input" | grep glslplayground
 #   → 视口左上角就是对话列，左栏/输入条都不在
 ```
 
-- 体积 130%：`贴上玻璃 842x178`（宽度被玻璃内沿 842 夹住），底边仍与文字视口对齐（bottom=343）。
-- 缩放 160%：`zoom → "open|…|ch=40"`（视口 50 CSS px / 1.6 ≈ 31 …滚动容器按缩放后算），
+- 宽 60% / 高 50%：`贴上玻璃 439x139 @(230,250)`；屏幕 frame `[320,227][759,337]`，
+  **底边 337 与文字视口完全对齐、水平居中**（文字视口 `[174,202][906,337]`）。
+- 缩放 40%：`网页缩放 → 40%`，`zoom → "open|…|ch=100"`（布局视口按 50/0.4 重排），
   会话仍是 `cur === want`，`focus=1`。
 
 ### 调试直通（这次新加）
@@ -93,8 +96,8 @@ su -c "am startservice -n com.glslplayground.app/.FloatingBallService \
 
 ### 已知边界
 
-- 玻璃很小（默认文字视口 732x135 px ≈ 267x50 CSS px）：网页体积调到 130% 时宽度会被玻璃内沿夹住
-  （约 115%），再宽就要改玻璃本身了。
+- 玻璃很小（默认文字视口 732x135 px ≈ 267x50 CSS px）：网页宽/高的 100% 就是它的上限，
+  想更大只能改玻璃本身（设置页「玻璃」/「球体」那几组参数）。
 - 网页不抢焦点 → 玻璃里点输入框不弹键盘（打字仍走球自己的输入行）；链接、滚动、缩放都正常。
 - 注入式触摸（`input swipe`/agent 注入）会被球自己的「让开」逻辑把悬浮窗临时挪出屏幕
   （`parkAllOverlays`），所以**用 `input` 命令验不了网页滑动**；真手指可以。

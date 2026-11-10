@@ -6669,18 +6669,15 @@ public class FloatingBallService extends Service {
         // ★ 2026-11-10 实验：玻璃里盖上 DSH 网页（位置就是文字视口那块矩形，玻璃大小不变）
         // 网页体积（设置页「网页体积」60~130%）：在**玻璃自己的可见范围**里缩放，底边钉住不动；
         // 100% = 和文字视口一模一样。玻璃窗一个像素都不动。
-        int wx = x, wy = y, ww = tw, wh = th;
-        int boxPct = Math.max(60, Math.min(130, prefs().getInt("web_chat_box", 100)));
-        if (boxPct != 100) {
-            float k = boxPct / 100f;
-            int maxW = Math.max(tw, Math.round(winW - 2f * m));
-            int maxH = Math.max(th, Math.round(ballBottom - ballTop - 2f * dp(8)));
-            ww = Math.min(maxW, Math.round(tw * k));
-            wh = Math.min(maxH, Math.round(th * k));
-            wx = Math.round(sx - ww / 2f);
-            wx = Math.max(0, Math.min(Math.max(0, screenW - ww), wx));
-            wy = (y + sysDy + th) - wh - sysDy;      // 底边不动：往上长
-        }
+        // 宽、高**分开**调（设置页「网页宽」「网页高」），上限都是旧版文字视口那一块：
+        // 宽 ≤ tw、高 ≤ th —— 永远不超过玻璃给文字留的最大范围。底边钉住（最新几行贴玻璃底）。
+        int wPct = Math.max(20, Math.min(100, prefs().getInt("web_chat_w", 100)));
+        int hPct = Math.max(20, Math.min(100, prefs().getInt("web_chat_h", 100)));
+        int ww = Math.max((int) dp(40), Math.min(tw, Math.round(tw * wPct / 100f)));
+        int wh = Math.max((int) dp(40), Math.min(th, Math.round(th * hPct / 100f)));
+        int wx = Math.round(sx - ww / 2f);
+        wx = Math.max(0, Math.min(Math.max(0, screenW - ww), wx));
+        int wy = (y + sysDy + th) - wh - sysDy;      // 底边钉住：只往上收
         syncWebChatPane(wx, wy, ww, wh);
         // ★ 2026-11-08：胶囊状态（球还没长成方形态 / 正在缩回）里不许露字。
         //   可见度跟着**画出来的**几何走 → 球一缩成胶囊，字立刻淡没（不是等下一次测量）。
