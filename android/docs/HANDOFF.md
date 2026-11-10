@@ -10,6 +10,44 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-10（第四版）：呼出输入框先收网页 + 点玻璃不再弹输入框 + 隐藏网页滚动条
+
+**用户原话**：「显示网页的时候，如果呼出那个单独的输入框时要暂时隐藏网页，（并且单独的输入框
+不能通过点击出现网页时的玻璃呼出）并且把网页右边的滚动条隐藏掉」。
+
+一句话结论：玻璃里那个网页（WebChatPane）在**状态 2 的单独输入框**（BallSearchBar，整屏胶囊）
+出现时先 GONE，输入框收起后自动回来；点玻璃边框不再触发状态 2；网页里的滚动条全部隐藏。
+
+### ① 呼出输入框 → 网页暂时收起
+
+- 病根：搜索期间 `siriTick` **不跑** `updateSiriTextPos()`（`else if (!searchActive)`），
+  所以 `syncWebChatPane()` 根本不会被调用 —— `webPaneShouldShow()` 里虽然排除了 search，
+  网页窗还是留在屏上，浮在整屏胶囊/输入框上面。
+- `enterSearchMode()` 在 `searchActive = true` 之后立刻 `hideWebChatPane()`（只是 GONE，
+  WebView / 会话都留着）；`webPaneShouldShow()` 再把 `searchClosing` 也加进排除列表。
+- 收回：`finishSearchClose()` 之后 `searchClosing=false`，下一拍 `updateSiriTextPos()` →
+  `syncWebChatPane()` 自动把网页盖回来（实测日志：`GONE` → `webpane: 玻璃里显示 DSH 网页`）。
+- 实测（文件钩子 `bar-open`）：
+  `search: 呼出输入框 → 先把玻璃里的网页暂时收起` / `WebChatPane: GONE`；
+  `search-close` 之后 `webpane: 玻璃里显示 DSH 网页 732x672`。
+  截图 `webchat-search-hides-page-20261110.png`：输入框出来时屏上没有网页。
+
+### ② 点玻璃不再呼出输入框
+
+- 球触摸代理 ACTION_UP 的单击分支：`convoOpen`（点球退出会话卡）之后加一道闸 ——
+  `if (webPaneOn) return true;`，不再走 `enterSearchMode("单击")`。
+- 玻璃里是网页时，页面内的点击本来就归 WebView（`FLAG_NOT_TOUCH_MODAL`），
+  现在**边框那一圈**的点击也不再「啪」跳出一个盖住网页的整屏输入框。
+- 输入框自己的入口照旧（电源键 / 音量减 / 长按 / 文件钩子），从那些路进来会先执行 ①。
+
+### ③ 隐藏网页右边的滚动条
+
+- `WebChatPane.BLACK_THEME_CSS` 追加：
+  `html body *{scrollbar-width:none!important;-ms-overflow-style:none!important}` +
+  `html::-webkit-scrollbar, html body::-webkit-scrollbar, html body *::-webkit-scrollbar{width:0;height:0;display:none}`
+  —— Chromium 116 走 `::-webkit-scrollbar`，新版 Chrome 认 `scrollbar-width`，两层都钉死。
+- 实测探针：`getComputedStyle(sc,'::-webkit-scrollbar').display === "none"`、`width === "0px"`。
+
 ## 2026-11-10（第三版）：玻璃里的网页**纯黑主题** + 玻璃圆角 = 网页圆角 + 黑区下延一半
 
 **用户原话**：「在最新分支工作，把实验功能的回复页面的网页主题弄成纯黑色，并且把回复页面的

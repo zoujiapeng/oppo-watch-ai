@@ -506,7 +506,14 @@ final class WebChatPane {
           + "--dsw-alias-bg-module-platform:#000!important;"
           + "--dsw-alias-bg-document-preview:#000!important;"
           + "--dsw-linear-gradient-think:linear-gradient(180deg,#000 20.19%,#00000000 100%)!important;"
-          + "}";
+          + "}"
+          // ★ 2026-11-10（用户：「把网页右边的滚动条隐藏掉」）：玻璃里的网页不要滚动条。
+          //   Chromium/WebView 走 ::-webkit-scrollbar；新版 Chrome 还会认 scrollbar-width。
+          //   两层都钉成 0，连它占的那几像素也不留。
+          + "html body *{scrollbar-width:none!important;-ms-overflow-style:none!important}"
+          + "html::-webkit-scrollbar,html body::-webkit-scrollbar,"
+          + "html body *::-webkit-scrollbar{width:0!important;height:0!important;"
+          + "display:none!important;background:transparent!important}";
 
     /**
      * 强制暗色：WebView 的系统配色跟着**宿主 App**走，App 是浅色 → DSH 前端会选浅色主题

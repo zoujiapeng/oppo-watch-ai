@@ -5390,6 +5390,15 @@ public class FloatingBallService extends Service {
                             closeConversation("点球");
                             return true;
                         }
+                        // ★ 2026-11-10（用户：「单独的输入框不能通过点击出现网页时的玻璃呼出」）：
+                        //   玻璃里是 DSH 网页时，点玻璃（边框这一圈，页面内的点击归 WebView）
+                        //   不再弹状态 2 那个单独输入框 —— 以前会「啪」跳出一个整屏胶囊输入框，
+                        //   把网页盖掉。输入框自己的入口（电源键/音量减/长按）照旧；
+                        //   那些路进来会先把网页暂时收起（见 enterSearchMode）。
+                        if (webPaneOn) {
+                            Log.i("FloatingBall", "单击玻璃：玻璃里是 DSH 网页 → 不弹输入框");
+                            return true;
+                        }
                         // 单击**永远**先弹出输入框（用户：球点击不是应该弹出输入框吗）。
                         //
                         // ★ 2026-11-07：单击之后**直接开输入法语音**（和电源键同一条引擎）。
@@ -9844,7 +9853,7 @@ public class FloatingBallService extends Service {
     private boolean webPaneShouldShow() {
         if (!webChatEnabled()) return false;
         if (uiHidden || approvalShown || approvalClosing || menuShown || glassFullscreen
-                || searchActive || zonesActive) return false;
+                || searchActive || searchClosing || zonesActive) return false;
         if (squareDrawn01() <= 0.55f) return false;
         // 注意：这里**不看**文字视图的可见性（siriTextShown）—— 动画/重建的空档它会短暂 GONE，
         // 跟着它走网页就会闪没。只看"球里到底有没有这段字"。
@@ -11628,6 +11637,14 @@ public class FloatingBallService extends Service {
         searchActive = true;
         searchClosing = false;
         searchOpen = false;
+        // ★ 2026-11-10（用户：「显示网页的时候，如果呼出那个单独的输入框时要暂时隐藏网页」）：
+        //   状态 2 那个输入框是另一个整屏悬浮层（BallSearchBar）；网页窗不收起来就会浮在
+        //   胶囊/输入框上面（搜索期间 updateSiriTextPos 整条是停的，靠它收不掉）。
+        //   这里当场收：网页只是 GONE，WebView 和会话都留着，搜索一结束下一拍自动再盖回来。
+        if (webPaneOn) {
+            Log.i("FloatingBall", "search: 呼出输入框 → 先把玻璃里的网页暂时收起");
+            hideWebChatPane();
+        }
         barPurpose = purpose;
         barInitialText = text == null ? "" : text;
         barAutoFocus = autoFocus;
