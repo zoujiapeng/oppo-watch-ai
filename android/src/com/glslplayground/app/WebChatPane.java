@@ -58,13 +58,20 @@ final class WebChatPane {
     private static final String TAG = "WebChatPane";
 
     /**
-     * 回复页玻璃 / 玻璃里那块网页**共用**的圆角（dp）。
+     * 玻璃里那块**网页**的裁剪圆角（dp）。
      *
-     * 用户 2026-11-10：「把回复页面的玻璃的圆角弄成和网页圆角一致」—— 所以两边不再各写各的：
-     * 网页的裁剪圆角用这个值，FloatingBallService 算玻璃几何时也用这个值
-     * （{@code tCorner = dp(CORNER_DP) / hypx}），曲率一模一样。
+     * 用户 2026-11-10：「把网页的圆角去掉吧」→ 0 = 直角（网页铺成整块矩形，
+     * 四角不再被切掉）；`frame.setClipToOutline(radius > 0)` 在 0 时直接不裁。
      */
-    static final int CORNER_DP = 30;
+    static final int CORNER_DP = 0;
+
+    /**
+     * 回复页**玻璃自己**的圆角（dp）。
+     *
+     * 用户 2026-11-10：「玻璃的圆角保留，只去掉网页的圆角」→ 网页 0、玻璃仍 30。
+     * FloatingBallService 用这个值算玻璃几何（{@code tCorner = dp(GLASS_CORNER_DP) / hypx}）。
+     */
+    static final int GLASS_CORNER_DP = 30;
 
     private final Context ctx;
     private final WindowManager wm;
@@ -226,7 +233,7 @@ final class WebChatPane {
                 o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
             }
         });
-        frame.setClipToOutline(true);
+        frame.setClipToOutline(radius > 0);       // 圆角=0 → 直角，不需要裁剪
 
         web = new WebView(ctx);
         web.setBackgroundColor(0xFF000000);

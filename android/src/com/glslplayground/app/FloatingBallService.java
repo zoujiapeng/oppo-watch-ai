@@ -6264,8 +6264,10 @@ public class FloatingBallService extends Service {
                 //   玻璃圆角 = 玻璃里那块网页的裁剪圆角（WebChatPane.CORNER_DP），
                 //   换算成 svCorner（着色器里圆角半径 = 半高 × svCorner）。两边同一个 dp，
                 //   网页的圆角弧和玻璃的圆角弧曲率一致，黑底不会从玻璃的圆角里"漏方"。
-                tCorner = Math.max(0.02f, Math.min(minCorner,
-                        dp(WebChatPane.CORNER_DP) / Math.max(1f, hypx)));
+                //   网页圆角（CORNER_DP=0）和玻璃圆角分开：玻璃保留 30dp 圆角，
+                //   只有网页是直角（用户 2026-11-10：「玻璃的圆角保留，只去掉网页的圆角」）。
+                tCorner = Math.max(0f, Math.min(minCorner,
+                        dp(WebChatPane.GLASS_CORNER_DP) / Math.max(1f, hypx)));
             }
         }
         // 提示：球内文字被清空（siriStr 为空）但本轮还没结束时，黑区/文字层也跟着藏掉，
