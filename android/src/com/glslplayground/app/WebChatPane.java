@@ -82,6 +82,9 @@ final class WebChatPane {
     private long showLogAt;
     /** 已经应用过的网页字号（设置页随时能改，这里跟着变）。 */
     private int lastZoom = 100;
+    /** 网页长过输入行的那一截（px）：页面里用 padding-bottom 让开。 */
+    private int insetPx = 0;
+    private int appliedInsetCss = -1;
 
     WebChatPane(Context ctx, WindowManager wm) {
         this.ctx = ctx;
@@ -125,6 +128,7 @@ final class WebChatPane {
             }
         }
         applyZoomIfChanged();
+        applyInsetIfChanged();
         if (frame.getVisibility() != View.VISIBLE) {
             frame.setVisibility(View.VISIBLE);
             int[] loc = new int[2];
@@ -138,6 +142,24 @@ final class WebChatPane {
                     + " size=" + w + "x" + h + " @" + x + "," + y);
         }
         if (!loaded) load();
+    }
+
+    /**
+     * 网页窗比输入行还长的那一截：页面底部留出同样的空白，最新一行不会被输入行压住。
+     * 只在真变了才下发一次（每帧都会调用）。
+     */
+    void setBottomInset(int px) {
+        insetPx = Math.max(0, px);
+        applyInsetIfChanged();
+    }
+
+    private void applyInsetIfChanged() {
+        if (web == null || !controllerReady) return;
+        int css = Math.round(insetPx / ctx.getResources().getDisplayMetrics().density);
+        if (css == appliedInsetCss) return;
+        appliedInsetCss = css;
+        web.evaluateJavascript("window.__dshWc&&window.__dshWc.setPadBottom(" + css + ")", null);
+        Log.i(TAG, "网页底部让开 " + css + "px（输入行）");
     }
 
     /**
@@ -320,6 +342,8 @@ final class WebChatPane {
             controllerReady = true;
             Log.i(TAG, "controller " + v);
             applyZoom(lastZoom);            // 页面刚加载：把设置里的缩放补上
+            appliedInsetCss = -1;           // 控制器刚装好：底部让开的量也补一次
+            applyInsetIfChanged();
             if (wantSid == null) resolveLatest();
             else applySession();
             logStatusSoon(2500);

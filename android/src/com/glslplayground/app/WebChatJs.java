@@ -32,7 +32,7 @@ final class WebChatJs {
           + "if(window.__dshWc&&window.__dshWc.v===4)return 'ready';"
           + "var S=window.__dshWc={v:4,want:'',focusMode:false,state:'boot',needBottom:true,follow:true,"
           + "clicks:0,lastClickAt:0,lastGroupAt:0,hidden:[],col:null,timer:0,lastNote:'',"
-          + "touches:0,scrolls:0,touchBound:false,zoom:1};"
+          + "touches:0,scrolls:0,touchBound:false,zoom:1,padBottom:0};"
           + "function q(s){return document.querySelector(s);}"
           + "function qa(s){return Array.prototype.slice.call(document.querySelectorAll(s));}"
           + "function note(m){if(m===S.lastNote)return;S.lastNote=m;try{console.log('dshwc: '+m);}catch(e){}}"
@@ -86,6 +86,7 @@ final class WebChatJs {
           + "e.style.setProperty('min-height','0','important');"
           + "e.style.setProperty('overflow','visible','important');"
           + "e.style.setProperty('padding','4px 6px','important');"
+          + "e.style.setProperty('padding-bottom',(S.padBottom||0)+'px','important');"
           + "}else if(scIdx>=0&&j<scIdx){"
           // 滚动容器**里面**的那几层：自然高度往上长，别压成视口高（压了就没东西可滚）
           + "e.style.setProperty('flex','none','important');"
@@ -162,6 +163,9 @@ final class WebChatJs {
           + "return 'focus='+S.focusMode;};"
           + "S.scrollBottom=function(){S.needBottom=true;S.follow=true;settle();return 'bottom';};"
           // 网页缩放 = 浏览器式缩放：zoom 挂在 <html> 上，布局视口跟着变窄/变宽，内容自己重排
+          + "S.setPadBottom=function(px){S.padBottom=Math.max(0,px||0);"
+          + "var c=column();if(c)c.style.setProperty('padding-bottom',S.padBottom+'px','important');"
+          + "return 'pad='+S.padBottom;};"
           + "S.setZoom=function(pct){var z=Math.max(0.3,Math.min(2.0,(pct||100)/100));"
           + "S.zoom=z;S.col=null;"
           + "document.documentElement.style.zoom=(z===1?'':String(z));"

@@ -461,11 +461,11 @@
   //  · 区域：这块网页占"玻璃里写字那块矩形"的百分之多少，贴底摆（最新几行始终贴着玻璃底边）。
   function webChatRender() {
     var box = $('webChatRows'); if (!box) return; box.innerHTML = '';
-    // 宽、高分开调，上限都是旧版文字视口那一块（20~100%）；缩放 30~200%（能缩得更小）
-    slider(box, '网页宽', 20, 100, 5, safe(function () { return W.getWebChatW(); }, 100),
+    // 宽、高分开调（20~200%）：100% = 旧版文字视口，再往上长到玻璃自己的最大限度；缩放 30~200%
+    slider(box, '网页宽', 20, 200, 5, safe(function () { return W.getWebChatW(); }, 100),
       function (v) { return Math.round(v) + '%'; },
       function (v) { try { W.setWebChatW(v); } catch (e) {} });
-    slider(box, '网页高', 20, 100, 5, safe(function () { return W.getWebChatH(); }, 100),
+    slider(box, '网页高', 20, 200, 5, safe(function () { return W.getWebChatH(); }, 100),
       function (v) { return Math.round(v) + '%'; },
       function (v) { try { W.setWebChatH(v); } catch (e) {} });
     slider(box, '网页缩放', 30, 200, 5, safe(function () { return W.getWebChatZoom(); }, 100),

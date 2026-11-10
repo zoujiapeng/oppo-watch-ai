@@ -6669,15 +6669,28 @@ public class FloatingBallService extends Service {
         // ★ 2026-11-10 实验：玻璃里盖上 DSH 网页（位置就是文字视口那块矩形，玻璃大小不变）
         // 网页体积（设置页「网页体积」60~130%）：在**玻璃自己的可见范围**里缩放，底边钉住不动；
         // 100% = 和文字视口一模一样。玻璃窗一个像素都不动。
-        // 宽、高**分开**调（设置页「网页宽」「网页高」），上限都是旧版文字视口那一块：
-        // 宽 ≤ tw、高 ≤ th —— 永远不超过玻璃给文字留的最大范围。底边钉住（最新几行贴玻璃底）。
-        int wPct = Math.max(20, Math.min(100, prefs().getInt("web_chat_w", 100)));
-        int hPct = Math.max(20, Math.min(100, prefs().getInt("web_chat_h", 100)));
-        int ww = Math.max((int) dp(40), Math.min(tw, Math.round(tw * wPct / 100f)));
-        int wh = Math.max((int) dp(40), Math.min(th, Math.round(th * hPct / 100f)));
+        // 宽、高**分开**调（设置页「网页宽」「网页高」）。100% = 旧版文字视口那一块；
+        // 往上调可以一路长到**玻璃自己的最大限度**：
+        //   宽 → 玻璃内沿（winW - 2m）
+        //   高 → 玻璃底再往上让出波头带（animBandPx）—— 玻璃有多高就能多高
+        // 上边钉住不动（对话开头不会被推走），往下长。长过输入行的那一截用 padding-bottom
+        // 让出来，免得最新一行刚好藏在输入行后面（输入行比网页窗后加，本来就浮在它上面）。
+        int wPct = Math.max(20, Math.min(200, prefs().getInt("web_chat_w", 100)));
+        int hPct = Math.max(20, Math.min(200, prefs().getInt("web_chat_h", 100)));
+        int glassW = Math.max(tw, Math.round(winW - 2f * m));
+        int pageTopScreen = y + sysDy;
+        int pageBottomMax = Math.round(ballBottom - animBandPx - dp(4));
+        int maxH = Math.max(th, Math.min(pageBottomMax - pageTopScreen,
+                Math.round(screenH - dp(8) - pageTopScreen)));
+        int ww = Math.min(glassW, Math.max((int) dp(40), Math.round(tw * wPct / 100f)));
+        int wh = Math.min(maxH, Math.max((int) dp(40), Math.round(th * hPct / 100f)));
         int wx = Math.round(sx - ww / 2f);
         wx = Math.max(0, Math.min(Math.max(0, screenW - ww), wx));
-        int wy = (y + sysDy + th) - wh - sysDy;      // 底边钉住：只往上收
+        int wy = y;                                  // 上边钉住，往下长
+        // 只有**真被输入行压住**的那一截才让开（用 composerY 算出的输入行真实上沿，
+        // 不是 availBottom —— 那里面还含 6dp+8dp 的缝，会让最新一行凭空高出一截）。
+        int composerTop = composerShown ? composerY(composerH) : Integer.MAX_VALUE;
+        webPaneInsetPx = Math.max(0, (wy + sysDy + wh) - composerTop);
         syncWebChatPane(wx, wy, ww, wh);
         // ★ 2026-11-08：胶囊状态（球还没长成方形态 / 正在缩回）里不许露字。
         //   可见度跟着**画出来的**几何走 → 球一缩成胶囊，字立刻淡没（不是等下一次测量）。
@@ -9776,6 +9789,8 @@ public class FloatingBallService extends Service {
      */
     private WebChatPane webPane;
     private boolean webPaneOn = false;
+    /** 网页窗长过输入行的那一截（px）：页面里用 padding-bottom 让开，最新一行不会被输入行压住。 */
+    private int webPaneInsetPx = 0;
 
     /**
      * 实验开关：聊天页直接用 DSH 前端的网页（设置页「悬浮 → 网页聊天（实验）」）。
@@ -9831,6 +9846,7 @@ public class FloatingBallService extends Service {
         if (webPane == null) webPane = new WebChatPane(this, wm);
         String sid = webPaneSessionId();
         if (sid != null) webPane.setSession(sid, convoOpen ? convoTitle : null);
+        webPane.setBottomInset(webPaneInsetPx);
         webPane.show(x, y, w, h);
         if (!webPaneOn) {
             webPaneOn = true;
