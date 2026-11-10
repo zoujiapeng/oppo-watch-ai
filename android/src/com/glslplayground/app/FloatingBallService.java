@@ -3663,6 +3663,15 @@ public class FloatingBallService extends Service {
      * （玻璃一缩更明显）—— 用户看到的就是「黑区跟着字跑」。
      */
     private static final float BLACK_FIXED_NY = 0.0f;
+
+    /**
+     * 玻璃里是 **DSH 网页**时，渐变黑区在原来的基础上再往下延伸一半（ny，1.0 = 半个玻璃高）。
+     *
+     * 用户 2026-11-10：「原本玻璃上的渐变黑区往下延伸一半」—— 黑区下沿 b1 从 ny≈0 落到
+     * ny≈−0.5（玻璃高的 75%），网页那片纯黑和玻璃底下那截不再有一道灰边；
+     * 走的是现成的 {@code uBlackOffset}（b0/b1 一起下移），玻璃顶照旧纯黑。
+     */
+    private static final float BLACK_WEB_EXTEND_NY = 0.5f;
     // 最短状态 = 原来的水晶球（0/1 个字时），不能再短
     private float minHalfX = 0.37f, minHalfY = 0.25f, minCorner = 1f;
     /**
@@ -6202,6 +6211,14 @@ public class FloatingBallService extends Service {
         {
             float r = 0.38f * Math.min(hxpx, hypx);                  // 圆角 ≈ 短边 38% → squircle
             tCorner = Math.max(0.18f, Math.min(minCorner, r / Math.max(1f, hypx)));
+            if (webPaneOn) {
+                // ★ 2026-11-10（用户：「把回复页面的玻璃的圆角弄成和网页圆角一致」）：
+                //   玻璃圆角 = 玻璃里那块网页的裁剪圆角（WebChatPane.CORNER_DP），
+                //   换算成 svCorner（着色器里圆角半径 = 半高 × svCorner）。两边同一个 dp，
+                //   网页的圆角弧和玻璃的圆角弧曲率一致，黑底不会从玻璃的圆角里"漏方"。
+                tCorner = Math.max(0.02f, Math.min(minCorner,
+                        dp(WebChatPane.CORNER_DP) / Math.max(1f, hypx)));
+            }
         }
         // 提示：球内文字被清空（siriStr 为空）但本轮还没结束时，黑区/文字层也跟着藏掉，
         //      只留一个近方形的空玻璃壳 —— 这正是用户要的「处理中保持形态」。
@@ -6217,7 +6234,9 @@ public class FloatingBallService extends Service {
         //   · 文字被收走 / 玻璃变矮 → 黑区又跳回去（用户截图里那块位置是对的，就是不稳）。
         // 现在只发一个常量：着色器 b1 = uBlack1 − uBlackOffset，玻璃顶永远纯黑、
         // 球心以下才开始变亮、最底边一条最亮 —— 位置跟着玻璃走，跟文字彻底脱钩。
-        tBlack = BLACK_FIXED_NY;
+        // ★ 2026-11-10：玻璃里是 DSH 网页时，黑区下沿再往下延伸一半（用户口径），
+        //   网页那片纯黑一直过渡到玻璃底下那截，不再只到玻璃中间。
+        tBlack = webPaneOn ? BLACK_WEB_EXTEND_NY : BLACK_FIXED_NY;
 
         tHalfX = hxpx / base;
         tHalfY = hypx / base;

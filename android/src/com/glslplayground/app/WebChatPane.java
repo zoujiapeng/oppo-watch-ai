@@ -57,6 +57,15 @@ final class WebChatPane {
 
     private static final String TAG = "WebChatPane";
 
+    /**
+     * 回复页玻璃 / 玻璃里那块网页**共用**的圆角（dp）。
+     *
+     * 用户 2026-11-10：「把回复页面的玻璃的圆角弄成和网页圆角一致」—— 所以两边不再各写各的：
+     * 网页的裁剪圆角用这个值，FloatingBallService 算玻璃几何时也用这个值
+     * （{@code tCorner = dp(CORNER_DP) / hypx}），曲率一模一样。
+     */
+    static final int CORNER_DP = 30;
+
     private final Context ctx;
     private final WindowManager wm;
 
@@ -208,10 +217,10 @@ final class WebChatPane {
 
     private void ensure() {
         if (frame != null) return;
-        final int radius = dp(30);
+        final int radius = dp(CORNER_DP);
 
         frame = new FrameLayout(ctx);
-        frame.setBackgroundColor(0xFF151517);
+        frame.setBackgroundColor(0xFF000000);      // 纯黑：和网页主题同一个底色，圆角外不露灰边
         frame.setOutlineProvider(new ViewOutlineProvider() {
             @Override public void getOutline(View v, Outline o) {
                 o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
@@ -220,7 +229,7 @@ final class WebChatPane {
         frame.setClipToOutline(true);
 
         web = new WebView(ctx);
-        web.setBackgroundColor(0xFF151517);
+        web.setBackgroundColor(0xFF000000);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -450,7 +459,11 @@ final class WebChatPane {
             return null;
         }
         String html = new String(readAll(c.getInputStream()), "utf-8");
-        String shim = "<script>" + SHIM_JS + "</script>";
+        // 纯黑主题：<head> 里先钉一段黑色底 + 强制走暗色面板，再装 Chrome 116 兼容层。
+        // 顺序很要紧 —— 两段都必须在 DSH 自己的脚本之前跑（它的主题 boot 脚本在 <body> 末尾）。
+        String shim = "<style id=\"dshwc-black\">" + BLACK_THEME_CSS + "</style>"
+                + "<script>" + BLACK_THEME_JS + "</script>"
+                + "<script>" + SHIM_JS + "</script>";
         int head = html.indexOf("<head");
         int at = head < 0 ? -1 : html.indexOf('>', head);
         if (at > 0) html = html.substring(0, at + 1) + shim + html.substring(at + 1);
@@ -473,6 +486,53 @@ final class WebChatPane {
         }
         return out.toByteArray();
     }
+
+    /**
+     * 玻璃里那块网页的**纯黑主题**（用户 2026-11-10：「把实验功能的回复页面的网页主题弄成纯黑色」）。
+     *
+     * DSH 前端的暗色主题底是 #151517（`--dsw-static-neutral-bluish-950`），这里把它和
+     * 各层底色一起钉成 #000：对话列铺满玻璃时，玻璃里就是纯黑，不再是灰黑。
+     * 用 !important + 比 `body[data-ds-dark-theme]` 更高一级的选择器，压过前端自己的令牌。
+     */
+    private static final String BLACK_THEME_CSS =
+            "html{color-scheme:dark!important;background:#000!important}"
+          + "html body{background:#000!important;color-scheme:dark!important}"
+          + "html body[data-ds-dark-theme]{"
+          + "--dsh-boot-bg:#000!important;"
+          + "--dsw-static-neutral-bluish-950:#000!important;"
+          + "--dsw-alias-bg-base:#000!important;"
+          + "--dsw-alias-bg-layer-1:#000!important;"
+          + "--dsw-alias-bg-layer-2:#000!important;"
+          + "--dsw-alias-bg-module-platform:#000!important;"
+          + "--dsw-alias-bg-document-preview:#000!important;"
+          + "--dsw-linear-gradient-think:linear-gradient(180deg,#000 20.19%,#00000000 100%)!important;"
+          + "}";
+
+    /**
+     * 强制暗色：WebView 的系统配色跟着**宿主 App**走，App 是浅色 → DSH 前端会选浅色主题
+     * （玻璃里那张白底截图就是这么来的）。这里两件事：
+     *  ① 把 `(prefers-color-scheme: dark)` 的查询结果钉成 true —— DSH 的主题运行时装好时
+     *     就会按暗色建快照（偏好是 system 时直接生效）；
+     *  ② 万一偏好被存成 light / 别处又把属性摘掉：盯住 body，`data-ds-dark-theme` 缺了就补。
+     * 只影响这块玻璃里的 WebView，不动 App 全局。
+     */
+    private static final String BLACK_THEME_JS =
+            "(function(){"
+          + "try{var om=window.matchMedia;if(om){window.matchMedia=function(q){"
+          + "var r=om.call(window,q);"
+          + "if(!/prefers-color-scheme\\s*:\\s*dark/i.test(String(q)))return r;"
+          + "return {matches:true,media:r.media,onchange:null,"
+          + "addListener:function(){},removeListener:function(){},"
+          + "addEventListener:function(){},removeEventListener:function(){},"
+          + "dispatchEvent:function(){return false;}};};}}catch(e){}"
+          + "function black(){try{var b=document.body;if(!b)return false;"
+          + "if(!b.hasAttribute('data-ds-dark-theme'))b.setAttribute('data-ds-dark-theme','');"
+          + "document.documentElement.style.colorScheme='dark';return true;}catch(e){return false;}}"
+          + "document.addEventListener('DOMContentLoaded',black);"
+          + "try{var iv=setInterval(function(){if(black()){clearInterval(iv);"
+          + "try{new MutationObserver(black).observe(document.body,"
+          + "{attributes:true,attributeFilter:['data-ds-dark-theme']});}catch(e){}}},50);}catch(e){}"
+          + "})();";
 
     private static final String SHIM_JS =
             "(function(){"

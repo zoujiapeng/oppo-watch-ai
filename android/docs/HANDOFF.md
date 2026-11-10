@@ -10,6 +10,58 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-10（第三版）：玻璃里的网页**纯黑主题** + 玻璃圆角 = 网页圆角 + 黑区下延一半
+
+**用户原话**：「在最新分支工作，把实验功能的回复页面的网页主题弄成纯黑色，并且把回复页面的
+玻璃的圆角弄成和网页圆角一致，并且原本玻璃上的渐变黑区往下延伸一半」。
+
+一句话结论：玻璃里那块 DSH 网页从"浅色白底"变成**纯黑**（#000，连 DSH 自己的暗色底 #151517
+都不留）；玻璃的圆角和网页的裁剪圆角用**同一个 dp（30）**；回复页玻璃的黑区下沿再往下压半个 ny。
+
+### ① 网页主题纯黑（`WebChatPane`）
+
+- 病根：WebView 的 `prefers-color-scheme` 跟着**宿主 App** 走，App 是浅色 → DSH 前端整套跑浅色，
+  玻璃里就是那张白底网页。
+- 主文档经 `fetchAndShim` 时，在 `<head>` 最前面（DSH 自己的 boot 脚本之前）注入两段：
+  · `BLACK_THEME_JS`：把 `(prefers-color-scheme: dark)` 的 `matchMedia` 钉成 `matches:true`；
+    同时盯住 `body[data-ds-dark-theme]`（宿主若按 light 偏好摘掉，MutationObserver 立刻补回）。
+  · `BLACK_THEME_CSS`：`html/body` 底色、`--dsw-alias-bg-base` / `bg-layer-1·2` /
+    `bg-module-platform` / `bg-document-preview` / `--dsh-boot-bg` 全钉 `#000!important`；
+    thinking 块的渐变也改成从 #000 起。
+- `WebChatPane` 的 frame / WebView 底色改成 `#000000`；`WebChatJs` 的
+  `html[data-dshwc] body` 用 `var(--dsw-alias-bg-base, #151517)` —— 玻璃里解析成 #000，
+  全屏 `WebChatActivity` 仍按它自己的主题走（那边没强制暗色）。
+- 实测（`--es wc_js @…` 探针）：`{"darkAttr":true,"scheme":"dark","bodyBg":"rgb(0, 0, 0)",
+  "bgBase":"#000","label":"#f9fafb","mmDark":true,"col":true}`。
+
+### ② 玻璃圆角 = 网页圆角
+
+- 新增 `WebChatPane.CORNER_DP = 30`：网页的裁剪圆角、玻璃圆角**唯一来源**，不再各写各的。
+- `measureSiriTargetsInner()` 里 `webPaneOn` 时：
+  `tCorner = dp(WebChatPane.CORNER_DP) / hypx`（着色器里圆角半径 = 半高 × svCorner），
+  不再用文字页那套 `0.38 × 短边` 的大 squircle。
+- 真机实测（440dpi → 30dp = 82.5px）：玻璃轮廓拟合 **r≈82.5px**；网页（纯黑底）轮廓拟合
+  **r≈82.5px**，两边完全一致（`webchat-black-glass-20261110.png`、`webchat-pure-black-20261110.png`）。
+
+### ③ 黑区往下延伸一半
+
+- 新增 `BLACK_WEB_EXTEND_NY = 0.5`，回复页玻璃显示网页时
+  `tBlack = BLACK_WEB_EXTEND_NY`（否则仍是 `BLACK_FIXED_NY = 0`）。
+  走现成的 `uBlackOffset`：`b1 = uBlack1 − 0.5 ≈ −0.51`（玻璃高的 75%），
+  `b0` 一起下移 → 玻璃顶照旧纯黑，只有底部 25% 是渐变到透明的那一截。
+- 实测抓帧（`ballshot`，`webchat-black-glass-20261110.png`）：玻璃左边距 y≈100~900 亮度 8~12（旧版在玻璃中段就开始透背景），
+  y≈900 起才抬到 44（波头/玻璃底），黑区确实往下长了一半。
+
+### 验证
+
+```bash
+bash android/build.sh
+pm install -r glsl-playground.apk
+am start-foreground-service -n com.glslplayground.app/.FloatingBallService
+am start -n com.glslplayground.app/.PowerBallTrampolineActivity --es test_reply '…'
+# 页面内自查：wc_js → {"darkAttr":true,...,"bgBase":"#000","label":"#f9fafb"}
+```
+
 ## 2026-11-10（第二版）：玻璃里**只显示这条会话的对话列** + 网页体积/缩放在设置里调
 
 **用户原话**：「继续那个实验性的功能……不改变原本玻璃的大小，网页要显示对应的会话的

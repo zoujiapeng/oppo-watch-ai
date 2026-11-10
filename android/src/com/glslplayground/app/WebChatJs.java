@@ -173,9 +173,10 @@ final class WebChatJs {
 
           + "if(!document.getElementById('dshwc-style')){var st=document.createElement('style');"
           + "st.id='dshwc-style';"
-          + "st.textContent='html[data-dshwc]{height:100%!important;overflow:hidden!important}'"
+          + "st.textContent='html[data-dshwc]{height:100%!important;overflow:hidden!important;"
+          + "background:var(--dsw-alias-bg-base,#151517)!important}'"
           + "+'html[data-dshwc] body{margin:0!important;padding:0!important;height:100%!important;"
-          + "overflow:hidden!important;background:#151517!important}'"
+          + "overflow:hidden!important;background:var(--dsw-alias-bg-base,#151517)!important}'"
           + "+'html[data-dshwc] [data-chat-flow]{scrollbar-width:thin}';"
           + "document.head.appendChild(st);}"
           + "document.documentElement.setAttribute('data-dshwc','1');"
