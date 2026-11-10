@@ -6165,6 +6165,9 @@ public class FloatingBallService extends Service {
         //    否则玻璃会退回一条窄条、字也没了（用户 2026-11-08 那张空玻璃截图就是这么来的）。
         if (mdContentH <= 0) ensureMarkdownContent();
         float th = Math.max(dp(20), mdContentH > 0 ? mdContentH : dp(40));
+        // ★ 2026-11-10：玻璃里是 DSH 网页时，**网页就是内容** —— 玻璃高度跟着网页的长短走
+        //   （和"跟着文字长"同一条规则）。否则网页被卡在文字那点高度里，玻璃里空一大截。
+        if (webPaneOn) th = webPaneHeightPx();
         float tw = mdLayoutW > 0 ? mdLayoutW : siriTextMaxW();
         // 上下留白（黑区/球高的余量）：字号大就多留一点
         // 文字四周留白：底部多留一截，保证最后一行完整落在玻璃里（用户：宁可玻璃拉长也别露字）
@@ -6675,15 +6678,22 @@ public class FloatingBallService extends Service {
         //   高 → 玻璃底再往上让出波头带（animBandPx）—— 玻璃有多高就能多高
         // 上边钉住不动（对话开头不会被推走），往下长。长过输入行的那一截用 padding-bottom
         // 让出来，免得最新一行刚好藏在输入行后面（输入行比网页窗后加，本来就浮在它上面）。
-        int wPct = Math.max(20, Math.min(200, prefs().getInt("web_chat_w", 100)));
-        int hPct = Math.max(20, Math.min(200, prefs().getInt("web_chat_h", 100)));
+        int wPct = Math.max(20, Math.min(100, prefs().getInt("web_chat_w", 100)));
         int glassW = Math.max(tw, Math.round(winW - 2f * m));
         int pageTopScreen = y + sysDy;
         int pageBottomMax = Math.round(ballBottom - animBandPx - dp(4));
         int maxH = Math.max(th, Math.min(pageBottomMax - pageTopScreen,
                 Math.round(screenH - dp(8) - pageTopScreen)));
+        // 设置页改了「网页高」→ 玻璃得重新量一次（网页是内容，玻璃跟着它长/缩）
+        float wantPageH = webPaneHeightPx();
+        if (webPaneOn && Math.abs(wantPageH - lastWebPageH) > 2f) {
+            lastWebPageH = wantPageH;
+            main.post(new Runnable() {
+                @Override public void run() { measureSiriTargets(siriStr); }
+            });
+        }
         int ww = Math.min(glassW, Math.max((int) dp(40), Math.round(tw * wPct / 100f)));
-        int wh = Math.min(maxH, Math.max((int) dp(40), Math.round(th * hPct / 100f)));
+        int wh = Math.min(maxH, Math.max((int) dp(40), Math.round(wantPageH)));
         int wx = Math.round(sx - ww / 2f);
         wx = Math.max(0, Math.min(Math.max(0, screenW - ww), wx));
         int wy = y;                                  // 上边钉住，往下长
@@ -9791,6 +9801,8 @@ public class FloatingBallService extends Service {
     private boolean webPaneOn = false;
     /** 网页窗长过输入行的那一截（px）：页面里用 padding-bottom 让开，最新一行不会被输入行压住。 */
     private int webPaneInsetPx = 0;
+    /** 上一次下发给玻璃的"网页要高多少"（设置页改了就重新量一次玻璃）。 */
+    private float lastWebPageH = 0f;
 
     /**
      * 实验开关：聊天页直接用 DSH 前端的网页（设置页「悬浮 → 网页聊天（实验）」）。
@@ -9850,7 +9862,12 @@ public class FloatingBallService extends Service {
         webPane.show(x, y, w, h);
         if (!webPaneOn) {
             webPaneOn = true;
+            lastWebPageH = 0f;
             Log.i("FloatingBall", "webpane: 玻璃里显示 DSH 网页 " + w + "x" + h + " sid=" + sid);
+            // 网页是内容 → 玻璃要按网页的高度重新量一次（第一帧 webPaneOn 还是 false，量不到）
+            main.post(new Runnable() {
+                @Override public void run() { measureSiriTargets(siriStr); }
+            });
         }
     }
 
@@ -9858,7 +9875,12 @@ public class FloatingBallService extends Service {
         if (webPane == null) return;
         if (webPaneOn) Log.i("FloatingBall", "webpane: 收起（回手搓 markdown / 球回胶囊）");
         webPaneOn = false;
+        lastWebPageH = 0f;
         webPane.hide();
+        // 网页走了：玻璃重新按文字量一次（不然会停在网页撑出来的高度上，白占屏幕）
+        main.post(new Runnable() {
+            @Override public void run() { measureSiriTargets(siriStr); }
+        });
     }
 
     /**
@@ -9984,6 +10006,19 @@ public class FloatingBallService extends Service {
         if (siriStr == null || siriStr.trim().isEmpty()) return false;
         if (squareDrawn01() < 0.5f) return false;             // 画出来还是胶囊 → 不许有输入行
         return true;
+    }
+
+    /**
+     * 玻璃里那块网页想要多高（px）。
+     *
+     * 用户口径（2026-11-10：「原来文字可以撑大整个玻璃，为什么网页不能？」）：
+     * **网页就是这一页的内容**，所以玻璃要跟着网页长 —— 和跟着文字长是同一回事。
+     * 百分比相对"玻璃能长到的最大文字视口"：100% = 撑满整块玻璃（球高到上限）。
+     */
+    private float webPaneHeightPx() {
+        float thMax = Math.max(dp(40), siriMaxBallH() - dp(8) - dp(14) - dp(ANIM_BAND_DP));
+        int pct = Math.max(20, Math.min(100, prefs().getInt("web_chat_h", 100)));
+        return Math.max(dp(40), Math.min(thMax, thMax * pct / 100f));
     }
 
     /** 输入行占用的底部带子高度（px）：玻璃要给它在**波头带子之上**留出位置。 */
