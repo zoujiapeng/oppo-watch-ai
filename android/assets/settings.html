@@ -122,6 +122,7 @@
         <div class="row"><label>Siri 形变</label><span style="flex:1"></span><i class="sw" id="swSiri"></i></div>
         <div class="row"><label>跟随对话（镜像）</label><span style="flex:1"></span><i class="sw" id="swMirror"></i></div>
         <div class="row"><label>网页聊天（玻璃内）</label><span style="flex:1"></span><i class="sw" id="swWebChat"></i></div>
+        <div id="webChatRows" class="rows"></div>
         <div class="btns"><button class="sm" id="btnWebChat">全屏打开网页聊天</button></div>
       </section>
       <section class="p"><div class="ph"><em>屏幕</em></div><div id="screenRows" class="rows"></div>
@@ -420,6 +421,7 @@
     each('[data-src]', function (b) { b.classList.toggle('on', +b.dataset.src === src); });
     each('[data-scale]', function (b) { b.classList.toggle('on', +b.dataset.scale === sc); });
   }
+  webChatRender();
   $('swFloat').addEventListener('click', function () {
     var on = !this.classList.contains('on');
     this.classList.toggle('on', on);
@@ -454,6 +456,18 @@
   $('btnWebChat').addEventListener('click', function () {
     try { W.openWebChatPage(); } catch (e) {}
   });
+  // 玻璃里那块网页的大小（用户 2026-11-09：「大小要可在设置调整」）：
+  //  · 字号：WebSettings.textZoom，只放大文字，不改 DSH 自己的排版（不会撑出横向滚动条）；
+  //  · 区域：这块网页占"玻璃里写字那块矩形"的百分之多少，贴底摆（最新几行始终贴着玻璃底边）。
+  function webChatRender() {
+    var box = $('webChatRows'); if (!box) return; box.innerHTML = '';
+    slider(box, '网页体积', 60, 130, 5, safe(function () { return W.getWebChatBox(); }, 100),
+      function (v) { return Math.round(v) + '%'; },
+      function (v) { try { W.setWebChatBox(v); } catch (e) {} });
+    slider(box, '网页缩放', 70, 160, 5, safe(function () { return W.getWebChatZoom(); }, 100),
+      function (v) { return Math.round(v) + '%'; },
+      function (v) { try { W.setWebChatZoom(v); } catch (e) {} });
+  }
   each('[data-src]', function (b) {
     b.addEventListener('click', function () {
       try { W.setFloatCaptureSrc(+this.dataset.src); } catch (e) {}

@@ -10,6 +10,95 @@
 > 📸 **用户报 UI 异常（胶囊变样 / 图标对不准 / 玻璃不见）→ 先看
 > [`WITNESS.md`](WITNESS.md)**：取证文件在哪、怎么触发、`.txt` 每个字段怎么判读。
 
+## 2026-11-10（第二版）：玻璃里**只显示这条会话的对话列** + 网页体积/缩放在设置里调
+
+**用户原话**：「继续那个实验性的功能……不改变原本玻璃的大小，网页要显示对应的会话的
+具体的 dsh 前端的对话部分（EvIC1a_column）」→ 第二轮：「网页要可像浏览器一样滑动等等操作，
+并且大小要可在设置调整」→ 第三轮：「可以滑动和点击了，不过网页整体体积和网页缩放要在设置里可调整」。
+
+一句话结论：玻璃还是原来那块（几何一个像素不动），但里面那块 WebView 现在
+① **只画 `EvIC1a_column` 那一列**（DSH 前端自己的对话内容，不是整张应用界面）；
+② **按 session id 精确打开那一条**（点左栏 `[data-row-key="session:<id>"]`，再用
+`[data-conversation-region="chat"][data-conversation-session]` 核对）；
+③ 能像浏览器一样**滑/点/双指缩放**；④ 设置页新增「网页体积」「网页缩放」两个滑块。
+
+### 关键实现（都在 `WebChatJs.CONTROLLER_JS`，玻璃版和全屏版共用）
+
+- **会话定位 —— 认 id，不认标题**
+  - 左栏每一行是 `div[data-row-key="session:<sessionId>"]`（`dsh-client-ui-workspace` 的
+    `SessionNodeItem`）；点它比"按标题找文本"稳得多（标题会改、窄屏左栏默认收起）。
+  - 窄屏（<1024）左栏是收起的：先点 `button[aria-label="打开侧边栏"]`（locale 里有中英两种），
+    再把 `[data-row-key^="workspace:"][aria-expanded="false"]` 全部展开，最后点目标行。
+  - 点完核对 `[data-conversation-region="chat"]` 的 `data-conversation-session` 是不是这个 id；
+    不是就重试（最多 10 次），**绝不用"最近那条"顶替**。有 sid 时根本不查 `session/list` 标题。
+- **只显示对话列 —— 认属性，不认哈希类名**
+  - 对话列是 `[data-chat-flow]`（CSS 模块类 `EvIC1a_column` 的哈希前缀会随构建变，属性不会；
+    实测 `document.elementFromPoint(4,4)` 就是 `DIV.EvIC1a_column`）。
+  - 聚焦模式：从这一列往上走到 `<html>`，**每一级只留链上的那个孩子、其余兄弟 `display:none`**
+    （左栏/顶栏/输入条/右侧栏/浮层全没了）；链上每一级 `width:100% / height:100%`（grid 的改成
+    `minmax(0,1fr)`）；**滚动容器里面那几层保持自然高度**（`height:auto`）——压成视口高会没得滚，
+    这是第一版的坑。滚动容器（`[data-conversation-scroll]`）自己 `overflow-y:auto`。
+  - 只动 DOM/CSS，不碰 Android 窗口几何。
+- **浏览器式交互**：窗口 `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL`，网页矩形内的触摸照常进网页
+  （滑动、点链接、双指缩放都行）；**不要**加 `FLAG_LAYOUT_IN_SCREEN` —— 文字窗/玻璃窗都是 overlay，
+  坐标原点同在状态栏下（统一 +90px），单独给网页加这个 flag 会让它比玻璃高 90px。
+  - 用户一碰网页（`pointerdown`/`touchstart`）就释放"钉在最新"，滑回底部再自动跟随。
+- **网页体积**（prefs `watch/web_chat_box`，60~130，默认 100）：在**玻璃自己的可见范围**里缩放
+  （`winW-2m` / `ballBottom-ballTop`），**底边钉住不动、往上长**，水平居中；100% = 文字视口。
+- **网页缩放**（prefs `watch/web_chat_zoom`，70~160，默认 100）：页面上 `document.documentElement.style.zoom`
+  —— 这是浏览器式缩放（布局视口跟着变窄，DSH 自己的排版重排），不是把整页糊成缩略图。
+  注意 `applyFocus()` 里的宽度自检要除以 zoom（`clientWidth / S.zoom`），否则每拍都重摆一次会闪。
+- **设置页**：「悬浮 → 网页体积 / 网页缩放」两个滑块（`settings.html` → `WatchBridge.get/setWebChatBox·Zoom`）。
+
+### 验证（真机实测，2026-11-10）
+
+```bash
+# 起球 + 钉一段字（玻璃里就会盖上网页）
+su -c "am start -n com.glslplayground.app/.PowerBallTrampolineActivity \
+  --es pk_hold none --es test_reply '## 核对'"
+su -c "logcat -s WebChatPane:* FloatingBall:*"
+#   WebChatPane: 贴上玻璃 732x135 @(174,112)
+#   WebChatPane: controller "installed"
+#   WebChatPane: console LOG: dshwc: click row #1 session-…
+#   WebChatPane: console LOG: dshwc: open session-…
+#   WebChatPane: status → "open|want=session-…|cur=session-…|focus=1|col=true|…"
+# 窗口对齐（网页 = 文字视口）：两条 frame 应该一模一样
+su -c "dumpsys input" | grep glslplayground
+#   网页 … frame=[174,202][906,337]   文字 … frame=[174,202][906,337]
+```
+
+页面内自查（调试直通，见下）：
+
+```bash
+# --es wc_js '@/sdcard/x.js' 或 '@<app files 目录>/x.js'（注意 chown 成 app uid + restorecon）
+# 返回 {"col":true,"colVis":true,"rowVis":false,"composerVis":false,"at00":"DIV|EvIC1a_column", …}
+#   → 视口左上角就是对话列，左栏/输入条都不在
+```
+
+- 体积 130%：`贴上玻璃 842x178`（宽度被玻璃内沿 842 夹住），底边仍与文字视口对齐（bottom=343）。
+- 缩放 160%：`zoom → "open|…|ch=40"`（视口 50 CSS px / 1.6 ≈ 31 …滚动容器按缩放后算），
+  会话仍是 `cur === want`，`focus=1`。
+
+### 调试直通（这次新加）
+
+```bash
+# 在玻璃里的网页上跑任意 JS，结果打进 logcat（tag WebChatPane，`wc_js → …`）
+su -c "am start -n com.glslplayground.app/.PowerBallTrampolineActivity \
+  --es test_reply '## 核对' --es wc_js '@/data/data/com.glslplayground.app/files/x.js'"
+su -c "am startservice -n com.glslplayground.app/.FloatingBallService \
+  --es wc_js '@/data/data/com.glslplayground.app/files/x.js'"     # 已在跑时也能补一发
+# 文件必须是 app uid（10286）可读：chown 10286:10286 + chmod 600 + restorecon，
+# 否则 EACCES（Termux 是 10276，直接 cp 过去的文件 app 读不了）
+```
+
+### 已知边界
+
+- 玻璃很小（默认文字视口 732x135 px ≈ 267x50 CSS px）：网页体积调到 130% 时宽度会被玻璃内沿夹住
+  （约 115%），再宽就要改玻璃本身了。
+- 网页不抢焦点 → 玻璃里点输入框不弹键盘（打字仍走球自己的输入行）；链接、滚动、缩放都正常。
+- 注入式触摸（`input swipe`/agent 注入）会被球自己的「让开」逻辑把悬浮窗临时挪出屏幕
+  （`parkAllOverlays`），所以**用 `input` 命令验不了网页滑动**；真手指可以。
+
 ## 2026-11-10：实验 —— 回复页玻璃里直接显示 **DSH 前端网页** 的对话页（分支 `feat/web-chat`）
 
 **用户原话**：「做一个实验性的功能，就是把聊天页面直接用 dsh 前端的聊天页面的网站网页，

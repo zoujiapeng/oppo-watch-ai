@@ -31,15 +31,23 @@ import java.util.Map;
  * 用户口径（2026-11-09）：
  *   「是 dsh 前端网页的对话页面显示在回复页面的玻璃上」
  *   「缩小看不清也没关系，不用改变原本玻璃的大小」
+ *   「网页要显示对应的会话的具体的 dsh 前端的对话部分（EvIC1a_column）」
  *
- * 所以这里不碰球/玻璃的几何：玻璃还是原来那块（{@code updateSiriTextPos} 算出来多大就多大），
- * 只是把玻璃里**原本写字的那块矩形**盖上一层 WebView，加载本机 DSH 的 Web 前端，
- * 并把它按标题点进当前那条会话。玻璃的黑顶、波头、输入行全部保持原样。
+ * 所以这里不碰球/玻璃的几何：玻璃还是原来那块（{@link FloatingBallService#updateSiriTextPos()}
+ * 算出来多大就多大），只是把玻璃里**原本写字的那块矩形**盖上一层 WebView，加载本机 DSH 的
+ * Web 前端，并且：
+ *
+ *  · **只显示那一条会话的对话列**：页面里的 {@code [data-chat-flow]}（CSS 类
+ *    {@code EvIC1a_column} 的哈希前缀会随构建变，这个属性不会）以外的东西（左栏/顶栏/
+ *    输入条/右侧栏）全部藏掉，这一列撑满 WebView —— 玻璃里就是 DSH 自己的对话，不是整张应用。
+ *  · **按 session id 精确开那一条**：左栏每一行是 {@code [data-row-key="session:<id>"]}，
+ *    点它，然后核对对话区的 {@code [data-conversation-region="chat"][data-conversation-session]}
+ *    真的是这个 id —— 对不上就重试，绝不拿"最近那条"顶替。
  *
  * 三条硬约束（都是这个工程踩过的坑）：
- *  · **不抢焦点**：窗口一律 FLAG_NOT_FOCUSABLE —— 回复页不许吃掉前台 App 的返回键
- *    （见 HANDOFF 2026-11-09 第四版）。打字仍然走球自己那条输入行。
- *  · **不抢触摸**：FLAG_NOT_TOUCH_MODAL，网页矩形以外的点按照常落到球/桌面上。
+ *  · **不抢焦点**：窗口一律 FLAG_NOT_FOCUSABLE —— 回复页不许吃掉前台 App 的返回键。
+ *    打字仍然走球自己那条输入行（发出去网页实时收到）。
+ *  · **不抢触摸**：FLAG_NOT_TOUCH_MODAL，网页矩形以外的点按照常落回球/桌面。
  *  · **不动几何**：只 updateViewLayout，绝不改球窗/文字窗的大小。
  *
  * 兼容层：系统 WebView 是 Chrome 116，而 DSH 前端用了 Promise.withResolvers（119）等新 API。
@@ -48,9 +56,6 @@ import java.util.Map;
 final class WebChatPane {
 
     private static final String TAG = "WebChatPane";
-
-    /** 页面加载完后按这些时刻试着点开会话（前端异步渲染，一次点不中很正常）。 */
-    private static final long[] OPEN_AT = {500, 1200, 2200, 3400, 5000, 7000};
 
     private final Context ctx;
     private final WindowManager wm;
@@ -63,20 +68,20 @@ final class WebChatPane {
 
     private int lastX = Integer.MIN_VALUE, lastY, lastW, lastH;
 
+    /** DSH 前端地址 + 和 RPC 共用的签名 cookie（主文档自己取回来插兼容层用）。 */
     private String base;
     private volatile String cookie;
     private boolean loaded;
 
-    /** 现在网页里开的是哪条会话 / 想开哪条。 */
+    /** 网页里现在开的是哪条会话 / 想开哪条（都是 DSH 的 session id）。 */
     private String sessionId;
-    private String wantSid, wantTitle;
-    private int attempt;
-    private boolean hit;
+    private String wantSid;
     private int loadGen;
-    private boolean resolvingTitle;
-    private boolean latestTried;
-    private int verifyFails = 0;
+    /** 页面里的控制器（{@link WebChatJs#CONTROLLER_JS}）已经装好没有。 */
+    private boolean controllerReady;
     private long showLogAt;
+    /** 已经应用过的网页字号（设置页随时能改，这里跟着变）。 */
+    private int lastZoom = 100;
 
     WebChatPane(Context ctx, WindowManager wm) {
         this.ctx = ctx;
@@ -105,14 +110,27 @@ final class WebChatPane {
                 wm.addView(frame, lp);
                 added = true;
                 Log.i(TAG, "贴上玻璃 " + w + "x" + h + " @(" + x + "," + y + ")");
+                frame.post(new Runnable() {
+                    @Override public void run() {
+                        if (frame == null) return;
+                        int[] loc = new int[2];
+                        frame.getLocationOnScreen(loc);
+                        Log.i(TAG, "pane at " + frame.getWidth() + "x" + frame.getHeight()
+                                + " @(" + loc[0] + "," + loc[1] + ")");
+                    }
+                });
             } catch (Throwable t) {
                 Log.w(TAG, "addView: " + t);
                 return;
             }
         }
+        applyZoomIfChanged();
         if (frame.getVisibility() != View.VISIBLE) {
             frame.setVisibility(View.VISIBLE);
-            Log.i(TAG, "VISIBLE " + w + "x" + h + " @(" + x + "," + y + ")");
+            int[] loc = new int[2];
+            frame.getLocationOnScreen(loc);
+            Log.i(TAG, "VISIBLE " + w + "x" + h + " @(" + x + "," + y + ") 实际="
+                    + frame.getWidth() + "x" + frame.getHeight() + " @(" + loc[0] + "," + loc[1] + ")");
         }
         if (showLogAt == 0 || System.currentTimeMillis() - showLogAt > 3000) {
             showLogAt = System.currentTimeMillis();
@@ -120,7 +138,28 @@ final class WebChatPane {
                     + " size=" + w + "x" + h + " @" + x + "," + y);
         }
         if (!loaded) load();
-        if (hit) scrollToEndSoon();
+    }
+
+    /**
+     * 设置页改了「网页缩放」→ 下一帧就跟上。
+     * 走页面里的 {@code document.documentElement.style.zoom}：这就是浏览器式缩放 ——
+     * 布局视口跟着变窄/变宽，DSH 自己的排版会重排（不是把整页糊成一张缩略图）。
+     */
+    private void applyZoomIfChanged() {
+        if (web == null) return;
+        int z = ctx.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getInt("web_chat_zoom", 100);
+        if (z == lastZoom) return;
+        lastZoom = z;
+        applyZoom(z);
+    }
+
+    private void applyZoom(int z) {
+        if (web == null) return;
+        Log.i(TAG, "网页缩放 → " + z + "%");
+        web.evaluateJavascript("window.__dshWc?window.__dshWc.setZoom(" + z + "):"
+                + "(document.documentElement.style.zoom='" + (z / 100f) + "')"
+                + ";(window.__dshWc&&window.__dshWc.status())", v -> Log.i(TAG, "zoom → " + v));
     }
 
     void hide() {
@@ -131,49 +170,16 @@ final class WebChatPane {
         }
     }
 
-    /** 换会话：网页已经加载好就重新点一条；还在加载就等 onPageFinished。 */
+    /**
+     * 换会话：网页已经装好控制器就立刻让页面切过去（按 session id 精确点左栏那一行）；
+     * 还在加载就等 onPageFinished 一次性装好再切。
+     */
     void setSession(String sid, String title) {
         if (sid == null || sid.isEmpty()) return;
         if (sid.equals(wantSid)) return;
         wantSid = sid;
-        wantTitle = (title == null || title.trim().isEmpty()) ? null : title.trim();
-        attempt = 0;
-        hit = false;
-        verifyFails = 0;
-        if (!sid.equals(sessionId)) Log.i(TAG, "会话 → " + sid + "（" + wantTitle + "）");
-        if (loaded) {
-            resetPageState();
-            scheduleOpen();
-        }
-    }
-
-    /** 目标会话的标题（DSH 侧栏里显示的那一行）——不知道就问一次 session/list。 */
-    private void resolveTitle(String sid, int gen) {
-        if (wantTitle != null || resolvingTitle) return;
-        resolvingTitle = true;
-        new Thread(new Runnable() {
-            @Override public void run() {
-                String t = null;
-                try {
-                    for (DshApi.SessionRow r : DshApi.get(ctx).sessions()) {
-                        if (sid.equals(r.id)) { t = r.title; break; }
-                    }
-                } catch (Throwable e) {
-                    Log.w(TAG, "查会话标题失败: " + e);
-                }
-                final String ft = t;
-                resolvingTitle = false;
-                if (ft == null) return;
-                Log.i(TAG, "会话标题 = 「" + ft + "」");
-                wantTitle = ft;
-                android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
-                h.post(new Runnable() {
-                    @Override public void run() {
-                        if (gen == loadGen && loaded) scheduleOpen();
-                    }
-                });
-            }
-        }, "pane-title").start();
+        if (!sid.equals(sessionId)) Log.i(TAG, "会话 → " + sid + "（" + title + "）");
+        if (controllerReady) applySession();
     }
 
     // ── 建视图 ────────────────────────────────────────────────────────────
@@ -197,10 +203,16 @@ final class WebChatPane {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
-        s.setLoadWithOverviewMode(true);
+        // 页面自己有 <meta name="viewport" content="width=device-width">：
+        // 这块 WebView 有多宽，DSH 就按多宽排（不整页缩小成一张缩略图）。
+        s.setLoadWithOverviewMode(false);
         s.setUseWideViewPort(true);
-        s.setSupportZoom(false);
-        s.setBuiltInZoomControls(false);
+        // 浏览器式操作：双指缩放 / 双击放大（缩放控件不显示，玻璃里没地方放它）
+        s.setSupportZoom(true);
+        s.setBuiltInZoomControls(true);
+        s.setDisplayZoomControls(false);
+        lastZoom = ctx.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getInt("web_chat_zoom", 100);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setUserAgentString(s.getUserAgentString() + " DshBallGlass/1");
@@ -219,7 +231,7 @@ final class WebChatPane {
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String url) {
                 Log.i(TAG, "page finished " + url + " title=" + v.getTitle());
-                scheduleOpen();
+                installController();
             }
 
             @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
@@ -241,6 +253,16 @@ final class WebChatPane {
 
         frame.addView(web, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // 玻璃里的网页要能像浏览器一样滑：先确认这块窗真的收得到触摸（收不到就查窗口层级，
+        // 别在页面里瞎找）。只打 DOWN/UP，不刷屏。
+        frame.setOnTouchListener((v, e) -> {
+            int a = e.getActionMasked();
+            if (a == android.view.MotionEvent.ACTION_DOWN || a == android.view.MotionEvent.ACTION_UP) {
+                Log.i(TAG, "pane touch " + (a == android.view.MotionEvent.ACTION_DOWN ? "DOWN" : "UP")
+                        + " @" + (int) e.getRawX() + "," + (int) e.getRawY());
+            }
+            return false;
+        });
 
         lp = new WindowManager.LayoutParams();
         lp.type = Build.VERSION.SDK_INT >= 26
@@ -248,6 +270,9 @@ final class WebChatPane {
                 : WindowManager.LayoutParams.TYPE_PHONE;
         lp.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                // 注意：**不要**加 FLAG_LAYOUT_IN_SCREEN。文字窗/玻璃窗都是 overlay，坐标原点
+                // 同样在状态栏下面（系统统一 +90px）；单独给网页加这个 flag 会让它比玻璃高 90px，
+                // 跑到玻璃外面去。三者必须用同一套坐标系，网页才正好盖在"写字那块矩形"上。
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         lp.format = android.graphics.PixelFormat.TRANSLUCENT;
         lp.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
@@ -259,7 +284,6 @@ final class WebChatPane {
         loaded = true;
         final int gen = ++loadGen;
         final String sid = wantSid;
-        if (sid != null) resolveTitle(sid, gen);
         new Thread(new Runnable() {
             @Override public void run() {
                 String c0 = null;
@@ -280,7 +304,7 @@ final class WebChatPane {
                                 CookieManager.getInstance().flush();
                             }
                         } catch (Throwable t) { Log.w(TAG, "setCookie: " + t); }
-                        Log.i(TAG, "load " + url + (wantTitle == null ? "" : " → 「" + wantTitle + "」"));
+                        Log.i(TAG, "load " + url + (sid == null ? "" : " sid=" + sid));
                         web.loadUrl(url);
                     }
                 });
@@ -288,50 +312,38 @@ final class WebChatPane {
         }, "pane-load").start();
     }
 
-    // ── 定位到那条会话 ────────────────────────────────────────────────────
+    // ── 页面内控制器：装一次，之后只喂 session id ─────────────────────────
 
-    private void scheduleOpen() {
-        if (wantTitle == null) {
-            // 知道是哪条会话（有 sid）就等标题 —— 绝不拿"最近那条"顶替，否则玻璃里会开错对话。
-            if (wantSid != null) resolveTitle(wantSid, loadGen);
-            else resolveLatest();
-            return;
-        }
-        if (hit || attempt >= OPEN_AT.length) {
-            if (!hit) Log.i(TAG, "没找到「" + wantTitle + "」，停在 DSH 首页");
-            return;
-        }
-        long delay = attempt == 0 ? OPEN_AT[0] : OPEN_AT[attempt] - OPEN_AT[attempt - 1];
-        attempt++;
-        web.postDelayed(new Runnable() {
-            @Override public void run() { runOpen(); }
-        }, Math.max(150, delay));
-    }
-
-    private void runOpen() {
-        if (web == null || wantTitle == null || hit) return;
-        String js = OPEN_SESSION_JS.replace("__WANT__", org.json.JSONObject.quote(wantTitle));
-        web.evaluateJavascript(js, value -> {
-            Log.i(TAG, "open-session #" + attempt + " → " + value);
-            if (value != null && value.contains("hit")) {
-                hit = true;
-                sessionId = wantSid;
-                scrollToEndSoon();
-                verifyOpen();
-            } else {
-                scheduleOpen();
-            }
+    private void installController() {
+        if (web == null) return;
+        web.evaluateJavascript(WebChatJs.CONTROLLER_JS, v -> {
+            controllerReady = true;
+            Log.i(TAG, "controller " + v);
+            applyZoom(lastZoom);            // 页面刚加载：把设置里的缩放补上
+            if (wantSid == null) resolveLatest();
+            else applySession();
+            logStatusSoon(2500);
+            logStatusSoon(7000);
         });
     }
 
-    /**
-     * 不知道是哪条会话时：**直接开最近更新那条**。
-     * 球里那段回复十有八九就是它；开错了用户也能在网页里自己点。
-     */
+    private void applySession() {
+        if (web == null) return;
+        final String sid = wantSid;
+        if (sid == null) return;
+        sessionId = sid;
+        web.evaluateJavascript(WebChatJs.setSession(sid, true), v -> {
+            Log.i(TAG, "只显示这条会话的对话列 → " + v);
+            web.postDelayed(new Runnable() {
+                @Override public void run() { scrollToBottom(); }
+            }, 600);
+            logStatusSoon(3000);
+        });
+    }
+
+    /** 不知道是哪条会话时：打开**最近更新**那条（写进 wantSid，之后一样走精确点击）。 */
     private void resolveLatest() {
-        if (latestTried || web == null) return;
-        latestTried = true;
-        final int gen = loadGen;
+        if (web == null) return;
         new Thread(new Runnable() {
             @Override public void run() {
                 String id = null, title = null;
@@ -347,72 +359,43 @@ final class WebChatPane {
                 android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
                 h.post(new Runnable() {
                     @Override public void run() {
-                        if (gen != loadGen || web == null) return;
+                        if (web == null) return;
                         wantSid = fi;
-                        wantTitle = ft;
-                        attempt = 0;
-                        hit = false;
-                        resetPageState();
-                        scheduleOpen();
+                        applySession();
                     }
                 });
             }
         }, "pane-latest").start();
     }
 
-    /**
-     * 点完再看一眼：对话区到底开没开（`data-conversation-*` 是 DSH 前端对话区的标记）。
-     * 没开就清掉"点过了"的标记再试一次 —— 光看 click 有没有派发出去不算数。
-     */
-    private void verifyOpen() {
+    private void scrollToBottom() {
+        if (web == null) return;
+        web.evaluateJavascript("window.__dshWc&&window.__dshWc.scrollBottom()", null);
+    }
+
+    /** 调试：把页面里的状态打在日志里（玻璃里到底显示的是哪条会话、有没有聚焦到列）。 */
+    private void logStatusSoon(long delayMs) {
         if (web == null) return;
         web.postDelayed(new Runnable() {
             @Override public void run() {
-                if (web == null || !hit) return;
-                web.evaluateJavascript(VERIFY_JS, v -> {
-                    Log.i(TAG, "verify → " + v);
-                    boolean open = v != null && v.contains("open");
-                    if (open) return;
-                    if (verifyFails++ >= 2) {
-                        Log.w(TAG, "对话区一直没开，停在 DSH 首页（用户可自己点）");
-                        return;
-                    }
-                    hit = false;
-                    sessionId = null;
-                    resetPageState();
-                    scheduleOpen();
-                });
+                if (web == null) return;
+                web.evaluateJavascript(WebChatJs.STATUS_JS,
+                        v -> Log.i(TAG, "status → " + v));
             }
-        }, 1200);
+        }, delayMs);
     }
 
-    private static final String VERIFY_JS =
-            "(function(){var n=document.querySelectorAll("
-          + "'[data-conversation-region],[data-conversation-scroll],[data-conversation-session]').length;"
-          + "var t=(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,70);"
-          + "return (n>0?'open':'closed')+'#'+n+':'+t;})()";
-
-    private void resetPageState() {
-        if (web == null) return;
-        web.evaluateJavascript(
-                "window.__dshWcDone=0;window.__dshWcSidebar=0;", null);
-    }
-
-    /** 打开后 / 每次都把对话滚到最新那一头（玻璃里只能看到一屏）。 */
-    private void scrollToEndSoon() {
-        if (web == null) return;
-        web.postDelayed(new Runnable() {
-            @Override public void run() {
-                web.evaluateJavascript(
-                        "(function(){var els=document.querySelectorAll('[data-conversation-scroll]');"
-                      + "for(var i=0;i<els.length;i++){els[i].scrollTop=els[i].scrollHeight;}"
-                      + "window.scrollTo(0,document.body.scrollHeight);return 'scroll';})()", null);
-            }
-        }, 450);
+    /** 调试直通：`am startservice … --es wc_js "…"` 在网页里跑一段 JS 并把结果打进日志。 */
+    void debugEval(String js) {
+        if (web == null || js == null) return;
+        web.evaluateJavascript(js, v -> Log.i(TAG, "wc_js → " + v));
     }
 
     void destroy() {
         shown = false;
+        controllerReady = false;
+        sessionId = null;
+        wantSid = null;
         if (frame != null) {
             try { if (added) wm.removeView(frame); } catch (Throwable ignored) { }
             frame = null;
@@ -426,7 +409,7 @@ final class WebChatPane {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    //  下面两块和 WebChatActivity 里的是同一套（主文档注入兼容层 / 按标题点会话）
+    //  Chrome 116 兼容层（和 WebChatActivity 里的是同一段）
     // ══════════════════════════════════════════════════════════════════════
 
     /** 主文档自己取（带 cookie），在 <head> 后插 shim —— 保证先于页面脚本执行。 */
@@ -443,11 +426,7 @@ final class WebChatPane {
             return null;
         }
         String html = new String(readAll(c.getInputStream()), "utf-8");
-        // 玻璃里那块很小：DSH 页面自己的输入条占掉一大截，而这块窗**不抢焦点**（打不了字），
-        // 留着只会白占地方 —— 藏掉；打字走球自己那条输入行（发出去网页会实时收到）。
-        String css = "<style>[data-conversation-composer-overlay],[data-composer-overlay]"
-                + "{display:none!important}</style>";
-        String shim = css + "<script>" + SHIM_JS + "</script>";
+        String shim = "<script>" + SHIM_JS + "</script>";
         int head = html.indexOf("<head");
         int at = head < 0 ? -1 : html.indexOf('>', head);
         if (at > 0) html = html.substring(0, at + 1) + shim + html.substring(at + 1);
@@ -486,41 +465,4 @@ final class WebChatPane {
           + "try{if(!Array.prototype.with){"
           + "  Array.prototype.with=function(i,v){var a=this.slice();a[i<0?a.length+i:i]=v;return a;};}}catch(e){}"
           + "})();";
-
-    private static final String OPEN_SESSION_JS =
-            "(function(){try{"
-          + "if(window.__dshWcDone)return 'done';"
-          + "var want=__WANT__;if(!want)return 'nowant';"
-          + "var norm=function(s){return (s||'').replace(/\\s+/g,'').toLowerCase();};"
-          + "var w=norm(want);if(!w)return 'nowant';"
-          + "var vis=function(e){var r=e.getBoundingClientRect();if(r.width<4||r.height<4)return false;"
-          + "if(r.bottom<0||r.top>innerHeight)return false;var s=getComputedStyle(e);"
-          + "return s.visibility!=='hidden'&&s.display!=='none'&&+s.opacity>0.05;};"
-          + "var all=document.querySelectorAll('body *'),best=null,score=-1;"
-          + "for(var i=0;i<all.length;i++){var e=all[i];if(!vis(e))continue;"
-          + "  var t=norm(e.textContent);if(!t||t.length<w.length||t.indexOf(w)<0)continue;"
-          + "  var r=e.getBoundingClientRect();"
-          + "  if(r.height>140||r.width>innerWidth*0.92)continue;"
-          + "  var sc=(t===w?100:60)-Math.min(t.length-w.length,40);"
-          + "  if(r.left<innerWidth*0.5)sc+=30;"
-          + "  if(!e.children.length)sc+=10;"
-          + "  if(sc>score){score=sc;best=e;} }"
-          + "if(best){var t2=best;"
-          + "  for(var d=0;d<5&&t2&&t2!==document.body;d++){var cs=getComputedStyle(t2);"
-          + "    if(cs.cursor==='pointer'||t2.tagName==='BUTTON'||t2.tagName==='A'"
-          + "       ||t2.getAttribute('role')||t2.onclick)break;t2=t2.parentElement;}"
-          + "  if(!t2||t2===document.body)t2=best;"
-          + "  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(ev){"
-          + "    try{t2.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));}catch(e){}});"
-          + "  try{t2.click();}catch(e){}"
-          + "  window.__dshWcDone=1;return 'hit:'+score+':'+best.tagName;}"
-          + "if(!window.__dshWcSidebar){"
-          + "  var ctl=null,els=document.querySelectorAll('button,[role=button],a,[aria-label],[title]');"
-          + "  for(var j=0;j<els.length;j++){var q=els[j];if(!vis(q))continue;"
-          + "    var lab=(q.getAttribute('aria-label')||'')+' '+(q.getAttribute('title')||'');"
-          + "    if(/侧边栏|sidebar/i.test(lab)&&!/账号|账户|account/i.test(lab)){"
-          + "      var rr=q.getBoundingClientRect();if(rr.width<90&&rr.height<90){ctl=q;break;}}}"
-          + "  if(ctl){window.__dshWcSidebar=1;ctl.click();return 'expand';}}"
-          + "return 'miss';"
-          + "}catch(err){return 'err:'+err;}})()";
 }

@@ -42,6 +42,8 @@ public class PowerBallTrampolineActivity extends Activity {
             if (test != null) i.putExtra("test_reply", test);
             String testRaw = it == null ? null : it.getStringExtra("test_reply_raw");
             if (testRaw != null) i.putExtra("test_reply_raw", testRaw);
+            String wcJs = it == null ? null : it.getStringExtra("wc_js");
+            if (wcJs != null) i.putExtra("wc_js", wcJs);
             if ("stop".equals(what)) {
                 startService(i);
             } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {

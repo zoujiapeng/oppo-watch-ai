@@ -6667,7 +6667,21 @@ public class FloatingBallService extends Service {
         }
         syncSiriTouchLayer();
         // ★ 2026-11-10 实验：玻璃里盖上 DSH 网页（位置就是文字视口那块矩形，玻璃大小不变）
-        syncWebChatPane(x, y, tw, th);
+        // 网页体积（设置页「网页体积」60~130%）：在**玻璃自己的可见范围**里缩放，底边钉住不动；
+        // 100% = 和文字视口一模一样。玻璃窗一个像素都不动。
+        int wx = x, wy = y, ww = tw, wh = th;
+        int boxPct = Math.max(60, Math.min(130, prefs().getInt("web_chat_box", 100)));
+        if (boxPct != 100) {
+            float k = boxPct / 100f;
+            int maxW = Math.max(tw, Math.round(winW - 2f * m));
+            int maxH = Math.max(th, Math.round(ballBottom - ballTop - 2f * dp(8)));
+            ww = Math.min(maxW, Math.round(tw * k));
+            wh = Math.min(maxH, Math.round(th * k));
+            wx = Math.round(sx - ww / 2f);
+            wx = Math.max(0, Math.min(Math.max(0, screenW - ww), wx));
+            wy = (y + sysDy + th) - wh - sysDy;      // 底边不动：往上长
+        }
+        syncWebChatPane(wx, wy, ww, wh);
         // ★ 2026-11-08：胶囊状态（球还没长成方形态 / 正在缩回）里不许露字。
         //   可见度跟着**画出来的**几何走 → 球一缩成胶囊，字立刻淡没（不是等下一次测量）。
         float sq = squareDrawn01();
@@ -6989,6 +7003,33 @@ public class FloatingBallService extends Service {
             main.postDelayed(new Runnable() {
                 @Override public void run() { applySiriText(testRaw); }
             }, 1800);
+        }
+        // 调试直通（网页实验）：`--es wc_js "…"` 在玻璃里的 DSH 网页上跑一段 JS，把结果打进日志。
+        // 用来核对「网页里到底是哪条会话、有没有只显示对话列」，不用瞎猜。
+        String wcJs0 = intent == null ? null : intent.getStringExtra("wc_js");
+        if (wcJs0 != null && wcJs0.startsWith("@")) {          // `--es wc_js @/sdcard/x.js` 从文件读
+            try {
+                java.io.File f = new java.io.File(wcJs0.substring(1));
+                byte[] buf = new byte[(int) f.length()];
+                try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                    int off = 0;
+                    while (off < buf.length) {
+                        int n = in.read(buf, off, buf.length - off);
+                        if (n <= 0) break;
+                        off += n;
+                    }
+                }
+                wcJs0 = new String(buf, "utf-8");
+            } catch (Throwable t) {
+                Log.w("FloatingBall", "wc_js 读文件失败: " + t);
+                wcJs0 = null;
+            }
+        }
+        final String wcJs = wcJs0;
+        if (wcJs != null) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() { if (webPane != null) webPane.debugEval(wcJs); }
+            }, 9000);
         }
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         if (glView == null) setupOverlay();

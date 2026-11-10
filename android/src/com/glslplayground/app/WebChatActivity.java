@@ -40,9 +40,10 @@ import java.util.Map;
  *  · 这个 Activity 就是一块全屏 WebView，加载本机 DSH 的 Web 前端（`DshApi.endpoint()`）；
  *  · 认证不另起一套：向 {@link DshApi#cookie()} 要那条和 RPC 共用的签名 cookie，
  *    塞进 WebView 的 CookieManager（和 {@link DshSettingsActivity} 完全一个路子）；
- *  · 从球里点某条会话进来时带 {@code session_id / session_title}：页面加载完后
- *    在左栏按标题找那一行点一下（DSH 前端没有 URL 级的路由，只能这样"点进去"）；
- *    连续几次找不到就老实停在 DSH 首页，让用户自己点 —— 绝不假装已经进去了；
+ *  · 从球里点某条会话进来时带 {@code session_id}：页面加载完后由页面内控制器
+ *    （{@link WebChatJs}）点左栏那一行 {@code [data-row-key="session:<id>"]}，
+ *    再核对对话区 {@code data-conversation-session} 是不是这个 id —— 精确到会话，
+ *    不按标题猜、也不拿"最近那条"顶替；找不到就停在 DSH 首页，让用户自己点；
  *  · 打开期间把悬浮球那一套界面藏起来（{@code FloatingBallService.setUiHidden}），
  *    退出（返回键 / 边缘手势）时原样恢复（原本就是藏着的就不动）。
  *
@@ -58,9 +59,6 @@ public class WebChatActivity extends Activity {
     /** 那条会话的标题 —— 前端没有路由，只能按标题在左栏里找。 */
     public static final String EXTRA_SESSION_TITLE = "session_title";
 
-    /** 页面加载完后按这些时刻去试着点开会话（毫秒）。前端是异步渲染，一次点不中很正常。 */
-    private static final long[] OPEN_ATTEMPTS_MS = {350, 900, 1700, 2800, 4200, 6000};
-
     private WebView web;
     private TextView tip;
     private FrameLayout root;
@@ -68,13 +66,12 @@ public class WebChatActivity extends Activity {
     private String base;
     /** 和 RPC 共用的签名 cookie —— 主文档是我们自己带 cookie 取回来再注入兼容层的。 */
     private volatile String authCookie;
-    private String wantTitle;
     private String wantSid;
+    /** 页面内控制器（{@link WebChatJs#CONTROLLER_JS}）装好没有。 */
+    private boolean controllerReady;
 
     /** 打开前那一套悬浮界面是不是本来就藏着（藏着就不该在退出时把它放出来）。 */
     private boolean uiWasHidden;
-    private int attempt;             // 当前第几次尝试点会话
-    private boolean hit;             // 已经点中过
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -93,13 +90,7 @@ public class WebChatActivity extends Activity {
 
         Intent it = getIntent();
         wantSid = it == null ? null : it.getStringExtra(EXTRA_SESSION_ID);
-        wantTitle = it == null ? null : it.getStringExtra(EXTRA_SESSION_TITLE);
-        if (wantTitle != null) wantTitle = wantTitle.trim();
-        if (wantTitle == null || wantTitle.isEmpty() || "null".equals(wantTitle)
-                || "新会话".equals(wantTitle) || "对话".equals(wantTitle)) {
-            // 这些不是 DSH 里真有的标题：新会话还没标题，硬找只会点到别的会话。
-            wantTitle = null;
-        }
+        if (wantSid != null && wantSid.trim().isEmpty()) wantSid = null;
 
         root = new FrameLayout(this);
         root.setBackgroundColor(0xFF0B0B0D);
@@ -134,7 +125,7 @@ public class WebChatActivity extends Activity {
             @Override public void onPageFinished(WebView v, String url) {
                 hideTip();
                 Log.i(TAG, "page finished: " + url + " title=" + v.getTitle());
-                scheduleOpenAttempt();
+                installController();
             }
 
             @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
@@ -296,91 +287,37 @@ public class WebChatActivity extends Activity {
         super.onNewIntent(it);
         setIntent(it);
         String sid = it == null ? null : it.getStringExtra(EXTRA_SESSION_ID);
-        String title = it == null ? null : it.getStringExtra(EXTRA_SESSION_TITLE);
-        if (sid == null || sid.isEmpty()) return;
+        if (sid == null || sid.trim().isEmpty()) return;
         wantSid = sid;
-        wantTitle = title == null ? null : title.trim();
-        if (wantTitle != null && (wantTitle.isEmpty() || "null".equals(wantTitle)
-                || "新会话".equals(wantTitle) || "对话".equals(wantTitle))) wantTitle = null;
-        attempt = 0;
-        hit = false;
-        if (web != null) web.evaluateJavascript("window.__dshWcDone=0;window.__dshWcSidebar=0;", null);
-        scheduleOpenAttempt();
+        if (controllerReady) applySession();
     }
 
-    // ── 会话定位：前端没有 URL 路由，只能"按标题点左栏那一行" ──────────────
+    // ── 会话定位：按 session id 精确点左栏那一行（页面内控制器负责）────────
 
-    private void scheduleOpenAttempt() {
-        if (wantTitle == null || hit) return;
-        if (attempt >= OPEN_ATTEMPTS_MS.length) {
-            Log.i(TAG, "没能在左栏找到「" + wantTitle + "」，停在 DSH 首页");
-            Toast.makeText(this, "已打开 DSH；没找到会话「" + wantTitle + "」，请在左侧点它",
-                    Toast.LENGTH_LONG).show();
-            return;
-        }
-        long delay = attempt == 0 ? OPEN_ATTEMPTS_MS[0] : OPEN_ATTEMPTS_MS[attempt] - OPEN_ATTEMPTS_MS[attempt - 1];
-        attempt++;
-        web.postDelayed(new Runnable() {
-            @Override public void run() { runOpenScript(); }
-        }, Math.max(120, delay));
-    }
-
-    private void runOpenScript() {
-        if (web == null || wantTitle == null || hit) return;
-        String js = OPEN_SESSION_JS.replace("__WANT__", org.json.JSONObject.quote(wantTitle));
-        web.evaluateJavascript(js, value -> {
-            Log.i(TAG, "open-session #" + attempt + " → " + value);
-            if (value != null && value.contains("hit")) {
-                hit = true;
-                hideTip();
-            } else {
-                scheduleOpenAttempt();
-            }
+    private void installController() {
+        if (web == null) return;
+        web.evaluateJavascript(WebChatJs.CONTROLLER_JS, v -> {
+            controllerReady = true;
+            Log.i(TAG, "controller " + v);
+            int z = getSharedPreferences("watch", MODE_PRIVATE).getInt("web_chat_zoom", 100);
+            web.evaluateJavascript("window.__dshWc&&window.__dshWc.setZoom(" + z + ")", null);
+            applySession();
         });
     }
 
-    /**
-     * 在页面里按标题找会话行并点开。
-     *  · 只认左半屏、高度合理的元素（左栏会话行），标题匹配越长越好；
-     *  · 找不到就先点一次"展开/显示侧栏"那个控件（窄屏默认收起），下一轮再找；
-     *  · 返回 'hit'（点了）/ 'expand'（展开了侧栏）/ 'miss' / 'nowant'。
-     */
-    private static final String OPEN_SESSION_JS =
-            "(function(){try{"
-          + "if(window.__dshWcDone)return 'done';"
-          + "var want=__WANT__;if(!want)return 'nowant';"
-          + "var norm=function(s){return (s||'').replace(/\\s+/g,'').toLowerCase();};"
-          + "var w=norm(want);if(!w)return 'nowant';"
-          + "var vis=function(e){var r=e.getBoundingClientRect();if(r.width<4||r.height<4)return false;"
-          + "if(r.bottom<0||r.top>innerHeight)return false;var s=getComputedStyle(e);"
-          + "return s.visibility!=='hidden'&&s.display!=='none'&&+s.opacity>0.05;};"
-          + "var all=document.querySelectorAll('body *'),best=null,score=-1;"
-          + "for(var i=0;i<all.length;i++){var e=all[i];if(!vis(e))continue;"
-          + "  var t=norm(e.textContent);if(!t||t.length<w.length||t.indexOf(w)<0)continue;"
-          + "  var r=e.getBoundingClientRect();"
-          + "  if(r.height>140||r.width>innerWidth*0.92)continue;"
-          + "  var sc=(t===w?100:60)-Math.min(t.length-w.length,40);"
-          + "  if(r.left<innerWidth*0.5)sc+=30;"
-          + "  if(!e.children.length)sc+=10;"
-          + "  if(sc>score){score=sc;best=e;} }"
-          + "if(best){var t2=best;"
-          + "  for(var d=0;d<5&&t2&&t2!==document.body;d++){var cs=getComputedStyle(t2);"
-          + "    if(cs.cursor==='pointer'||t2.tagName==='BUTTON'||t2.tagName==='A'"
-          + "       ||t2.getAttribute('role')||t2.onclick)break;t2=t2.parentElement;}"
-          + "  if(!t2||t2===document.body)t2=best;"
-          + "  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(ev){"
-          + "    try{t2.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));}catch(e){}});"
-          + "  try{t2.click();}catch(e){}"
-          + "  window.__dshWcDone=1;return 'hit:'+score+':'+best.tagName;}"
-          + "if(!window.__dshWcSidebar){"
-          + "  var ctl=null,els=document.querySelectorAll('button,[role=button],a,[aria-label],[title]');"
-          + "  for(var j=0;j<els.length;j++){var q=els[j];if(!vis(q))continue;"
-          + "    var lab=(q.getAttribute('aria-label')||'')+' '+(q.getAttribute('title')||'');"
-          + "    if(/侧边栏|sidebar/i.test(lab)&&!/账号|账户|account/i.test(lab)){"
-          + "      var rr=q.getBoundingClientRect();if(rr.width<90&&rr.height<90){ctl=q;break;}}}"
-          + "  if(ctl){window.__dshWcSidebar=1;ctl.click();return 'expand';}}"
-          + "return 'miss';"
-          + "}catch(err){return 'err:'+err;}})()";
+    private void applySession() {
+        if (web == null || wantSid == null) return;
+        web.evaluateJavascript(WebChatJs.setSession(wantSid, false), v ->
+                Log.i(TAG, "打开会话 " + wantSid + " → " + v));
+        web.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (web == null) return;
+                web.evaluateJavascript(WebChatJs.STATUS_JS, v -> Log.i(TAG, "status → " + v));
+            }
+        }, 3500);
+    }
+
+    // ── 会话定位：前端没有 URL 路由，只能"按标题点左栏那一行" ──────────────
 
     private void hideTip() {
         if (tip != null) tip.setVisibility(View.GONE);

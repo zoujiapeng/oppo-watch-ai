@@ -663,6 +663,32 @@ public class WatchBridge {
                 .edit().putBoolean("web_chat", v).apply();
     }
 
+    /** 玻璃里那块网页的**缩放**（%，70~160；浏览器式缩放：布局视口跟着变，内容自己重排）。 */
+    @JavascriptInterface
+    public int getWebChatZoom() {
+        return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getInt("web_chat_zoom", 100);
+    }
+
+    @JavascriptInterface
+    public void setWebChatZoom(final int v) {
+        act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .edit().putInt("web_chat_zoom", Math.max(70, Math.min(160, v))).apply();
+    }
+
+    /** 那块网页的**体积**（%，60~130；100 = 文字视口，>100 往玻璃上方的黑区里长，底边不动）。 */
+    @JavascriptInterface
+    public int getWebChatBox() {
+        return act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .getInt("web_chat_box", 100);
+    }
+
+    @JavascriptInterface
+    public void setWebChatBox(final int v) {
+        act.getSharedPreferences("watch", Context.MODE_PRIVATE)
+                .edit().putInt("web_chat_box", Math.max(60, Math.min(130, v))).apply();
+    }
+
     /** 设置页直接开一次网页聊天（不带会话 = DSH 前端首页）。 */
     @JavascriptInterface
     public void openWebChatPage() {
